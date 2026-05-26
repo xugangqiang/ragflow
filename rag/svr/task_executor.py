@@ -94,6 +94,16 @@ from rag.graphrag.utils import chat_limiter
 from common.signal_utils import start_tracemalloc_and_snapshot, stop_tracemalloc
 from common.exceptions import TaskCanceledException
 from common.asyncio_utils import LoopLocalSemaphore
+from rag.svr.task_executor_limiter import (
+    task_limiter,
+    chunk_limiter,
+    embed_limiter,
+    minio_limiter,
+    kg_limiter,
+    MAX_CONCURRENT_TASKS,
+    MAX_CONCURRENT_CHUNK_BUILDERS,
+    MAX_CONCURRENT_MINIO,
+)
 from common import settings
 from common.constants import PAGERANK_FLD, TAG_FLD, SVR_CONSUMER_GROUP_NAME
 from rag.utils.table_es_metadata import (
@@ -145,14 +155,6 @@ FAILED_TASKS = 0
 
 CURRENT_TASKS = {}
 
-MAX_CONCURRENT_TASKS = int(os.environ.get('MAX_CONCURRENT_TASKS', "5"))
-MAX_CONCURRENT_CHUNK_BUILDERS = int(os.environ.get('MAX_CONCURRENT_CHUNK_BUILDERS', "1"))
-MAX_CONCURRENT_MINIO = int(os.environ.get('MAX_CONCURRENT_MINIO', '10'))
-task_limiter = LoopLocalSemaphore(MAX_CONCURRENT_TASKS)
-chunk_limiter = LoopLocalSemaphore(MAX_CONCURRENT_CHUNK_BUILDERS)
-embed_limiter = LoopLocalSemaphore(MAX_CONCURRENT_CHUNK_BUILDERS)
-minio_limiter = LoopLocalSemaphore(MAX_CONCURRENT_MINIO)
-kg_limiter = LoopLocalSemaphore(2)
 WORKER_HEARTBEAT_TIMEOUT = int(os.environ.get('WORKER_HEARTBEAT_TIMEOUT', '120'))
 stop_event = threading.Event()
 
