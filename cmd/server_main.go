@@ -40,6 +40,7 @@ import (
 	"ragflow/internal/dao"
 	"ragflow/internal/engine"
 	"ragflow/internal/handler"
+	"ragflow/internal/service/chunk"
 	"ragflow/internal/router"
 	"ragflow/internal/service"
 	"ragflow/internal/service/nlp"
@@ -176,7 +177,7 @@ func startServer(config *server.Config) {
 	datasetsService := service.NewDatasetService()
 	knowledgebaseService := service.NewKnowledgebaseService()
 	metadataService := service.NewMetadataService()
-	chunkService := service.NewChunkService()
+	chunkService := chunk.NewChunkService()
 	llmService := service.NewLLMService()
 	tenantService := service.NewTenantService()
 	chatService := service.NewChatService()
