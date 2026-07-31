@@ -865,6 +865,7 @@ export default {
       maxClusterTip: '最多可创建的聚类数。',
       entityTypes: '实体类型',
       compilationTemplate: '算子',
+      createTemplate: '创建模板',
       scopeFile: '文件',
       pageRank: '页面排名',
       pageRankTip: `知识库检索时，你可以为特定知识库设置较高的 PageRank 分数，该知识库中匹配文本块的混合相似度得分会自动叠加 PageRank 分数，从而提升排序权重。详见 https://ragflow.io/docs/dev/set_page_rank。`,
@@ -1590,6 +1591,11 @@ NER：使用 spaCy NER 和基于规则的关键词提取来抽取实体和关系
       rechunkByTreeLeaves: '按树叶重新分块',
       rechunkByTreeLeavesTip:
         '将每个叶簇的源数据块合并为单个替换数据块。原始数据块保留但标记为不可检索。每个分组最多只能有一个树模板启用此功能。',
+      rechunkInput: '重新切分 Parser 输出',
+      rechunkInputTip: '根据知识编译任务，由 LLM 决定 chunk 边界。',
+      rechunkRules: 'Rechunk 规则',
+      rechunkRulesPlaceholder:
+        '描述此知识编译任务下，LLM 应如何合并和划分源 chunk。',
       jsonPreview: 'JSON 预览',
       processFlow: '流程视图',
       processFlowComingSoon: '流程视图预览即将到来',
@@ -3129,6 +3135,7 @@ Tokenizer 会根据所选方式将内容存储为对应的数据结构。`,
       bulgarian: '保加利亚语',
       arabic: '阿拉伯语',
       turkish: '土耳其语',
+      dutch: '荷兰语',
     },
     pagination: {
       total: '总共 {{total}} 条',
