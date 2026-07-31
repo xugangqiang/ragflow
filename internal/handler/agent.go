@@ -17,43 +17,99 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
-	"net/http"
 	"ragflow/internal/engine/redis"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
+	"go.uber.org/zap"
 
+	"ragflow/internal/agent/canvas"
 	"ragflow/internal/common"
 	"ragflow/internal/dao"
 	"ragflow/internal/entity"
 	"ragflow/internal/service"
+	"ragflow/internal/service/file"
+	"ragflow/internal/utility"
+
+	dslpkg "ragflow/internal/agent/dsl"
 )
 
 // AgentHandler agent handler
 // fileUploader is the subset of FileService used by agent handlers.
+//
+// The full FileService also has UploadFile, but it is consumed by
+// the FileHandler (handler/file.go), not by any agent handler, so
+// the interface deliberately does NOT list it. (Code review CR1.)
 type agentFileService interface {
-	UploadFile(tenantID, parentID string, files []*multipart.FileHeader) ([]map[string]interface{}, error)
-	DownloadAgentFile(tenantID, location string) ([]byte, error)
+	DownloadAgentFile(ctx context.Context, tenantID, location string) ([]byte, error)
+	// UploadInfos stores raw bytes in the per-user downloads bucket and
+	// returns lightweight descriptors.
+	UploadInfos(ctx context.Context, userID string, files []*multipart.FileHeader) ([]map[string]interface{}, error)
+	// UploadFromURL downloads a remote file (with SSRF protection) and
+	// stores it as an info blob.
+	UploadFromURL(ctx context.Context, tenantID, rawURL string) (map[string]interface{}, error)
+}
+
+// chatAgentService is the subset of AgentService used by the chat-completion
+// endpoints (AgentChatCompletions, RunAgent). Kept as a separate interface so
+// handler tests can inject a fake RunAgent without standing up the full
+// AgentService (DB DAOs, eino runner, etc.). The production wiring in
+// NewAgentHandler assigns the concrete *service.AgentService — which
+// satisfies this interface because its RunAgent signature matches.
+type chatAgentService interface {
+	RunAgent(ctx context.Context, userID, canvasID, sessionID, version string, userInput any, files []map[string]interface{}) (<-chan canvas.RunEvent, error)
+}
+
+// documentAccessChecker is the minimal surface RerunAgent needs
+// from DocumentService. Defined as an interface (instead of taking
+// the concrete *service.DocumentService) so handler tests can
+// inject a deny-all stub without spinning up the full service
+// (DB DAOs, storage clients, …). The production *service.DocumentService
+// satisfies this interface because its Accessible signature
+// matches.
+type documentAccessChecker interface {
+	Accessible(docID, userID string) bool
 }
 
 // AgentHandler agent handler
 type AgentHandler struct {
 	agentService *service.AgentService
+	chatRunner   chatAgentService
 	fileService  agentFileService
+	loader       canvasLoader
+	// documentService is optional. Wired in cmd/server_main.go after
+	// NewAgentHandler (which doesn't take it to preserve the existing
+	// test-friendly signature). When nil, RerunAgent falls back to
+	// tenant-only authorization (i.e. cannot verify the doc, so the
+	// check is skipped — same shape as the pre-port behaviour).
+	documentService documentAccessChecker
+}
+
+// WithDocumentService injects the document service used by
+// RerunAgent to enforce DocumentService.accessible(docID, tenantID)
+// before re-running. Returns the receiver for chaining in
+// server_main wiring.
+func (h *AgentHandler) WithDocumentService(s documentAccessChecker) *AgentHandler {
+	h.documentService = s
+	return h
 }
 
 // NewAgentHandler create agent handler
 
-func NewAgentHandler(agentService *service.AgentService, fileService *service.FileService) *AgentHandler {
+func NewAgentHandler(agentService *service.AgentService, fileService *file.FileService) *AgentHandler {
 	return &AgentHandler{
 		agentService: agentService,
+		chatRunner:   agentService,
 		fileService:  fileService,
+		loader:       agentService,
 	}
 }
 
@@ -74,12 +130,13 @@ func NewAgentHandler(agentService *service.AgentService, fileService *service.Fi
 func (h *AgentHandler) ListAgents(c *gin.Context) {
 	user, errorCode, errorMessage := GetUser(c)
 	if errorCode != common.CodeSuccess {
-		jsonError(c, errorCode, errorMessage)
+		common.ErrorWithCode(c, errorCode, errorMessage)
 		return
 	}
 
 	keywords := c.Query("keywords")
 	canvasCategory := c.Query("canvas_category")
+	canvasType := c.Query("canvas_type")
 
 	page := 0
 	if v := c.Query("page"); v != "" {
@@ -111,8 +168,19 @@ func (h *AgentHandler) ListAgents(c *gin.Context) {
 			}
 		}
 	}
+	var tags []string
+	if raw := c.Query("tags"); raw != "" {
+		for _, tag := range strings.Split(raw, ",") {
+			tag = strings.TrimSpace(tag)
+			if tag != "" {
+				tags = append(tags, tag)
+			}
+		}
+	}
+	ctx := c.Request.Context()
 
 	result, code, err := h.agentService.ListAgents(
+		ctx,
 		user.ID,
 		keywords,
 		page,
@@ -121,35 +189,33 @@ func (h *AgentHandler) ListAgents(c *gin.Context) {
 		desc,
 		ownerIDs,
 		canvasCategory,
+		canvasType,
+		tags,
 	)
 	if err != nil {
-		c.JSON(http.StatusOK, gin.H{
-			"code":    code,
-			"data":    false,
-			"message": err.Error(),
-		})
+		common.ResponseWithCodeData(c, code, false, err.Error())
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"code":    common.CodeSuccess,
-		"data":    result,
-		"message": "success",
-	})
+	common.SuccessWithData(c, result, "success")
 }
 
 // mapAgentError normalises service-layer errors onto the existing
 // {code, data, message} response envelope used by every other handler.
 //
-// Two distinct 103 messages mirror the Python agent API's two
-// decorators (api/apps/restful_apis/agent_api.py:74-100):
-//   - service.ErrAgentNotOwner  -> "Only the owner..."  (DELETE only)
-//   - dao.ErrUserCanvasNotFound -> "Make sure you have permission..."  (PUT/GET/run/...)
+// Four classes:
+//   - service.ErrAgentNotOwner  -> "Only the owner..."        (DELETE only, 103)
+//   - service.ErrAgentSessionBusy -> "session already running" (103)
+//   - dao.ErrUserCanvasNotFound -> "Make sure you have permission..."  (103)
+//   - service.ErrAgentStorageError -> "Internal storage error"  (500)
 //
-// Both surface as OPERATING_ERROR(103) so the front-end cannot use the
-// response code to enumerate other users' canvases (IDOR mitigation).
-// Everything else becomes CodeDataError so the front-end can surface
-// the message verbatim.
+// The first two surface as OPERATING_ERROR(103) so the front-end
+// cannot use the response code to enumerate other users' canvases
+// (IDOR mitigation). ErrAgentStorageError maps to SERVER_ERROR(500)
+// with a sanitized message — the raw DAO / DB error string MUST
+// NOT reach the client (DSNs, table names, gorm stack frames would
+// otherwise leak). Everything else becomes CodeDataError so the
+// front-end can surface the message verbatim.
 func mapAgentError(err error) (common.ErrorCode, string) {
 	if err == nil {
 		return common.CodeSuccess, ""
@@ -157,9 +223,15 @@ func mapAgentError(err error) (common.ErrorCode, string) {
 	if errors.Is(err, service.ErrAgentNotOwner) {
 		return common.CodeOperatingError, "Only the owner of the agent is authorized for this operation."
 	}
+	if errors.Is(err, service.ErrAgentSessionBusy) {
+		return common.CodeOperatingError, "This agent session is already running."
+	}
 	if errors.Is(err, dao.ErrUserCanvasNotFound) ||
 		errors.Is(err, dao.ErrUserCanvasVersionNotFound) {
 		return common.CodeOperatingError, "Make sure you have permission to access the agent."
+	}
+	if errors.Is(err, service.ErrAgentStorageError) {
+		return common.CodeServerError, "Internal storage error while accessing the agent."
 	}
 	return common.CodeDataError, err.Error()
 }
@@ -175,25 +247,21 @@ func mapAgentError(err error) (common.ErrorCode, string) {
 func (h *AgentHandler) CreateAgent(c *gin.Context) {
 	user, errorCode, errorMessage := GetUser(c)
 	if errorCode != common.CodeSuccess {
-		jsonError(c, errorCode, errorMessage)
+		common.ErrorWithCode(c, errorCode, errorMessage)
 		return
 	}
 	var req service.CreateAgentRequest
 	if err := c.ShouldBindJSON(&req); err != nil && !errors.Is(err, io.EOF) {
-		jsonError(c, common.CodeArgumentError, "Invalid request: "+err.Error())
+		common.ResponseWithCodeData(c, common.CodeArgumentError, nil, "Invalid request: "+err.Error())
 		return
 	}
 	req.UserID = user.ID
 	row, code, err := h.agentService.CreateAgent(c.Request.Context(), &req)
 	if err != nil {
-		jsonError(c, code, err.Error())
+		common.ErrorWithCode(c, code, err.Error())
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{
-		"code":    common.CodeSuccess,
-		"data":    row,
-		"message": "success",
-	})
+	common.SuccessWithData(c, row, "success")
 }
 
 // GetAgent returns one canvas by ID.
@@ -206,59 +274,81 @@ func (h *AgentHandler) CreateAgent(c *gin.Context) {
 func (h *AgentHandler) GetAgent(c *gin.Context) {
 	user, code, msg := GetUser(c)
 	if code != common.CodeSuccess {
-		jsonError(c, code, msg)
+		common.ResponseWithCodeData(c, code, nil, msg)
 		return
 	}
 	canvasID := c.Param("canvas_id")
 	row, err := h.agentService.GetAgent(c.Request.Context(), user.ID, canvasID)
 	if err != nil {
 		ec, em := mapAgentError(err)
-		jsonError(c, ec, em)
+		common.ResponseWithCodeData(c, ec, nil, em)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{
-		"code":    common.CodeSuccess,
-		"data":    row,
-		"message": "success",
-	})
+	// Defensive: any historical v1 / Go-v2-only row in user_canvas.dsl
+	// is rendered as a missing graph by the front-end. Normalize in
+	// place (NormalizeForCanvas is a no-op when graph.nodes is set) so
+	// the response is always renderable without a migration.
+	if row != nil {
+		row.DSL = dslpkg.NormalizeForCanvas(row.DSL)
+	}
+	// Attach last_publish_time so the front-end can render when the agent
+	// was last published (Python get_agent parity).
+	lastPublishTime, err := h.agentService.GetLastPublishTime(c.Request.Context(), canvasID)
+	if err != nil {
+		ec, em := mapAgentError(err)
+		common.ResponseWithCodeData(c, ec, nil, em)
+		return
+	}
+	common.SuccessWithData(c, &agentDetailResponse{UserCanvas: row, LastPublishTime: lastPublishTime}, "success")
+}
+
+// agentDetailResponse wraps the canvas row with derived fields that Python's
+// get_agent handler adds to the response.
+type agentDetailResponse struct {
+	*entity.UserCanvas
+	LastPublishTime *int64 `json:"last_publish_time,omitempty"`
 }
 
 // updateAgentRequest is the wire shape for PUT /api/v1/agents/:canvas_id.
-type updateAgentRequest struct {
-	DSL entity.JSONMap `json:"dsl"`
-}
+type updateAgentRequest map[string]interface{}
 
-// UpdateAgent writes a new draft DSL to the canvas (no version created).
-// @Summary Update Agent (Draft)
+// UpdateAgent applies a partial update to the canvas draft.
+// @Summary Update Agent
 // @Tags agents
 // @Accept json
 // @Produce json
 // @Param canvas_id path string true "canvas id"
-// @Param request body updateAgentRequest true "draft DSL payload"
+// @Param request body updateAgentRequest true "agent update payload"
 // @Success 200 {object} map[string]interface{}
 // @Router /api/v1/agents/{canvas_id} [put]
 func (h *AgentHandler) UpdateAgent(c *gin.Context) {
 	user, code, msg := GetUser(c)
 	if code != common.CodeSuccess {
-		jsonError(c, code, msg)
+		common.ResponseWithCodeData(c, code, nil, msg)
 		return
 	}
 	canvasID := c.Param("canvas_id")
 	var req updateAgentRequest
 	if err := c.ShouldBindJSON(&req); err != nil && !errors.Is(err, io.EOF) {
-		jsonError(c, common.CodeArgumentError, "Invalid request: "+err.Error())
+		common.ResponseWithCodeData(c, common.CodeArgumentError, nil, "Invalid request: "+err.Error())
 		return
 	}
-	if err := h.agentService.UpdateAgent(c.Request.Context(), user.ID, canvasID, req.DSL); err != nil {
+	if req == nil {
+		req = updateAgentRequest{}
+	}
+	if err := h.agentService.UpdateAgent(c.Request.Context(), user.ID, canvasID, map[string]interface{}(req)); err != nil {
 		ec, em := mapAgentError(err)
-		jsonError(c, ec, em)
+		common.ResponseWithCodeData(c, ec, nil, em)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{
-		"code":    common.CodeSuccess,
-		"data":    true,
-		"message": "success",
-	})
+	canvas, err := h.agentService.GetAgent(c.Request.Context(), user.ID, canvasID)
+	if err != nil || canvas == nil {
+		common.SuccessWithData(c, map[string]interface{}{}, "success")
+		return
+	}
+	common.SuccessWithData(c, map[string]interface{}{
+		"update_time": canvas.UpdateTime,
+	}, "success")
 }
 
 // DeleteAgent removes the canvas and cascades to its versions.
@@ -271,20 +361,16 @@ func (h *AgentHandler) UpdateAgent(c *gin.Context) {
 func (h *AgentHandler) DeleteAgent(c *gin.Context) {
 	user, code, msg := GetUser(c)
 	if code != common.CodeSuccess {
-		jsonError(c, code, msg)
+		common.ResponseWithCodeData(c, code, nil, msg)
 		return
 	}
 	canvasID := c.Param("canvas_id")
 	if err := h.agentService.DeleteAgent(c.Request.Context(), user.ID, canvasID); err != nil {
 		ec, em := mapAgentError(err)
-		jsonError(c, ec, em)
+		common.ResponseWithCodeData(c, ec, nil, em)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{
-		"code":    common.CodeSuccess,
-		"data":    true,
-		"message": "success",
-	})
+	common.SuccessWithData(c, true, "success")
 }
 
 // ListTemplates lists every canvas template available to authenticated users.
@@ -297,11 +383,11 @@ func (h *AgentHandler) DeleteAgent(c *gin.Context) {
 // @Router /api/v1/agents/templates [get]
 func (h *AgentHandler) ListTemplates(c *gin.Context) {
 	if _, errorCode, errorMessage := GetUser(c); errorCode != common.CodeSuccess {
-		jsonError(c, errorCode, errorMessage)
+		common.ErrorWithCode(c, errorCode, errorMessage)
 		return
 	}
-
-	templates, err := h.agentService.ListTemplates()
+	ctx := c.Request.Context()
+	templates, err := h.agentService.ListTemplates(ctx)
 	if err != nil {
 		jsonInternalError(c, err)
 		return
@@ -311,11 +397,7 @@ func (h *AgentHandler) ListTemplates(c *gin.Context) {
 		templates = []*entity.CanvasTemplate{}
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"code":    common.CodeSuccess,
-		"data":    templates,
-		"message": "success",
-	})
+	common.SuccessWithData(c, templates, "success")
 }
 
 // RunAgent returns an SSE stream of execution events. The Phase 5 stub emits
@@ -331,58 +413,119 @@ func (h *AgentHandler) ListTemplates(c *gin.Context) {
 func (h *AgentHandler) RunAgent(c *gin.Context) {
 	user, code, msg := GetUser(c)
 	if code != common.CodeSuccess {
-		jsonError(c, code, msg)
+		common.ResponseWithCodeData(c, code, nil, msg)
 		return
 	}
 	canvasID := c.Param("canvas_id")
 	version := c.Query("version")
-	events, err := h.agentService.RunAgent(c.Request.Context(), user.ID, canvasID, version)
+	sessionID := c.Query("session_id")
+	if sessionID == "" {
+		// Allocate the ordinary-Agent session identity at the HTTP boundary.
+		// Persistence of the session record remains owned by AgentService.RunAgent.
+		sessionID = utility.GenerateToken()
+	}
+	userInput := readUserInput(c)
+
+	events, err := h.chatRunner.RunAgent(c.Request.Context(), user.ID, canvasID, sessionID, version, userInput, nil)
 	if err != nil {
 		ec, em := mapAgentError(err)
-		jsonError(c, ec, em)
+		common.ResponseWithCodeData(c, ec, nil, em)
 		return
 	}
 	c.Writer.Header().Set("Content-Type", "text/event-stream")
 	c.Writer.Header().Set("Cache-Control", "no-cache")
 	c.Writer.Header().Set("Connection", "keep-alive")
-	flusher, _ := c.Writer.(http.Flusher)
+	doneSent := false
 	for ev := range events {
-		payload, _ := json.Marshal(map[string]any{
-			"event":     "message",
-			"canvas_id": canvasID,
-			"data":      ev,
-		})
-		fmt.Fprintf(c.Writer, "data: %s\n\n", payload)
-		if flusher != nil {
-			flusher.Flush()
+		if ev.Type == "done" {
+			doneSent = true
+		}
+		if err := service.WriteChatbotRunEvent(c.Writer, ev); err != nil {
+			common.Debug("agent run: client disconnected",
+				zap.String("canvas_id", canvasID),
+				zap.String("session_id", sessionID),
+				zap.Error(err),
+			)
+			return
+		}
+	}
+	if !doneSent {
+		if err := service.WriteChatbotRunEvent(c.Writer, canvas.RunEvent{Type: "done"}); err != nil {
+			common.Debug("agent run: failed to write [DONE]",
+				zap.String("canvas_id", canvasID),
+				zap.String("session_id", sessionID),
+				zap.Error(err),
+			)
 		}
 	}
 }
 
-// CancelAgent signals the in-flight run to stop.
-// @Summary Cancel Agent Run
+// readUserInput extracts the user_input field from the JSON body if
+// present, otherwise from the ?user_input= query string. An empty body
+// (no body sent) is treated as "" so the resume cycle still works
+// when the client only passes ?session_id=...&user_input=... on the URL.
+func readUserInput(c *gin.Context) string {
+	if c.Request.ContentLength > 0 {
+		var body struct {
+			UserInput string `json:"user_input"`
+			Query     string `json:"query"`
+			Message   string `json:"message"`
+		}
+		if err := c.ShouldBindJSON(&body); err == nil {
+			if body.UserInput != "" {
+				return body.UserInput
+			}
+			if body.Query != "" {
+				return body.Query
+			}
+			if body.Message != "" {
+				return body.Message
+			}
+		}
+	}
+	return c.Query("user_input")
+}
+
+// sanitiseRunEventError passes through the error event payload
+// unchanged. The runner serialises canvas.ErrorEvent ({"message": ...})
+// before push, so when the payload round-trips through JSON the
+// message field is already preserved. Heuristic sanitisation is
+// disabled until the runner tags error events with a "kind"
+// field — without that, blanket rewriting every error to
+// "Internal storage error while accessing the agent." hides the
+// real failure from the front-end and the user (v3.6.1 diagnostic
+// regression: every canvas run failure surfaced as the same opaque
+// string).
+func sanitiseRunEventError(data string) string {
+	if data == "" {
+		return `{"message":"Unknown agent runtime error"}`
+	}
+	return data
+}
+
+// CancelSessionRun cancels one ordinary Agent run by session id.
+// @Summary Cancel Agent Session Run
 // @Tags agents
 // @Produce json
-// @Param canvas_id path string true "canvas id"
+// @Param session_id path string true "session id"
 // @Success 200 {object} map[string]interface{}
-// @Router /api/v1/agents/{canvas_id}/run [delete]
-func (h *AgentHandler) CancelAgent(c *gin.Context) {
+// @Router /api/v1/tasks/{session_id}/cancel [post]
+func (h *AgentHandler) CancelSessionRun(c *gin.Context) {
 	user, code, msg := GetUser(c)
 	if code != common.CodeSuccess {
-		jsonError(c, code, msg)
+		common.ResponseWithCodeData(c, code, nil, msg)
 		return
 	}
-	canvasID := c.Param("canvas_id")
-	if err := h.agentService.CancelAgent(c.Request.Context(), user.ID, canvasID); err != nil {
+	if h.agentService == nil {
+		common.ResponseWithCodeData(c, common.CodeServerError, nil, "agent service unavailable")
+		return
+	}
+	if err := h.agentService.CancelSessionRun(c.Request.Context(), user.ID, c.Param("session_id")); err != nil {
 		ec, em := mapAgentError(err)
-		jsonError(c, ec, em)
+		common.ResponseWithCodeData(c, ec, nil, em)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{
-		"code":    common.CodeSuccess,
-		"data":    true,
-		"message": "success",
-	})
+	common.SuccessWithData(c, true, "success")
 }
 
 // publishAgentRequest is the wire shape for POST /api/v1/agents/:canvas_id/publish.
@@ -404,13 +547,13 @@ type publishAgentRequest struct {
 func (h *AgentHandler) PublishAgent(c *gin.Context) {
 	user, code, msg := GetUser(c)
 	if code != common.CodeSuccess {
-		jsonError(c, code, msg)
+		common.ResponseWithCodeData(c, code, nil, msg)
 		return
 	}
 	canvasID := c.Param("canvas_id")
 	var req publishAgentRequest
 	if err := c.ShouldBindJSON(&req); err != nil && !errors.Is(err, io.EOF) {
-		jsonError(c, common.CodeArgumentError, "Invalid request: "+err.Error())
+		common.ResponseWithCodeData(c, common.CodeArgumentError, nil, "Invalid request: "+err.Error())
 		return
 	}
 	row, err := h.agentService.PublishAgent(c.Request.Context(), user.ID, canvasID, &service.PublishAgentRequest{
@@ -420,14 +563,13 @@ func (h *AgentHandler) PublishAgent(c *gin.Context) {
 	})
 	if err != nil {
 		ec, em := mapAgentError(err)
-		jsonError(c, ec, em)
+		common.ResponseWithCodeData(c, ec, nil, em)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{
-		"code":    common.CodeSuccess,
-		"data":    row,
-		"message": "success",
-	})
+	if row != nil {
+		row.DSL = dslpkg.NormalizeForCanvas(row.DSL)
+	}
+	common.SuccessWithData(c, row, "success")
 }
 
 // ListVersions returns every version of a canvas, newest first.
@@ -440,24 +582,26 @@ func (h *AgentHandler) PublishAgent(c *gin.Context) {
 func (h *AgentHandler) ListVersions(c *gin.Context) {
 	user, code, msg := GetUser(c)
 	if code != common.CodeSuccess {
-		jsonError(c, code, msg)
+		common.ResponseWithCodeData(c, code, nil, msg)
 		return
 	}
 	canvasID := c.Param("canvas_id")
 	rows, err := h.agentService.ListVersions(c.Request.Context(), user.ID, canvasID)
 	if err != nil {
 		ec, em := mapAgentError(err)
-		jsonError(c, ec, em)
+		common.ResponseWithCodeData(c, ec, nil, em)
 		return
 	}
 	if rows == nil {
 		rows = []*entity.UserCanvasVersion{}
 	}
-	c.JSON(http.StatusOK, gin.H{
-		"code":    common.CodeSuccess,
-		"data":    rows,
-		"message": "success",
-	})
+	for _, row := range rows {
+		if row == nil {
+			continue
+		}
+		row.DSL = dslpkg.NormalizeForCanvas(row.DSL)
+	}
+	common.SuccessWithData(c, rows, "success")
 }
 
 // GetVersion returns a single version.
@@ -471,7 +615,7 @@ func (h *AgentHandler) ListVersions(c *gin.Context) {
 func (h *AgentHandler) GetVersion(c *gin.Context) {
 	user, code, msg := GetUser(c)
 	if code != common.CodeSuccess {
-		jsonError(c, code, msg)
+		common.ResponseWithCodeData(c, code, nil, msg)
 		return
 	}
 	canvasID := c.Param("canvas_id")
@@ -479,14 +623,13 @@ func (h *AgentHandler) GetVersion(c *gin.Context) {
 	row, err := h.agentService.GetVersion(c.Request.Context(), user.ID, canvasID, versionID)
 	if err != nil {
 		ec, em := mapAgentError(err)
-		jsonError(c, ec, em)
+		common.ResponseWithCodeData(c, ec, nil, em)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{
-		"code":    common.CodeSuccess,
-		"data":    row,
-		"message": "success",
-	})
+	if row != nil {
+		row.DSL = dslpkg.NormalizeForCanvas(row.DSL)
+	}
+	common.SuccessWithData(c, row, "success")
 }
 
 // DeleteVersion removes a single version by id.
@@ -500,21 +643,17 @@ func (h *AgentHandler) GetVersion(c *gin.Context) {
 func (h *AgentHandler) DeleteVersion(c *gin.Context) {
 	user, code, msg := GetUser(c)
 	if code != common.CodeSuccess {
-		jsonError(c, code, msg)
+		common.ResponseWithCodeData(c, code, nil, msg)
 		return
 	}
 	canvasID := c.Param("canvas_id")
 	versionID := c.Param("version_id")
 	if err := h.agentService.DeleteVersion(c.Request.Context(), user.ID, canvasID, versionID); err != nil {
 		ec, em := mapAgentError(err)
-		jsonError(c, ec, em)
+		common.ResponseWithCodeData(c, ec, nil, em)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{
-		"code":    common.CodeSuccess,
-		"data":    true,
-		"message": "success",
-	})
+	common.SuccessWithData(c, true, "success")
 }
 
 // --- PR2: missing routes wired up to the existing service layer ---
@@ -522,19 +661,16 @@ func (h *AgentHandler) DeleteVersion(c *gin.Context) {
 // ListAgentTemplates GET /api/v1/agents/templates
 func (h *AgentHandler) ListAgentTemplates(c *gin.Context) {
 	if _, code, msg := GetUser(c); code != common.CodeSuccess {
-		jsonError(c, code, msg)
+		common.ResponseWithCodeData(c, code, nil, msg)
 		return
 	}
-	rows, err := h.agentService.ListTemplates()
+	ctx := c.Request.Context()
+	rows, err := h.agentService.ListTemplates(ctx)
 	if err != nil {
-		jsonError(c, common.CodeServerError, err.Error())
+		common.ResponseWithCodeData(c, common.CodeServerError, nil, err.Error())
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{
-		"code":    common.CodeSuccess,
-		"data":    rows,
-		"message": "success",
-	})
+	common.SuccessWithData(c, rows, "success")
 }
 
 // Prompts GET /api/v1/agents/prompts — returns the four hardcoded
@@ -542,40 +678,39 @@ func (h *AgentHandler) ListAgentTemplates(c *gin.Context) {
 // returns these from a module-level constant; we keep the same shape.
 func (h *AgentHandler) Prompts(c *gin.Context) {
 	if _, code, msg := GetUser(c); code != common.CodeSuccess {
-		jsonError(c, code, msg)
+		common.ResponseWithCodeData(c, code, nil, msg)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{
-		"code": common.CodeSuccess,
-		"data": gin.H{
-			"task_analysis":       "As an AI agent designer, your role is to engage users by understanding their objectives and creating effective agent designs. Begin by analyzing the user's request to determine the appropriate actions.",
-			"output_format":       "For each agent you create, detail its components and explain how they collaborate to achieve the user's goal.",
-			"citation_guidelines": "If the agent uses external sources, cite them in the final output. Use the format: [index] document_id, which corresponds to the document identifier in the database.",
-			"few_shots_examples":  "<example/>",
-		},
-		"message": "success",
-	})
+	common.SuccessWithData(c, gin.H{
+		"task_analysis":       "As an AI agent designer, your role is to engage users by understanding their objectives and creating effective agent designs. Begin by analyzing the user's request to determine the appropriate actions.",
+		"output_format":       "For each agent you create, detail its components and explain how they collaborate to achieve the user's goal.",
+		"citation_guidelines": "If the agent uses external sources, cite them in the final output. Use the format: [index] document_id, which corresponds to the document identifier in the database.",
+		"few_shots_examples":  "<example/>",
+	}, "success")
 }
 
-// ListAgentTags GET /api/v1/agents/tags — out of scope (no test depends on
-// it); return 501 to keep the surface honest.
+// ListAgentTags list agent tags.
 func (h *AgentHandler) ListAgentTags(c *gin.Context) {
-	if _, code, msg := GetUser(c); code != common.CodeSuccess {
-		jsonError(c, code, msg)
+	user, code, msg := GetUser(c)
+	if code != common.CodeSuccess {
+		common.ResponseWithCodeData(c, code, nil, msg)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{
-		"code":    common.CodeSuccess,
-		"data":    []string{},
-		"message": "success",
-	})
+	ctx := c.Request.Context()
+	rows, errCode, err := h.agentService.ListAgentTags(ctx, user.ID, strings.TrimSpace(c.Query("canvas_category")))
+	if err != nil {
+		common.ResponseWithCodeData(c, errCode, nil, err.Error())
+		return
+	}
+
+	common.SuccessWithData(c, rows, "success")
 }
 
 // UpdateAgentTags PUT /api/v1/agents/:canvas_id/tags
 func (h *AgentHandler) UpdateAgentTags(c *gin.Context) {
 	user, code, msg := GetUser(c)
 	if code != common.CodeSuccess {
-		jsonError(c, code, msg)
+		common.ResponseWithCodeData(c, code, nil, msg)
 		return
 	}
 	canvasID := c.Param("canvas_id")
@@ -583,26 +718,23 @@ func (h *AgentHandler) UpdateAgentTags(c *gin.Context) {
 		Tags interface{} `json:"tags"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil && !errors.Is(err, io.EOF) {
-		jsonError(c, common.CodeArgumentError, "Invalid request: "+err.Error())
+		common.ResponseWithCodeData(c, common.CodeArgumentError, nil, "Invalid request: "+err.Error())
 		return
 	}
-	ok, errCode, errMsg := h.agentService.UpdateAgentTags(user.ID, canvasID, body.Tags)
+	ctx := c.Request.Context()
+	ok, errCode, errMsg := h.agentService.UpdateAgentTags(ctx, user.ID, canvasID, body.Tags)
 	if !ok {
-		jsonError(c, errCode, errMsg.Error())
+		common.ResponseWithCodeData(c, errCode, nil, errMsg.Error())
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{
-		"code":    common.CodeSuccess,
-		"data":    true,
-		"message": "success",
-	})
+	common.SuccessWithData(c, true, "success")
 }
 
 // ListAgentSessions GET /api/v1/agents/:canvas_id/sessions
 func (h *AgentHandler) ListAgentSessions(c *gin.Context) {
 	user, code, msg := GetUser(c)
 	if code != common.CodeSuccess {
-		jsonError(c, code, msg)
+		common.ResponseWithCodeData(c, code, nil, msg)
 		return
 	}
 	canvasID := c.Param("canvas_id")
@@ -616,8 +748,8 @@ func (h *AgentHandler) ListAgentSessions(c *gin.Context) {
 	sessionID := c.Query("id")
 	expUserID := c.Query("user_id")
 	includeDSL := c.Query("dsl") == "true"
-
-	resp, code, err := h.agentService.ListAgentSessions(user.ID, user.ID, canvasID, service.ListAgentSessionsRequest{
+	ctx := c.Request.Context()
+	resp, code, err := h.agentService.ListAgentSessions(ctx, user.ID, user.ID, canvasID, service.ListAgentSessionsRequest{
 		Page:       page,
 		PageSize:   pageSize,
 		Keywords:   keywords,
@@ -631,21 +763,17 @@ func (h *AgentHandler) ListAgentSessions(c *gin.Context) {
 		IncludeDSL: includeDSL,
 	})
 	if err != nil {
-		jsonError(c, code, err.Error())
+		common.ErrorWithCode(c, code, err.Error())
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{
-		"code":    common.CodeSuccess,
-		"data":    resp.Data,
-		"message": "success",
-	})
+	common.SuccessWithData(c, resp.Data, "success")
 }
 
 // CreateAgentSession POST /api/v1/agents/:canvas_id/sessions
 func (h *AgentHandler) CreateAgentSession(c *gin.Context) {
 	user, code, msg := GetUser(c)
 	if code != common.CodeSuccess {
-		jsonError(c, code, msg)
+		common.ResponseWithCodeData(c, code, nil, msg)
 		return
 	}
 	canvasID := c.Param("canvas_id")
@@ -655,10 +783,11 @@ func (h *AgentHandler) CreateAgentSession(c *gin.Context) {
 		DSL    json.RawMessage `json:"dsl"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil && !errors.Is(err, io.EOF) {
-		jsonError(c, common.CodeArgumentError, "Invalid request: "+err.Error())
+		common.ResponseWithCodeData(c, common.CodeArgumentError, nil, "Invalid request: "+err.Error())
 		return
 	}
-	row, code, err := h.agentService.CreateAgentSession(&service.CreateAgentSessionRequest{
+	ctx := c.Request.Context()
+	row, code, err := h.agentService.CreateAgentSession(ctx, &service.CreateAgentSessionRequest{
 		UserID:  user.ID,
 		AgentID: canvasID,
 		Name:    body.Name,
@@ -666,35 +795,28 @@ func (h *AgentHandler) CreateAgentSession(c *gin.Context) {
 		DSL:     body.DSL,
 	})
 	if err != nil {
-		jsonError(c, code, err.Error())
+		common.ErrorWithCode(c, code, err.Error())
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{
-		"code":    common.CodeSuccess,
-		"data":    row,
-		"message": "success",
-	})
+	common.SuccessWithData(c, row, "success")
 }
 
 // GetAgentSession GET /api/v1/agents/:canvas_id/sessions/:session_id
 func (h *AgentHandler) GetAgentSession(c *gin.Context) {
 	user, code, msg := GetUser(c)
 	if code != common.CodeSuccess {
-		jsonError(c, code, msg)
+		common.ResponseWithCodeData(c, code, nil, msg)
 		return
 	}
 	canvasID := c.Param("canvas_id")
 	sessionID := c.Param("session_id")
-	row, code, err := h.agentService.GetAgentSession(user.ID, canvasID, sessionID)
+	ctx := c.Request.Context()
+	row, code, err := h.agentService.GetAgentSession(ctx, user.ID, canvasID, sessionID)
 	if err != nil {
-		jsonError(c, code, err.Error())
+		common.ErrorWithCode(c, code, err.Error())
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{
-		"code":    common.CodeSuccess,
-		"data":    row,
-		"message": "success",
-	})
+	common.SuccessWithData(c, row, "success")
 }
 
 // DeleteAgentSession DELETE /api/v1/agents/:canvas_id/sessions[/:session_id]
@@ -705,22 +827,19 @@ func (h *AgentHandler) GetAgentSession(c *gin.Context) {
 func (h *AgentHandler) DeleteAgentSession(c *gin.Context) {
 	user, code, msg := GetUser(c)
 	if code != common.CodeSuccess {
-		jsonError(c, code, msg)
+		common.ResponseWithCodeData(c, code, nil, msg)
 		return
 	}
+	ctx := c.Request.Context()
 	canvasID := c.Param("canvas_id")
 	sessionID := c.Param("session_id")
 	if sessionID != "" {
-		ok, code, err := h.agentService.DeleteAgentSessionItem(user.ID, canvasID, sessionID)
+		ok, code, err := h.agentService.DeleteAgentSessionItem(ctx, user.ID, canvasID, sessionID)
 		if err != nil {
-			jsonError(c, code, err.Error())
+			common.ErrorWithCode(c, code, err.Error())
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{
-			"code":    common.CodeSuccess,
-			"data":    ok,
-			"message": "success",
-		})
+		common.SuccessWithData(c, ok, "success")
 		return
 	}
 	idsParam := c.Query("ids")
@@ -733,103 +852,384 @@ func (h *AgentHandler) DeleteAgentSession(c *gin.Context) {
 			}
 		}
 	}
-	result, code, err := h.agentService.DeleteAgentSessions(user.ID, canvasID, ids, deleteAll)
+	result, code, err := h.agentService.DeleteAgentSessions(ctx, user.ID, canvasID, ids, deleteAll)
 	if err != nil {
-		jsonError(c, code, err.Error())
+		common.ErrorWithCode(c, code, err.Error())
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{
-		"code":    common.CodeSuccess,
-		"data":    result,
-		"message": "success",
-	})
+	common.SuccessWithData(c, result, "success")
 }
 
 // AgentChatCompletions POST /api/v1/agents/chat/completions
 //
-// Phase 5 stub: validates `agent_id` (101) and the openai-compatible
-// `messages` requirement (102), then routes to either an SSE stream
-// (Content-Type: text/event-stream + [DONE] terminator) or a JSON
-// envelope depending on the body. The eino run loop is not yet
-// implemented; tests that require a real LLM response are marked
-// xfail in PR3.
+// Runs the canvas against `agent_id`. Mirrors the Python contract in
+// api/db/services/canvas_service.py:313 (`completion()`) and
+// api/apps/restful_apis/agent_api.py:1440-1676.
+//
+//   - When `stream` is true: streams SSE — one `data: {...}\n\n` frame per
+//     canvas RunEvent, terminated by `data:[DONE]\n\n`.
+//   - When `stream` is omitted or false (default, matches the Python
+//     agent_chat_completion contract where `req.get("stream", False)`
+//     defaults to non-streaming): collects all canvas events and returns a
+//     plain JSON response with `data.content` set to the concatenated
+//     message content (matching Python's final_ans["data"]["content"]).
+//   - Openai-compatible path: requires `messages` (a non-empty list with at
+//     least one user message is needed to derive the question). The full
+//     OpenAI wire framing (delta + reference + token counts — see
+//     `completion_openai` at api/db/services/canvas_service.py:378-479) is
+//     still a Phase 5 TODO; until then the openai-compat branches return a
+//     hardcoded "hello" stub so the validation contracts keep passing.
 type agentChatCompletionsRequest struct {
 	AgentID      string                   `json:"agent_id"`
 	Query        string                   `json:"query"`
+	Inputs       map[string]interface{}   `json:"inputs"`
 	SessionID    string                   `json:"session_id"`
 	Stream       bool                     `json:"stream"`
 	OpenAICompat bool                     `json:"openai-compatible"`
 	Model        string                   `json:"model"`
 	Messages     []map[string]interface{} `json:"messages"`
 	ReturnTrace  bool                     `json:"return_trace"`
+	Files        []map[string]interface{} `json:"files"`
+}
+
+// extractLastUserContent returns the content of the last message in
+// `messages` whose role is "user", or "" if none is found. Mirrors the
+// Python derivation in api/apps/restful_apis/agent_api.py:1258 that drives
+// `completion_openai` when the request uses the openai-compatible wire
+// format but no top-level `query` is supplied.
+func extractLastUserContent(messages []map[string]interface{}) string {
+	for i := len(messages) - 1; i >= 0; i-- {
+		role, _ := messages[i]["role"].(string)
+		if role != "user" {
+			continue
+		}
+		if c, _ := messages[i]["content"].(string); c != "" {
+			return c
+		}
+	}
+	return ""
+}
+
+// extractUserInputFromFormInputs mirrors the front-end's wait-for-user submit
+// shape: `inputs` is an object keyed by form field name, and each entry carries
+// a nested `value`. The current chat-completion resume path consumes a single
+// string payload, so we lift the first field's value and stringify it.
+func extractUserInputFromFormInputs(inputs map[string]interface{}) interface{} {
+	if len(inputs) == 0 {
+		return nil
+	}
+	if len(inputs) == 1 {
+		for _, raw := range inputs {
+			if field, ok := raw.(map[string]interface{}); ok {
+				if v, ok := field["value"]; ok {
+					return v
+				}
+			}
+			return raw
+		}
+	}
+
+	out := make(map[string]any, len(inputs))
+	for name, raw := range inputs {
+		if field, ok := raw.(map[string]interface{}); ok {
+			if v, ok := field["value"]; ok {
+				out[name] = v
+				continue
+			}
+		}
+		out[name] = raw
+	}
+	return out
+}
+
+func countInputValues(inputs map[string]interface{}) int {
+	count := 0
+	for _, raw := range inputs {
+		if field, ok := raw.(map[string]interface{}); ok {
+			if _, exists := field["value"]; exists {
+				count++
+			}
+			continue
+		}
+		if raw != nil {
+			count++
+		}
+	}
+	return count
+}
+
+func userInputMeta(userInput any) []zap.Field {
+	fields := []zap.Field{zap.String("user_input_type", fmt.Sprintf("%T", userInput))}
+	switch v := userInput.(type) {
+	case nil:
+		fields = append(fields, zap.Bool("user_input_present", false))
+	case string:
+		fields = append(fields,
+			zap.Bool("user_input_present", true),
+			zap.Int("user_input_length", len(v)),
+			zap.Bool("user_input_blank", v == ""),
+		)
+	case map[string]interface{}:
+		fields = append(fields,
+			zap.Bool("user_input_present", true),
+			zap.Int("user_input_keys", len(v)),
+		)
+	default:
+		fields = append(fields, zap.Bool("user_input_present", true))
+	}
+	return fields
 }
 
 func (h *AgentHandler) AgentChatCompletions(c *gin.Context) {
-	if _, code, msg := GetUser(c); code != common.CodeSuccess {
-		jsonError(c, code, msg)
+	user, code, msg := GetUser(c)
+	if code != common.CodeSuccess {
+		common.ResponseWithCodeData(c, code, nil, msg)
 		return
 	}
 	var req agentChatCompletionsRequest
 	if err := c.ShouldBindJSON(&req); err != nil && !errors.Is(err, io.EOF) {
-		jsonError(c, common.CodeArgumentError, "Invalid request: "+err.Error())
+		common.ResponseWithCodeData(c, common.CodeArgumentError, nil, "Invalid request: "+err.Error())
 		return
 	}
 	if req.AgentID == "" {
-		jsonError(c, common.CodeArgumentError, "`agent_id` is required.")
+		common.ResponseWithCodeData(c, common.CodeArgumentError, nil, "`agent_id` is required.")
 		return
 	}
 	if req.OpenAICompat && len(req.Messages) == 0 {
-		jsonError(c, common.CodeDataError, "at least one message is required in openai-compatible mode.")
+		common.ResponseWithCodeData(c, common.CodeDataError, nil, "at least one message is required in openai-compatible mode.")
 		return
 	}
+	common.Debug("agent chat completions: request received",
+		zap.String("user_id", user.ID),
+		zap.String("agent_id", req.AgentID),
+		zap.String("session_id", req.SessionID),
+		zap.Bool("stream", req.Stream),
+		zap.Bool("openai_compatible", req.OpenAICompat),
+		zap.Bool("query_present", req.Query != ""),
+		zap.Int("query_length", len(req.Query)),
+		zap.Int("inputs_count", len(req.Inputs)),
+		zap.Int("inputs_with_values_count", countInputValues(req.Inputs)),
+		zap.Int("messages_count", len(req.Messages)),
+	)
 
-	// SSE stream branch — emit a single hello frame and the [DONE]
-	// terminator, matching the test_agents_chat_completion_stream
-	// contract (Content-Type, [DONE] tail, at least one JSON event).
-	if req.Stream {
-		c.Writer.Header().Set("Content-Type", "text/event-stream")
-		c.Writer.Header().Set("Cache-Control", "no-cache")
-		c.Writer.Header().Set("Connection", "keep-alive")
-		flusher, _ := c.Writer.(http.Flusher)
-		payload, _ := json.Marshal(map[string]interface{}{
-			"event": "message",
-			"data": map[string]interface{}{
-				"answer":    "hello",
-				"reference": []interface{}{},
-			},
-		})
-		fmt.Fprintf(c.Writer, "data: %s\n\n", payload)
-		if flusher != nil {
-			flusher.Flush()
-		}
-		fmt.Fprintf(c.Writer, "data: [DONE]\n\n")
-		if flusher != nil {
-			flusher.Flush()
-		}
-		return
-	}
-
-	// Non-stream branch — JSON envelope. OpenAI-compatible mode
-	// surfaces "choices" at the top level (not inside data) so the
-	// test contract `"choices" in nonstream_payload` is satisfied.
+	// TODO(phase5-openai-framing): the openai-compat branches below are
+	// stubs. They keep the existing "choices"-shape contract for the
+	// openai-compat tests, but the production wire format must mirror
+	// api/db/services/canvas_service.py:378-479 (`completion_openai`):
+	// per-token `delta.content`, cumulative token counts, `[DONE]`
+	// terminator, `reference` attached to the final choice. Land that
+	// once the chat path needs to interop with OpenAI clients.
 	if req.OpenAICompat {
-		c.JSON(http.StatusOK, gin.H{
-			"code": common.CodeSuccess,
+		common.SuccessWithData(c, gin.H{
 			"choices": []map[string]interface{}{
 				{"message": gin.H{"content": "hello"}},
 			},
-			"message": "success",
-		})
+		}, "success")
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{
-		"code": common.CodeSuccess,
-		"data": gin.H{
-			"session_id": req.SessionID,
-			"data":       gin.H{"content": "hello"},
-		},
-		"message": "success",
-	})
+
+	// Real canvas run — derive userInput from `query` first, then fall
+	// back to the last user message (covers the front-end that posts
+	// running_hint_text without a top-level `query`).
+	var userInput any = req.Query
+	if req.Query == "" {
+		if extracted := extractUserInputFromFormInputs(req.Inputs); extracted != nil {
+			userInput = extracted
+		} else if extracted := extractLastUserContent(req.Messages); extracted != "" {
+			userInput = extracted
+		}
+	}
+	common.Debug("agent chat completions: derived user input",
+		append([]zap.Field{
+			zap.String("agent_id", req.AgentID),
+			zap.String("session_id", req.SessionID),
+		}, userInputMeta(userInput)...)...,
+	)
+	if req.SessionID == "" {
+		// Keep the effective session available to the non-stream response and
+		// to the task_id=session_id wire alias even when the canvas emits no
+		// events (for example an empty query).
+		req.SessionID = utility.GenerateToken()
+	}
+
+	events, err := h.chatRunner.RunAgent(c.Request.Context(), user.ID, req.AgentID, req.SessionID, "", userInput, req.Files)
+	if err != nil {
+		common.Warn("agent chat completions: RunAgent failed",
+			append([]zap.Field{
+				zap.String("user_id", user.ID),
+				zap.String("agent_id", req.AgentID),
+				zap.String("session_id", req.SessionID),
+				zap.Error(err),
+			}, userInputMeta(userInput)...)...,
+		)
+		ec, em := mapAgentError(err)
+		common.ResponseWithCodeData(c, ec, nil, em)
+		return
+	}
+
+	if req.Stream {
+		// SSE streaming: one `data: {...}\n\n` frame per canvas RunEvent,
+		// terminated by `data:[DONE]\n\n`. We do NOT emit an SSE `event:`
+		// line — the front-end's use-send-message.ts parser feeds each
+		// `data:` line directly into JSON.parse and expects the event type
+		// in the JSON object's top-level `event` field.
+		c.Writer.Header().Set("Content-Type", "text/event-stream")
+		c.Writer.Header().Set("Cache-Control", "no-cache")
+		c.Writer.Header().Set("Connection", "keep-alive")
+		emitted := false
+		doneSent := false
+		for ev := range events {
+			emitted = true
+			if ev.Type == "done" {
+				doneSent = true
+			}
+			common.Debug("agent chat completions: streaming event",
+				zap.String("agent_id", req.AgentID),
+				zap.String("session_id", req.SessionID),
+				zap.String("event_type", ev.Type),
+				zap.String("message_id", ev.MessageID),
+			)
+			if err := service.WriteChatbotRunEvent(c.Writer, ev); err != nil {
+				common.Debug("agent chat completions: client disconnected",
+					zap.String("agent_id", req.AgentID),
+					zap.Error(err),
+				)
+				return
+			}
+		}
+		if !emitted {
+			// Canvas produced no events (e.g. empty query). Echo the
+			// session_id so the client can resume the conversation
+			// (fixes #15169). The [DONE] terminator must be emitted
+			// after this branch because the canvas never sends a
+			// "done" event on this path.
+			common.Info("empty agent output - returning session_id",
+				zap.String("agent_id", req.AgentID),
+				zap.String("session_id", req.SessionID),
+			)
+			event := canvas.RunEvent{
+				Type:      "",
+				Data:      "{}",
+				CreatedAt: time.Now().Unix(),
+				SessionID: req.SessionID,
+			}
+			_ = service.WriteChatbotRunEvent(c.Writer, event)
+		}
+		if !doneSent {
+			if err := service.WriteChatbotRunEvent(c.Writer, canvas.RunEvent{Type: "done"}); err != nil {
+				common.Debug("agent chat completions: failed to write [DONE]",
+					zap.Error(err),
+				)
+			}
+		}
+		common.Debug("agent chat completions: stream closed",
+			zap.String("agent_id", req.AgentID),
+			zap.String("session_id", req.SessionID),
+		)
+		return
+	}
+
+	// Non-streaming: collect all canvas events, accumulate message
+	// content and reference, then return a plain JSON response matching
+	// Python's get_result(data=final_ans) contract (agent_api.py:1616-1676).
+	var fullContent string
+	reference := map[string]any{}
+	structuredOutput := map[string]any{}
+	var runUsage any
+	var finalAns *canvas.RunEvent
+	hasEvents := false
+	for ev := range events {
+		hasEvents = true
+		var evData map[string]any
+		if err := json.Unmarshal([]byte(ev.Data), &evData); err == nil {
+			if ev.Type == "message" {
+				if c, ok := evData["content"].(string); ok {
+					fullContent += c
+				}
+			}
+			if ref, _ := evData["reference"].(map[string]any); ref != nil {
+				for k, v := range ref {
+					reference[k] = v
+				}
+			}
+			// #4: collect structured_output from node_finished events
+			// (Python: agent_api.py:1628-1633).
+			if ev.Type == "node_finished" {
+				if outputs, ok := evData["outputs"].(map[string]any); ok {
+					if structured, ok := outputs["structured"]; ok {
+						if componentID, ok := evData["component_id"].(string); ok {
+							structuredOutput[componentID] = structured
+						}
+					}
+				}
+			}
+			// #5: capture run_usage from workflow_finished events
+			// (Python: agent_api.py:1641-1644).
+			if ev.Type == "workflow_finished" {
+				if u := evData["usage"]; u != nil {
+					runUsage = u
+				}
+			}
+		}
+
+		// Python final_ans selection: prefer "message_end" event,
+		// skip "workflow_finished" (set by canvas as the last event
+		// but should not be the final answer), use "user_inputs" as
+		// fallback.
+		if ev.Type == "message_end" {
+			copy := ev
+			finalAns = &copy
+		}
+		if ev.Type == "workflow_finished" {
+			continue
+		}
+		if finalAns == nil {
+			copy := ev
+			finalAns = &copy
+		}
+	}
+
+	if !hasEvents || finalAns == nil {
+		// Canvas produced no events (e.g. empty query). Echo the
+		// session_id so the client can resume the conversation
+		// (fixes #15169). Python returns get_result(data={"session_id": session_id}).
+		common.Info("empty agent output - returning session_id",
+			zap.String("agent_id", req.AgentID),
+			zap.String("session_id", req.SessionID),
+		)
+		common.SuccessWithData(c, gin.H{"session_id": req.SessionID}, "success")
+		return
+	}
+
+	// Build the final answer payload:
+	//   final_ans["data"]["content"] = full_content
+	//   final_ans["data"]["reference"] = reference
+	//   final_ans["data"]["usage"] = run_usage (if present)
+	//   final_ans["data"]["structured"] = structured_output (if present)
+	var ansData map[string]any
+	if err := json.Unmarshal([]byte(finalAns.Data), &ansData); err != nil || ansData == nil {
+		ansData = map[string]any{}
+	}
+	ansData["content"] = fullContent
+	if len(reference) > 0 {
+		ansData["reference"] = reference
+	}
+	if runUsage != nil {
+		ansData["usage"] = runUsage
+	}
+	if len(structuredOutput) > 0 {
+		ansData["structured"] = structuredOutput
+	}
+
+	result := gin.H{
+		"event":      finalAns.Type,
+		"data":       ansData,
+		"message_id": finalAns.MessageID,
+		"created_at": finalAns.CreatedAt,
+		"task_id":    finalAns.SessionID,
+		"session_id": finalAns.SessionID,
+	}
+	common.SuccessWithData(c, result, "success")
 }
 
 // RerunAgent POST /api/v1/agents/rerun — requires id, dsl, and
@@ -838,9 +1238,20 @@ func (h *AgentHandler) AgentChatCompletions(c *gin.Context) {
 // yet; we keep the validation envelope (101 with the "required
 // argument are missing" message) so the test contract is satisfied,
 // and accept the request when all three fields are present.
+//
+// Tenant / document ownership gate (PR #15145, review round 6):
+// body.id is treated as a document ID and
+// `DocumentService.accessible(docID, user.ID)` is enforced BEFORE
+// the rerun. The gate is REQUIRED: a nil documentService turns a
+// wiring miss into an auth bypass (any caller could rerun an
+// arbitrary doc id without an ownership check), so we fail closed
+// with 500 instead of accepting the request. On denial we return
+// "Document not found." so a caller cannot probe whether a
+// document exists in another tenant.
 func (h *AgentHandler) RerunAgent(c *gin.Context) {
-	if _, code, msg := GetUser(c); code != common.CodeSuccess {
-		jsonError(c, code, msg)
+	user, code, msg := GetUser(c)
+	if code != common.CodeSuccess {
+		common.ResponseWithCodeData(c, code, nil, msg)
 		return
 	}
 	var body struct {
@@ -849,7 +1260,7 @@ func (h *AgentHandler) RerunAgent(c *gin.Context) {
 		ComponentID string                 `json:"component_id"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil && !errors.Is(err, io.EOF) {
-		jsonError(c, common.CodeArgumentError, "Invalid request: "+err.Error())
+		common.ResponseWithCodeData(c, common.CodeArgumentError, nil, "Invalid request: "+err.Error())
 		return
 	}
 	missing := make([]string, 0, 3)
@@ -863,39 +1274,44 @@ func (h *AgentHandler) RerunAgent(c *gin.Context) {
 		missing = append(missing, "component_id")
 	}
 	if len(missing) > 0 {
-		jsonError(c, common.CodeArgumentError,
-			"required argument are missing: "+strings.Join(missing, ",")+"; ")
+		common.ResponseWithCodeData(c, common.CodeArgumentError, nil, "required argument are missing: "+strings.Join(missing, ",")+"; ")
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{
-		"code":    common.CodeSuccess,
-		"data":    true,
-		"message": "success",
-	})
+	// Fail closed on missing dependency: a nil documentService
+	// means the handler was wired without the access checker,
+	// which would let any caller rerun an arbitrary doc id
+	// without proving ownership. Surface as a 500 so a missing
+	// dependency is loud, not silent.
+	if h.documentService == nil {
+		zap.L().Error("RerunAgent: documentService is nil; refusing request to prevent auth bypass")
+		common.ResponseWithCodeData(c, common.CodeServerError, nil, "server misconfiguration: document service not wired")
+		return
+	}
+	if !h.documentService.Accessible(body.ID, user.ID) {
+		common.ResponseWithCodeData(c, common.CodeDataError, nil, "Document not found.")
+		return
+	}
+	common.SuccessWithData(c, true, "success")
 }
 
 // TestDBConnection POST /api/v1/agents/test_db_connection
 func (h *AgentHandler) TestDBConnection(c *gin.Context) {
 	user, code, msg := GetUser(c)
 	if code != common.CodeSuccess {
-		jsonError(c, code, msg)
+		common.ResponseWithCodeData(c, code, nil, msg)
 		return
 	}
 	var req service.TestDBConnectionRequest
 	if err := c.ShouldBindJSON(&req); err != nil && !errors.Is(err, io.EOF) {
-		jsonError(c, common.CodeArgumentError, "Invalid request: "+err.Error())
+		common.ResponseWithCodeData(c, common.CodeArgumentError, nil, "Invalid request: "+err.Error())
 		return
 	}
 	code, err := h.agentService.TestDBConnection(user.ID, &req)
 	if err != nil {
-		jsonError(c, code, err.Error())
+		common.ErrorWithCode(c, code, err.Error())
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{
-		"code":    common.CodeSuccess,
-		"data":    true,
-		"message": "success",
-	})
+	common.SuccessWithData(c, true, "success")
 }
 
 // GetAgentLogs GET /api/v1/agents/:canvas_id/logs/:message_id
@@ -907,14 +1323,14 @@ func (h *AgentHandler) TestDBConnection(c *gin.Context) {
 func (h *AgentHandler) GetAgentLogs(c *gin.Context) {
 	user, code, msg := GetUser(c)
 	if code != common.CodeSuccess {
-		jsonError(c, code, msg)
+		common.ResponseWithCodeData(c, code, nil, msg)
 		return
 	}
 	canvasID := c.Param("canvas_id")
 	messageID := c.Param("message_id")
 	ok, errCode, errMsg := h.checkCanvasAccessForHandler(c, user.ID, canvasID)
 	if !ok {
-		jsonError(c, errCode, errMsg)
+		common.ResponseWithCodeData(c, errCode, nil, errMsg)
 		return
 	}
 
@@ -924,11 +1340,7 @@ func (h *AgentHandler) GetAgentLogs(c *gin.Context) {
 	if rerr == nil && payload != "" {
 		_ = json.Unmarshal([]byte(payload), &data)
 	}
-	c.JSON(http.StatusOK, gin.H{
-		"code":    common.CodeSuccess,
-		"data":    data,
-		"message": "success",
-	})
+	common.SuccessWithData(c, data, "success")
 }
 
 // GetAgentWebhookLogs GET /api/v1/agents/:canvas_id/webhook/logs
@@ -941,32 +1353,29 @@ func (h *AgentHandler) GetAgentLogs(c *gin.Context) {
 func (h *AgentHandler) GetAgentWebhookLogs(c *gin.Context) {
 	user, code, msg := GetUser(c)
 	if code != common.CodeSuccess {
-		jsonError(c, code, msg)
+		common.ResponseWithCodeData(c, code, nil, msg)
 		return
 	}
 	canvasID := c.Param("canvas_id")
-	ok, err := h.agentService.CheckCanvasAccess(user.ID, canvasID)
+	ctx := c.Request.Context()
+	ok, err := h.agentService.CheckCanvasAccess(ctx, user.ID, canvasID)
 	if err != nil || !ok {
 		// CheckCanvasAccess now surfaces ErrUserCanvasNotFound when
 		// the canvas row is missing; the Python envelope is
 		// indistinguishable for missing vs foreign, so collapse
 		// both into 102 "Canvas not found." here.
 		if err != nil && !errors.Is(err, dao.ErrUserCanvasNotFound) {
-			jsonError(c, common.CodeServerError, err.Error())
+			common.ResponseWithCodeData(c, common.CodeServerError, nil, err.Error())
 			return
 		}
-		jsonError(c, common.CodeDataError, "Canvas not found.")
+		common.ResponseWithCodeData(c, common.CodeDataError, nil, "Canvas not found.")
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{
-		"code": common.CodeSuccess,
-		"data": gin.H{
-			"events":        []interface{}{},
-			"finished":      false,
-			"next_since_ts": 0,
-		},
-		"message": "success",
-	})
+	common.SuccessWithData(c, gin.H{
+		"events":        []interface{}{},
+		"finished":      false,
+		"next_since_ts": 0,
+	}, "success")
 }
 
 // checkCanvasAccessForHandler is the shared 103 envelope helper for
@@ -974,7 +1383,8 @@ func (h *AgentHandler) GetAgentWebhookLogs(c *gin.Context) {
 // the access-denied envelope with the same shape the existing
 // loadCanvasForUser-based handlers use.
 func (h *AgentHandler) checkCanvasAccessForHandler(c *gin.Context, userID, canvasID string) (bool, common.ErrorCode, string) {
-	ok, err := h.agentService.CheckCanvasAccess(userID, canvasID)
+	ctx := c.Request.Context()
+	ok, err := h.agentService.CheckCanvasAccess(ctx, userID, canvasID)
 	if err != nil {
 		// The Python agent API uses @_require_canvas_access_async on
 		// /sessions and /logs/:message_id, which folds "canvas does
@@ -991,4 +1401,44 @@ func (h *AgentHandler) checkCanvasAccessForHandler(c *gin.Context, userID, canva
 		return false, common.CodeOperatingError, "Make sure you have permission to access the agent."
 	}
 	return true, common.CodeSuccess, ""
+}
+
+// ResetAgent clears the per-run state of a canvas (history, retrieval,
+// memory, path) and zeroes every "sys.*" / "env.*" global. Mirrors
+// POST /api/v1/agents/:canvas_id/reset from the Python backend at
+// api/apps/restful_apis/agent_api.py:992 — but unlike the Python
+// implementation this handler does not sync a Canvas replica.
+// `api.apps.services.canvas_replica_service.CanvasReplicaService` is
+// the Python Redis-backed runtime replica (distributed lock + 3h TTL);
+// it is intentionally NOT ported to Go. The Go agent port runs every
+// agent through eino's compose.Workflow.Invoke, which is reconstructed
+// from the DSL on each run, so the replica's read-side acceleration
+// is unnecessary and its write-side adds an out-of-band DB/cache sync
+// for no benefit. UpdateAgent / CreateAgent / RerunAgent follow the
+// same convention — DSL write only, no Redis replica. See the
+// "canvas-replica-not-porting" project memory for the design rationale.
+//
+// The reset DSL is returned in the response body so the front-end
+// can render the new state without an extra GET, matching the
+// Python handler's `return get_json_result(data=dsl)` line.
+// @Summary Reset Agent
+// @Tags agents
+// @Produce json
+// @Param canvas_id path string true "canvas id"
+// @Success 200 {object} map[string]interface{}
+// @Router /api/v1/agents/{canvas_id}/reset [post]
+func (h *AgentHandler) ResetAgent(c *gin.Context) {
+	user, code, msg := GetUser(c)
+	if code != common.CodeSuccess {
+		common.ResponseWithCodeData(c, code, nil, msg)
+		return
+	}
+	canvasID := c.Param("canvas_id")
+	dsl, err := h.agentService.ResetAgent(c.Request.Context(), user.ID, canvasID)
+	if err != nil {
+		ec, em := mapAgentError(err)
+		common.ResponseWithCodeData(c, ec, nil, em)
+		return
+	}
+	common.SuccessWithData(c, dsl, "success")
 }

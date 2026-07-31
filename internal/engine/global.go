@@ -26,6 +26,8 @@ import (
 	"ragflow/internal/engine/elasticsearch"
 	"ragflow/internal/engine/infinity"
 
+	"ragflow/internal/tokenizer"
+
 	"go.uber.org/zap"
 )
 
@@ -40,6 +42,10 @@ var (
 func Init(cfg *server.DocEngineConfig) error {
 	var initErr error
 	once.Do(func() {
+		tokenizer.RegisterEngineType(func() string {
+			return string(GetEngineType())
+		})
+
 		engineType = EngineType(cfg.Type)
 		var err error
 		switch engineType {
@@ -82,6 +88,13 @@ func GetMessageQueueEngine() MessageQueue {
 	return messageQueueEngine
 }
 
+// SetMessageQueueEngine installs the global message-queue engine. It exists
+// primarily as a test seam so callers can drive Start() without a real server
+// config; production code uses InitMessageQueueEngine.
+func SetMessageQueueEngine(mq MessageQueue) {
+	messageQueueEngine = mq
+}
+
 func InitMessageQueueEngine(messageQueueType string) error {
 	config := server.GetConfig()
 	switch messageQueueType {
@@ -91,6 +104,8 @@ func InitMessageQueueEngine(messageQueueType string) error {
 		if err != nil {
 			return err
 		}
+	case "":
+		return fmt.Errorf("message queue type is empty")
 	default:
 		return fmt.Errorf("unsupported message queue type: %s", messageQueueType)
 	}

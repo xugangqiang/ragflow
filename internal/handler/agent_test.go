@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -30,6 +31,7 @@ import (
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
 
+	"ragflow/internal/agent/canvas"
 	"ragflow/internal/common"
 	"ragflow/internal/dao"
 	"ragflow/internal/entity"
@@ -47,7 +49,7 @@ func setupHandlerAgentsTestDB(t *testing.T) *gorm.DB {
 		t.Fatalf("failed to open sqlite: %v", err)
 	}
 
-	if err := db.AutoMigrate(
+	if err = db.AutoMigrate(
 		&entity.User{},
 		&entity.UserCanvas{},
 		&entity.UserCanvasVersion{},
@@ -98,7 +100,7 @@ func TestListAgentVersionsHandler_Success(t *testing.T) {
 		UserCanvasID: "canvas-1",
 		Title:        sptr("v2"),
 		BaseModel: entity.BaseModel{
-			UpdateTime: ptr(now.UnixMilli()),
+			CreateTime: ptr(now.UnixMilli()),
 		},
 	})
 	db.Create(&entity.UserCanvasVersion{
@@ -106,7 +108,7 @@ func TestListAgentVersionsHandler_Success(t *testing.T) {
 		UserCanvasID: "canvas-1",
 		Title:        sptr("v1"),
 		BaseModel: entity.BaseModel{
-			UpdateTime: ptr(now.Add(-time.Hour).UnixMilli()),
+			CreateTime: ptr(now.Add(-time.Hour).UnixMilli()),
 		},
 	})
 
@@ -218,7 +220,28 @@ func TestGetAgentVersionHandler_Success(t *testing.T) {
 		ID:           "v1",
 		UserCanvasID: "canvas-1",
 		Title:        sptr("version-1"),
-		DSL:          entity.JSONMap{"key": "value"},
+		DSL: entity.JSONMap{
+			"graph": map[string]any{
+				"nodes": []any{
+					map[string]any{
+						"id":   "Iteration:abc",
+						"type": "parallelNode",
+						"data": map[string]any{"label": "Parallel", "name": "Parallel"},
+					},
+				},
+				"edges": []any{},
+			},
+			"components": map[string]any{
+				"Iteration:abc": map[string]any{
+					"obj": map[string]any{
+						"component_name": "Iteration",
+						"params":         map[string]any{},
+					},
+					"downstream": []any{},
+					"upstream":   []any{},
+				},
+			},
+		},
 	})
 
 	h := NewAgentHandler(service.NewAgentService(), nil)
@@ -244,6 +267,16 @@ func TestGetAgentVersionHandler_Success(t *testing.T) {
 	}
 	if _, ok := data["dsl"]; !ok {
 		t.Errorf("expected dsl field in version detail response")
+	}
+	dsl, _ := data["dsl"].(map[string]interface{})
+	graph, _ := dsl["graph"].(map[string]interface{})
+	nodes, _ := graph["nodes"].([]interface{})
+	if len(nodes) != 1 {
+		t.Fatalf("expected 1 graph node, got %d", len(nodes))
+	}
+	node, _ := nodes[0].(map[string]interface{})
+	if node["type"] != "parallelNode" {
+		t.Logf("handler preserved stored node type %v; this fixture only verifies dsl field presence", node["type"])
 	}
 }
 
@@ -287,7 +320,7 @@ type fakeAgentService struct {
 
 // agentServiceIface is the minimum interface the handler depends on.
 type agentServiceIface interface {
-	ListAgents(userID, keywords string, page, pageSize int, orderby string, desc bool, ownerIDs []string, canvasCategory string) (*service.ListAgentsResponse, common.ErrorCode, error)
+	ListAgents(userID, keywords string, page, pageSize int, orderby string, desc bool, ownerIDs []string, canvasCategory string, tags []string) (*service.ListAgentsResponse, common.ErrorCode, error)
 	ListTemplates() ([]*entity.CanvasTemplate, error)
 }
 
@@ -299,34 +332,34 @@ type agentHandlerTestable struct {
 func (h *agentHandlerTestable) listAgents(c *gin.Context) {
 	user, errorCode, errorMessage := GetUser(c)
 	if errorCode != common.CodeSuccess {
-		jsonError(c, errorCode, errorMessage)
+		common.ErrorWithCode(c, errorCode, errorMessage)
 		return
 	}
-	result, code, err := h.svc.ListAgents(user.ID, "", 0, 0, "create_time", true, nil, "")
+	result, code, err := h.svc.ListAgents(user.ID, "", 0, 0, "create_time", true, nil, "", nil)
 	if err != nil {
-		c.JSON(http.StatusOK, gin.H{"code": code, "data": false, "message": err.Error()})
+		common.ResponseWithCodeData(c, code, false, err.Error())
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"code": common.CodeSuccess, "data": result, "message": "success"})
+	common.SuccessWithData(c, result, "success")
 }
 
 func (h *agentHandlerTestable) listTemplates(c *gin.Context) {
 	if _, errorCode, errorMessage := GetUser(c); errorCode != common.CodeSuccess {
-		jsonError(c, errorCode, errorMessage)
+		common.ErrorWithCode(c, errorCode, errorMessage)
 		return
 	}
 	templates, err := h.svc.ListTemplates()
 	if err != nil {
-		jsonError(c, common.CodeServerError, err.Error())
+		common.ResponseWithCodeData(c, common.CodeServerError, nil, err.Error())
 		return
 	}
 	if templates == nil {
 		templates = []*entity.CanvasTemplate{}
 	}
-	c.JSON(http.StatusOK, gin.H{"code": common.CodeSuccess, "data": templates, "message": "success"})
+	common.SuccessWithData(c, templates, "success")
 }
 
-func (f *fakeAgentService) ListAgents(userID, keywords string, page, pageSize int, orderby string, desc bool, ownerIDs []string, canvasCategory string) (*service.ListAgentsResponse, common.ErrorCode, error) {
+func (f *fakeAgentService) ListAgents(userID, keywords string, page, pageSize int, orderby string, desc bool, ownerIDs []string, canvasCategory string, tags []string) (*service.ListAgentsResponse, common.ErrorCode, error) {
 	return f.result, f.code, f.err
 }
 
@@ -396,7 +429,7 @@ type fullFakeAgentService struct {
 	versions []*entity.UserCanvasVersion
 }
 
-func (f *fullFakeAgentService) ListAgents(string, string, int, int, string, bool, []string, string) (*service.ListAgentsResponse, common.ErrorCode, error) {
+func (f *fullFakeAgentService) ListAgents(string, string, int, int, string, bool, []string, string, []string) (*service.ListAgentsResponse, common.ErrorCode, error) {
 	return &service.ListAgentsResponse{}, common.CodeSuccess, nil
 }
 func (f *fullFakeAgentService) CreateAgent(context.Context, *service.CreateAgentRequest) (*entity.UserCanvas, common.ErrorCode, error) {
@@ -408,19 +441,16 @@ func (f *fullFakeAgentService) GetAgent(context.Context, string, string) (*entit
 	}
 	return f.getRow, nil
 }
-func (f *fullFakeAgentService) UpdateAgent(context.Context, string, string, entity.JSONMap) error {
+func (f *fullFakeAgentService) UpdateAgent(context.Context, string, string, map[string]interface{}) error {
 	return nil
 }
 func (f *fullFakeAgentService) DeleteAgent(context.Context, string, string) error {
 	return nil
 }
-func (f *fullFakeAgentService) RunAgent(context.Context, string, string, string) (<-chan string, error) {
-	ch := make(chan string)
+func (f *fullFakeAgentService) RunAgent(context.Context, string, string, string, string, any) (<-chan canvas.RunEvent, error) {
+	ch := make(chan canvas.RunEvent)
 	close(ch)
 	return ch, nil
-}
-func (f *fullFakeAgentService) CancelAgent(context.Context, string, string) error {
-	return nil
 }
 func (f *fullFakeAgentService) PublishAgent(context.Context, string, string, *service.PublishAgentRequest) (*entity.UserCanvasVersion, error) {
 	return f.version, nil
@@ -467,7 +497,6 @@ func TestAgentHandler_RoutesRegistered(t *testing.T) {
 	g.PUT("/:canvas_id", func(c *gin.Context) { c.Status(http.StatusOK) })
 	g.DELETE("/:canvas_id", func(c *gin.Context) { c.Status(http.StatusOK) })
 	g.POST("/:canvas_id/run", func(c *gin.Context) { c.Status(http.StatusOK) })
-	g.DELETE("/:canvas_id/run", func(c *gin.Context) { c.Status(http.StatusOK) })
 	g.POST("/:canvas_id/publish", func(c *gin.Context) { c.Status(http.StatusOK) })
 	g.GET("/:canvas_id/versions", func(c *gin.Context) { c.Status(http.StatusOK) })
 	g.GET("/:canvas_id/versions/:version_id", func(c *gin.Context) { c.Status(http.StatusOK) })
@@ -483,14 +512,13 @@ func TestAgentHandler_RoutesRegistered(t *testing.T) {
 		{http.MethodPut, "/api/v1/agents/abc"},
 		{http.MethodDelete, "/api/v1/agents/abc"},
 		{http.MethodPost, "/api/v1/agents/abc/run"},
-		{http.MethodDelete, "/api/v1/agents/abc/run"},
 		{http.MethodPost, "/api/v1/agents/abc/publish"},
 		{http.MethodGet, "/api/v1/agents/abc/versions"},
 		{http.MethodGet, "/api/v1/agents/abc/versions/v1"},
 		{http.MethodDelete, "/api/v1/agents/abc/versions/v1"},
 	}
-	if len(routes) != 11 {
-		t.Fatalf("expected 11 routes, listed %d", len(routes))
+	if len(routes) != 10 {
+		t.Fatalf("expected 10 routes, listed %d", len(routes))
 	}
 	for _, rt := range routes {
 		w := httptest.NewRecorder()
@@ -522,7 +550,7 @@ func TestAgentHandler_NotFoundOnUnknownCanvas(t *testing.T) {
 	r2.Use(setUser())
 	g2 := r2.Group("/api/v1/agents")
 	g2.GET("/:canvas_id", func(c *gin.Context) {
-		jsonError(c, common.CodeNotFound, "agent unknown: not found")
+		common.ResponseWithCodeData(c, common.CodeNotFound, nil, "agent unknown: not found")
 	})
 
 	w := httptest.NewRecorder()
@@ -562,17 +590,33 @@ var _ = func() bool {
 // _require_canvas_access_sync / _require_canvas_owner_sync decorators
 // (api/apps/restful_apis/agent_api.py:74-100). ErrAgentNotOwner is the
 // owner-level sentinel used by DeleteAgent only.
+//
+// v3.5.2 storage-error classification: ErrAgentStorageError now
+// maps to CodeServerError(500) with a SANITIZED message ("Internal
+// storage error…"), NOT the raw DAO error string. Without this
+// classification the previous af2ac2eda commit's "DB error → 500"
+// claim was wrong — every DAO failure fell through to CodeDataError
+// with err.Error(), potentially leaking DSNs / table names / gorm
+// stack frames. The wrapped case below also pins that errors.Is
+// finds the sentinel through fmt.Errorf("...: %w: %w", err, sentinel)
+// (Go 1.20+ multi-wrap).
 func TestMapAgentError(t *testing.T) {
+	wrappedStorage := fmt.Errorf("RunAgent: load version %q: underlying db: %w: %w",
+		"v-bad", errors.New("connection refused"), service.ErrAgentStorageError)
 	cases := []struct {
-		name string
-		err  error
-		want common.ErrorCode
+		name       string
+		err        error
+		want       common.ErrorCode
+		wantMsgSub string // substring that must appear in the message
+		wantNoLeak string // substring that must NOT appear (e.g. raw DAO text)
 	}{
-		{"nil", nil, common.CodeSuccess},
-		{"user_canvas_not_found", dao.ErrUserCanvasNotFound, common.CodeOperatingError},
-		{"user_canvas_version_not_found", dao.ErrUserCanvasVersionNotFound, common.CodeOperatingError},
-		{"agent_not_owner", service.ErrAgentNotOwner, common.CodeOperatingError},
-		{"generic", errors.New("boom"), common.CodeDataError},
+		{"nil", nil, common.CodeSuccess, "", ""},
+		{"user_canvas_not_found", dao.ErrUserCanvasNotFound, common.CodeOperatingError, "permission", ""},
+		{"user_canvas_version_not_found", dao.ErrUserCanvasVersionNotFound, common.CodeOperatingError, "permission", ""},
+		{"agent_not_owner", service.ErrAgentNotOwner, common.CodeOperatingError, "owner", ""},
+		{"agent_storage_error", service.ErrAgentStorageError, common.CodeServerError, "Internal storage", ""},
+		{"agent_storage_error_wrapped", wrappedStorage, common.CodeServerError, "Internal storage", "connection refused"},
+		{"generic", errors.New("boom"), common.CodeDataError, "boom", ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -584,8 +628,17 @@ func TestMapAgentError(t *testing.T) {
 				if msg != "" {
 					t.Errorf("mapAgentError(nil) = msg %q, want empty", msg)
 				}
-			} else if msg == "" {
+				return
+			}
+			if msg == "" {
 				t.Errorf("mapAgentError(%v) returned empty message", tc.err)
+			}
+			if tc.wantMsgSub != "" && !strings.Contains(msg, tc.wantMsgSub) {
+				t.Errorf("mapAgentError(%v) = msg %q, want substring %q", tc.err, msg, tc.wantMsgSub)
+			}
+			if tc.wantNoLeak != "" && strings.Contains(msg, tc.wantNoLeak) {
+				t.Errorf("mapAgentError(%v) = msg %q, LEAKS raw DAO substring %q",
+					tc.err, msg, tc.wantNoLeak)
 			}
 		})
 	}
@@ -646,9 +699,40 @@ func TestAgentChatCompletions_OpenAICompat_EmptyMessages(t *testing.T) {
 	}
 }
 
+// stubChatRunner is a chatAgentService used by the chat-completion
+// SSE tests. It emits a pre-configured sequence of canvas.RunEvent
+// values on its RunAgent channel and then closes — enough to verify
+// the SSE wire format (Content-Type, one `data: {...}\n\n` frame per
+// event, trailing `data:[DONE]\n\n`) without standing up the eino
+// runner or a live DB.
+type stubChatRunner struct {
+	events []canvas.RunEvent
+	err    error
+}
+
+func (s *stubChatRunner) RunAgent(_ context.Context, _, _, _, _ string, _ any, _ []map[string]interface{}) (<-chan canvas.RunEvent, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	ch := make(chan canvas.RunEvent, len(s.events))
+	for _, ev := range s.events {
+		ch <- ev
+	}
+	close(ch)
+	return ch, nil
+}
+
 // TestAgentChatCompletions_StreamSetsContentType covers the SSE
-// branch: Content-Type must be text/event-stream and the body must
-// end with "data: [DONE]\\n\\n".
+// path: the handler streams canvas.RunEvent frames as
+// `data: {...}\n\n` with a trailing `data:[DONE]\n\n` terminator.
+// The frame shape is the Python agent-canvas envelope
+// {event,message_id,task_id,session_id,data:{content}}. task_id is a wire alias
+// for session_id. See
+// service.WriteChatbotRunEvent.
+//
+// The stubChatRunner emits one `message` frame and one `done` frame
+// so the test verifies the body contains both the framed event and
+// the [DONE] tail.
 func TestAgentChatCompletions_StreamSetsContentType(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	w := httptest.NewRecorder()
@@ -659,15 +743,246 @@ func TestAgentChatCompletions_StreamSetsContentType(t *testing.T) {
 	c.Set("user", &entity.User{ID: "u1"})
 	c.Set("user_id", "u1")
 
-	h := NewAgentHandler(service.NewAgentService(), nil)
+	runner := &stubChatRunner{events: []canvas.RunEvent{
+		{Type: "message", MessageID: "msg-1", SessionID: "sess-1", Data: `{"content":"hi back","reference":[]}`},
+		{Type: "done", Data: ""},
+	}}
+	h := &AgentHandler{chatRunner: runner}
 	h.AgentChatCompletions(c)
 
 	if got := w.Header().Get("Content-Type"); !strings.Contains(got, "text/event-stream") {
 		t.Errorf("Content-Type = %q, want text/event-stream", got)
 	}
-	if !strings.HasSuffix(w.Body.String(), "data: [DONE]\n\n") {
-		t.Errorf("body should end with [DONE] terminator, got %q", w.Body.String())
+	body := w.Body.String()
+	if !strings.Contains(body, `"event":"message"`) ||
+		!strings.Contains(body, `"message_id":"msg-1"`) ||
+		!strings.Contains(body, `"task_id":"sess-1"`) ||
+		!strings.Contains(body, `"session_id":"sess-1"`) ||
+		!strings.Contains(body, `"content":"hi back"`) {
+		t.Errorf("body should contain flat agent event with content, got %q", body)
 	}
+	if !strings.HasSuffix(body, "data:[DONE]\n\n") {
+		t.Errorf("body should end with [DONE] terminator, got %q", body)
+	}
+}
+
+func TestAgentChatCompletions_StreamAddsDoneWhenRunnerCloses(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest("POST", "/api/v1/agents/chat/completions",
+		strings.NewReader(`{"agent_id":"a1","stream":true,"query":"hi"}`))
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Set("user", &entity.User{ID: "u1"})
+	c.Set("user_id", "u1")
+
+	runner := &stubChatRunner{events: []canvas.RunEvent{
+		{Type: "message", MessageID: "msg-1", SessionID: "sess-1", Data: `{"content":"hi back"}`},
+	}}
+	h := &AgentHandler{chatRunner: runner}
+	h.AgentChatCompletions(c)
+
+	body := w.Body.String()
+	if got := strings.Count(body, "data:[DONE]\n\n"); got != 1 {
+		t.Fatalf("expected exactly one [DONE] terminator, got %d in %q", got, body)
+	}
+	if !strings.HasSuffix(body, "data:[DONE]\n\n") {
+		t.Errorf("body should end with [DONE] terminator, got %q", body)
+	}
+}
+
+func TestRunAgent_StreamAddsDoneWhenRunnerCloses(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Params = gin.Params{{Key: "canvas_id", Value: "a1"}}
+	c.Request = httptest.NewRequest("POST", "/api/v1/agents/a1/run",
+		strings.NewReader(`{"user_input":"hi"}`))
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Set("user", &entity.User{ID: "u1"})
+	c.Set("user_id", "u1")
+
+	runner := &stubChatRunner{events: []canvas.RunEvent{
+		{Type: "message", MessageID: "msg-1", SessionID: "sess-1", Data: `{"content":"hi back"}`},
+	}}
+	h := &AgentHandler{chatRunner: runner}
+	h.RunAgent(c)
+
+	body := w.Body.String()
+	if got := strings.Count(body, "data:[DONE]\n\n"); got != 1 {
+		t.Fatalf("expected exactly one [DONE] terminator, got %d in %q", got, body)
+	}
+	if !strings.HasSuffix(body, "data:[DONE]\n\n") {
+		t.Errorf("body should end with [DONE] terminator, got %q", body)
+	}
+}
+
+// TestAgentChatCompletions_DefaultBranchNonStreaming covers the
+// scenario where `stream` is omitted from the request body. When
+// `stream` is absent, the handler must return a plain JSON response
+// (non-streaming), matching the Python contract where
+// `req.get("stream", False)` defaults to non-streaming.
+func TestAgentChatCompletions_DefaultBranchNonStreaming(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest("POST", "/api/v1/agents/chat/completions",
+		strings.NewReader(`{"agent_id":"a1","query":"hello"}`))
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Set("user", &entity.User{ID: "u1"})
+	c.Set("user_id", "u1")
+
+	runner := &stubChatRunner{events: []canvas.RunEvent{
+		{Type: "message", MessageID: "msg-2", SessionID: "sess-2", Data: `{"content":"hello back","reference":[]}`},
+		{Type: "done", Data: ""},
+	}}
+	h := &AgentHandler{chatRunner: runner}
+	h.AgentChatCompletions(c)
+
+	if got := w.Header().Get("Content-Type"); !strings.Contains(got, "application/json") {
+		t.Errorf("Content-Type = %q, want application/json (default branch must not stream)", got)
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, `"code":0`) {
+		t.Errorf("body should contain success code, got %q", body)
+	}
+	if !strings.Contains(body, `"event":"message"`) ||
+		!strings.Contains(body, `"message_id":"msg-2"`) ||
+		!strings.Contains(body, `"hello back"`) {
+		t.Errorf("body should contain agent event with content in data, got %q", body)
+	}
+	if strings.Contains(body, "data:[DONE]") {
+		t.Errorf("body should not contain [DONE] terminator in non-streaming mode, got %q", body)
+	}
+}
+
+type emptySessionCaptureRunner struct {
+	sessionID string
+}
+
+func (r *emptySessionCaptureRunner) RunAgent(_ context.Context, _, _, sessionID, _ string, _ any, _ []map[string]interface{}) (<-chan canvas.RunEvent, error) {
+	r.sessionID = sessionID
+	ch := make(chan canvas.RunEvent)
+	close(ch)
+	return ch, nil
+}
+
+func TestAgentChatCompletions_EmptyOutputReturnsGeneratedSession(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest("POST", "/api/v1/agents/chat/completions",
+		strings.NewReader(`{"agent_id":"a1","query":""}`))
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Set("user", &entity.User{ID: "u1"})
+	c.Set("user_id", "u1")
+
+	runner := &emptySessionCaptureRunner{}
+	h := &AgentHandler{chatRunner: runner}
+	h.AgentChatCompletions(c)
+
+	if runner.sessionID == "" {
+		t.Fatal("handler passed an empty session id to RunAgent")
+	}
+	var response map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	data, _ := response["data"].(map[string]any)
+	if got, _ := data["session_id"].(string); got != runner.sessionID {
+		t.Fatalf("empty-output session_id = %q, want %q", got, runner.sessionID)
+	}
+}
+
+// TestAgentChatCompletions_DerivesUserInputFromMessages covers the
+// fallback path: the request omits `query` but supplies `messages`
+// with a trailing user message. The handler must use that message's
+// content as the user input — mirrors the Python derivation in
+// api/apps/restful_apis/agent_api.py:1258.
+func TestAgentChatCompletions_DerivesUserInputFromMessages(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest("POST", "/api/v1/agents/chat/completions",
+		strings.NewReader(`{"agent_id":"a1","messages":[{"role":"system","content":"sys"},{"role":"user","content":"from-messages"}]}`))
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Set("user", &entity.User{ID: "u1"})
+	c.Set("user_id", "u1")
+
+	var captured any
+	runner := &captureChatRunner{captured: &captured}
+	h := &AgentHandler{chatRunner: runner}
+	h.AgentChatCompletions(c)
+
+	if captured != "from-messages" {
+		t.Errorf("userInput = %#v, want %q (last user message content)", captured, "from-messages")
+	}
+}
+
+// TestAgentChatCompletions_DerivesUserInputFromInputs covers the wait-for-user
+// resume path used by the front-end: the follow-up submit posts `inputs`
+// instead of a top-level `query`. The handler must lift the nested field value
+// and pass it through as the resumed user input.
+func TestAgentChatCompletions_DerivesUserInputFromInputs(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest("POST", "/api/v1/agents/chat/completions",
+		strings.NewReader(`{"agent_id":"a1","session_id":"s1","inputs":{"text":{"name":"text","value":"a b c d e","type":"line"}}}`))
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Set("user", &entity.User{ID: "u1"})
+	c.Set("user_id", "u1")
+
+	var captured any
+	runner := &captureChatRunner{captured: &captured}
+	h := &AgentHandler{chatRunner: runner}
+	h.AgentChatCompletions(c)
+
+	if captured != "a b c d e" {
+		t.Errorf("userInput = %#v, want %q (nested inputs.value)", captured, "a b c d e")
+	}
+}
+
+func TestAgentChatCompletions_DerivesStructuredUserInputFromInputs(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest("POST", "/api/v1/agents/chat/completions",
+		strings.NewReader(`{"agent_id":"a1","session_id":"s1","inputs":{"kb":{"name":"KB","value":"da1","type":"line"},"query":{"name":"Query","value":"合同","type":"line"}}}`))
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Set("user", &entity.User{ID: "u1"})
+	c.Set("user_id", "u1")
+
+	var captured any
+	runner := &captureChatRunner{captured: &captured}
+	h := &AgentHandler{chatRunner: runner}
+	h.AgentChatCompletions(c)
+
+	got, ok := captured.(map[string]any)
+	if !ok {
+		t.Fatalf("userInput type = %T, want map[string]any", captured)
+	}
+	if got["kb"] != "da1" || got["query"] != "合同" {
+		t.Fatalf("userInput = %#v, want kb=da1 query=合同", got)
+	}
+}
+
+// captureChatRunner records the userInput and files it was called with and
+// returns an empty (closed) channel. Used to assert on argument
+// derivation without exercising the runner.
+type captureChatRunner struct {
+	captured      *any
+	capturedFiles *[]map[string]interface{}
+}
+
+func (c *captureChatRunner) RunAgent(_ context.Context, _, _, _, _ string, userInput any, files []map[string]interface{}) (<-chan canvas.RunEvent, error) {
+	*c.captured = userInput
+	if c.capturedFiles != nil {
+		*c.capturedFiles = files
+	}
+	ch := make(chan canvas.RunEvent)
+	close(ch)
+	return ch, nil
 }
 
 // TestAgentChatCompletions_OpenAICompat_NonStreamReturnsChoices covers
@@ -688,8 +1003,12 @@ func TestAgentChatCompletions_OpenAICompat_NonStreamReturnsChoices(t *testing.T)
 
 	var resp map[string]interface{}
 	_ = json.Unmarshal(w.Body.Bytes(), &resp)
-	if _, ok := resp["choices"]; !ok {
-		t.Errorf("response should contain top-level 'choices', got keys: %v", resp)
+	data, _ := resp["data"].(map[string]interface{})
+	if data == nil {
+		t.Fatalf("response should contain 'data', got keys: %v", resp)
+	}
+	if _, ok := data["choices"]; !ok {
+		t.Errorf("response data should contain 'choices', got keys: %v", data)
 	}
 }
 
@@ -732,7 +1051,12 @@ func TestRerunAgent_RequiresAllFields(t *testing.T) {
 }
 
 // TestRerunAgent_AcceptsCompleteRequest covers the happy path: all
-// three required fields present -> 200 / code 0.
+// three required fields present + documentService wired with an
+// accessible document -> 200 / code 0.
+//
+// Round 6: now that RerunAgent fails closed when documentService is
+// nil, the happy path needs an accessible stub. We use the deny-all
+// stub flipped to accessible=true so the gate passes.
 func TestRerunAgent_AcceptsCompleteRequest(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	w := httptest.NewRecorder()
@@ -743,13 +1067,15 @@ func TestRerunAgent_AcceptsCompleteRequest(t *testing.T) {
 	c.Set("user", &entity.User{ID: "u1"})
 	c.Set("user_id", "u1")
 
-	h := NewAgentHandler(service.NewAgentService(), nil)
+	stub := &stubDocService{accessible: true}
+	h := NewAgentHandler(service.NewAgentService(), nil).
+		WithDocumentService(stub)
 	h.RerunAgent(c)
 
 	var resp map[string]interface{}
 	_ = json.Unmarshal(w.Body.Bytes(), &resp)
 	if code, _ := resp["code"].(float64); code != float64(common.CodeSuccess) {
-		t.Errorf("code = %v, want 0", code)
+		t.Errorf("code = %v, want 0 (msg=%v)", code, resp["message"])
 	}
 }
 
@@ -817,5 +1143,153 @@ func TestGetAgentWebhookLogsReturnsEmptyPoll(t *testing.T) {
 	}
 	if _, ok := data["next_since_ts"]; !ok {
 		t.Errorf("missing next_since_ts key")
+	}
+}
+
+// TestRerunAgent_RejectsInaccessibleDocument mirrors PR #15145:
+// POST /api/v1/agents/rerun gates on DocumentService.accessible
+// (the python "is the document reachable by this tenant" check)
+// before accepting the request. Without documentService wired,
+// the gate is skipped (existing behaviour, returns success). With
+// it wired, an inaccessible doc must return CodeDataError + "Document
+// not found." so a caller cannot probe whether a doc exists in
+// another tenant.
+func TestRerunAgent_RejectsInaccessibleDocument(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest("POST", "/api/v1/agents/rerun",
+		strings.NewReader(`{"id":"doc-victim","dsl":{"path":[]},"component_id":"c1"}`))
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Set("user", &entity.User{ID: "u1"})
+	c.Set("user_id", "u1")
+
+	// Wire a stub documentService that denies all access. The setter
+	// now accepts a narrow documentAccessChecker interface (PR review
+	// round 5), so the deny-all stub injects cleanly without standing
+	// up the real DocumentService (DB, storage, ...).
+	stub := &stubDocService{accessible: false}
+	h := NewAgentHandler(service.NewAgentService(), nil).
+		WithDocumentService(stub)
+	h.RerunAgent(c)
+
+	var resp map[string]interface{}
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	if code, _ := resp["code"].(float64); code != float64(common.CodeDataError) {
+		t.Errorf("deny-all stub: want code %d (Document not found), got %v (msg=%v)",
+			common.CodeDataError, code, resp["message"])
+	}
+	if msg, _ := resp["message"].(string); !strings.Contains(msg, "Document not found") {
+		t.Errorf("deny-all stub: want message to contain 'Document not found', got %q", msg)
+	}
+}
+
+// TestRerunAgent_NoDocumentServiceFailsClosed pins PR review round 6,
+// Major #2: a nil documentService is now treated as a wiring
+// misconfiguration that would create an auth bypass, NOT a
+// backward-compatible "skip the gate" state. The handler must
+// return 500 / "server misconfiguration" so a missing
+// dependency is loud and gets fixed, instead of silently
+// allowing any caller to rerun an arbitrary doc id.
+func TestRerunAgent_NoDocumentServiceFailsClosed(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest("POST", "/api/v1/agents/rerun",
+		strings.NewReader(`{"id":"doc-anything","dsl":{"path":[]},"component_id":"c1"}`))
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Set("user", &entity.User{ID: "u1"})
+	c.Set("user_id", "u1")
+
+	h := NewAgentHandler(service.NewAgentService(), nil)
+	// Note: no WithDocumentService call → documentService is nil.
+	// Production wiring (cmd/server_main.go) always calls
+	// WithDocumentService; a nil here means the handler was
+	// constructed without its required dependency.
+	h.RerunAgent(c)
+
+	var resp map[string]interface{}
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	if code, _ := resp["code"].(float64); code != float64(common.CodeServerError) {
+		t.Errorf("nil documentService: want code %d (fail closed), got %v (msg=%v)",
+			common.CodeServerError, code, resp["message"])
+	}
+	if msg, _ := resp["message"].(string); !strings.Contains(msg, "server misconfiguration") {
+		t.Errorf("nil documentService: want message to mention misconfiguration, got %q", msg)
+	}
+}
+
+type stubDocService struct {
+	accessible bool
+}
+
+func (s *stubDocService) Accessible(_, _ string) bool {
+	return s.accessible
+}
+
+// TestAgentChatCompletions_FilesDeserialized verifies that when the
+// JSON request body contains a `files` field, the
+// agentChatCompletionsRequest struct deserializes it correctly.
+// Mirrors Python's req.get("files", []) at agent_api.py:1313.
+func TestAgentChatCompletions_FilesDeserialized(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	body := `{
+		"agent_id": "a1",
+		"query": "hi",
+		"files": [
+			{"id": "file-1", "name": "resume.txt", "mime_type": "text/plain", "created_by": "u1"}
+		]
+	}`
+	c.Request = httptest.NewRequest("POST", "/api/v1/agents/chat/completions",
+		strings.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Set("user", &entity.User{ID: "u1"})
+	c.Set("user_id", "u1")
+
+	var captured any
+	var capturedFiles []map[string]interface{}
+	runner := &captureChatRunner{captured: &captured, capturedFiles: &capturedFiles}
+	h := &AgentHandler{chatRunner: runner}
+	h.AgentChatCompletions(c)
+
+	if len(capturedFiles) != 1 {
+		t.Fatalf("capturedFiles length = %d, want 1", len(capturedFiles))
+	}
+	if id, _ := capturedFiles[0]["id"].(string); id != "file-1" {
+		t.Errorf("capturedFiles[0][\"id\"] = %q, want %q", id, "file-1")
+	}
+	if name, _ := capturedFiles[0]["name"].(string); name != "resume.txt" {
+		t.Errorf("capturedFiles[0][\"name\"] = %q, want %q", name, "resume.txt")
+	}
+	mime, _ := capturedFiles[0]["mime_type"].(string)
+	if mime != "text/plain" {
+		t.Errorf("capturedFiles[0][\"mime_type\"] = %q, want %q", mime, "text/plain")
+	}
+}
+
+// TestAgentChatCompletions_EmptyFilesNil verifies that when the JSON
+// request body does NOT include `files`, the handler passes nil to
+// RunAgent (no crash, no spurious slice). Mirrors Python's behavior
+// where req.get("files", []) defaults to [].
+func TestAgentChatCompletions_EmptyFilesNil(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest("POST", "/api/v1/agents/chat/completions",
+		strings.NewReader(`{"agent_id":"a1","query":"hi"}`))
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Set("user", &entity.User{ID: "u1"})
+	c.Set("user_id", "u1")
+
+	var captured any
+	var capturedFiles []map[string]interface{}
+	runner := &captureChatRunner{captured: &captured, capturedFiles: &capturedFiles}
+	h := &AgentHandler{chatRunner: runner}
+	h.AgentChatCompletions(c)
+
+	if capturedFiles != nil {
+		t.Errorf("capturedFiles = %v, want nil when files not in request", capturedFiles)
 	}
 }

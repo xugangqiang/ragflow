@@ -6,7 +6,7 @@ import { memo } from 'react';
 import { NodeHandleId, Operator } from '../../constant';
 import { ToolCard } from '../../form/agent-form/agent-tools';
 import { useFindMcpById } from '../../hooks/use-find-mcp-by-id';
-import OperatorIcon from '../../operator-icon';
+import OperatorIcon from '@/components/operator-icon';
 import useGraphStore from '../../store';
 import { NodeWrapper } from './node-wrapper';
 
@@ -38,6 +38,17 @@ function InnerToolNode({
         id={NodeHandleId.End}
         type="target"
         position={Position.Top}
+        isConnectable={isConnectable}
+        className="!bg-accent-primary !size-2"
+      />
+      {/* v1 ExeSQL and similar "tool" components route their result
+          downstream, so they need a source handle too. Without this,
+          any edge where the toolNode is the source silently fails to
+          render. */}
+      <Handle
+        id={NodeHandleId.Start}
+        type="source"
+        position={Position.Right}
         isConnectable={isConnectable}
         className="!bg-accent-primary !size-2"
       />
