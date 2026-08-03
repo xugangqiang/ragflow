@@ -54,6 +54,7 @@ func (s *DocumentService) SetDocumentMetadata(ctx context.Context, docID string,
 		return fmt.Errorf("failed to ensure metadata store: %w", err)
 	}
 
+	meta = splitCombinedDocumentMetadataValues(meta)
 	if err = s.docEngine.UpdateMetadata(ctx, docID, doc.KbID, meta, tenantID); err != nil {
 		return fmt.Errorf("failed to update metadata: %w", err)
 	}
@@ -562,12 +563,12 @@ func (s *DocumentService) patchDocumentMetadata(ctx context.Context, docID strin
 func (s *DocumentService) BatchUpdateDocumentMetadatas(
 	ctx context.Context,
 	datasetID string,
-	selector *DocumentMetadataSelector,
-	updates []DocumentMetadataUpdate,
-	deletes []DocumentMetadataDelete,
-) (*BatchUpdateDocumentMetadatasResponse, common.ErrorCode, error) {
+	selector *MetadataSelector,
+	updates []MetadataUpdate,
+	deletes []MetadataDelete,
+) (*BatchUpdateMetadatasResponse, common.ErrorCode, error) {
 	if selector == nil {
-		selector = &DocumentMetadataSelector{}
+		selector = &MetadataSelector{}
 	}
 	if code, err := validateBatchUpdateDocumentMetadatasRequest(selector, updates, deletes); err != nil {
 		return nil, code, err
@@ -634,7 +635,7 @@ func (s *DocumentService) BatchUpdateDocumentMetadatas(
 		// Early-exit when conditions given but nothing matched.
 		rawConds, _ := selector.MetadataCondition["conditions"]
 		if rawConds != nil && len(targetDocIDs) == 0 {
-			return &BatchUpdateDocumentMetadatasResponse{Updated: 0, MatchedDocs: 0}, common.CodeSuccess, nil
+			return &BatchUpdateMetadatasResponse{Updated: 0, MatchedDocs: 0}, common.CodeSuccess, nil
 		}
 	}
 
@@ -674,13 +675,13 @@ func (s *DocumentService) BatchUpdateDocumentMetadatas(
 		updated++
 	}
 
-	return &BatchUpdateDocumentMetadatasResponse{Updated: updated, MatchedDocs: len(ids)}, common.CodeSuccess, nil
+	return &BatchUpdateMetadatasResponse{Updated: updated, MatchedDocs: len(ids)}, common.CodeSuccess, nil
 }
 
 func validateBatchUpdateDocumentMetadatasRequest(
-	selector *DocumentMetadataSelector,
-	updates []DocumentMetadataUpdate,
-	deletes []DocumentMetadataDelete,
+	selector *MetadataSelector,
+	updates []MetadataUpdate,
+	deletes []MetadataDelete,
 ) (common.ErrorCode, error) {
 	for _, upd := range updates {
 		if strings.TrimSpace(upd.Key) == "" || upd.Value == nil {
@@ -711,6 +712,55 @@ func cloneDocumentMetadata(meta map[string]interface{}) map[string]interface{} {
 	return cloned
 }
 
+func splitCombinedDocumentMetadataValues(meta map[string]any) map[string]any {
+	if len(meta) == 0 {
+		return meta
+	}
+	out := make(map[string]any, len(meta))
+	for key, value := range meta {
+		switch typed := value.(type) {
+		case []interface{}:
+			out[key] = splitCombinedDocumentMetadataList(typed)
+		case []string:
+			items := make([]any, 0, len(typed))
+			for _, item := range typed {
+				items = append(items, item)
+			}
+			out[key] = splitCombinedDocumentMetadataList(items)
+		default:
+			out[key] = value
+		}
+	}
+	return out
+}
+
+var combinedDocumentMetadataValueSplitter = regexp.MustCompile(`[、,，;；|]+`)
+
+func splitCombinedDocumentMetadataList(items []any) []any {
+	out := make([]interface{}, 0, len(items))
+	for _, item := range items {
+		text, ok := item.(string)
+		if !ok {
+			out = append(out, item)
+			continue
+		}
+		parts := combinedDocumentMetadataValueSplitter.Split(strings.TrimSpace(text), -1)
+		added := false
+		for _, part := range parts {
+			part = strings.TrimSpace(part)
+			if part == "" {
+				continue
+			}
+			out = append(out, part)
+			added = true
+		}
+		if !added {
+			out = append(out, item)
+		}
+	}
+	return dedupeDocumentMetadataList(out)
+}
+
 func cloneDocumentMetadataValue(v interface{}) interface{} {
 	switch typed := v.(type) {
 	case []interface{}:
@@ -728,7 +778,7 @@ func cloneDocumentMetadataValue(v interface{}) interface{} {
 	}
 }
 
-func applyDocumentMetadataUpdates(meta map[string]interface{}, updates []DocumentMetadataUpdate) bool {
+func applyDocumentMetadataUpdates(meta map[string]interface{}, updates []MetadataUpdate) bool {
 	changed := false
 	for _, upd := range updates {
 		key := strings.TrimSpace(upd.Key)
@@ -804,7 +854,7 @@ func applyDocumentMetadataUpdates(meta map[string]interface{}, updates []Documen
 	return changed
 }
 
-func applyDocumentMetadataDeletes(meta map[string]interface{}, deletes []DocumentMetadataDelete) bool {
+func applyDocumentMetadataDeletes(meta map[string]interface{}, deletes []MetadataDelete) bool {
 	changed := false
 	for _, del := range deletes {
 		key := strings.TrimSpace(del.Key)
