@@ -4,6 +4,10 @@ go 1.26.4
 
 require (
 	cloud.google.com/go/storage v1.63.0
+	// dla-native is the standalone Go port of DeepDoc's det/DLA/TSR/OCR-rec.
+	// It is imported only under the `native_det` build tag; the default build
+	// never compiles it. See internal/deepdoc/dla-native and HANDOFF.md §8 C1.
+	dla-native v0.0.0
 	github.com/DATA-DOG/go-sqlmock v1.5.2
 	github.com/LuxorLabs/tenki-sdk-go/sandbox v0.5.2
 	github.com/alibabacloud-go/agentrun-20250910/v5 v5.8.4
@@ -72,6 +76,11 @@ require (
 	gopkg.in/yaml.v3 v3.0.1
 	gorm.io/driver/mysql v1.5.2
 	gorm.io/gorm v1.25.7
+)
+
+require (
+	github.com/gorilla/websocket v1.5.3
+	github.com/pkg/errors v0.9.1
 )
 
 require (
@@ -145,7 +154,6 @@ require (
 	github.com/googleapis/enterprise-certificate-proxy v0.3.17 // indirect
 	github.com/googleapis/gax-go/v2 v2.23.0 // indirect
 	github.com/goph/emperror v0.17.2 // indirect
-	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/hashicorp/hcl v1.0.0 // indirect
 	github.com/jinzhu/inflection v1.0.0 // indirect
 	github.com/jinzhu/now v1.1.5 // indirect
@@ -169,7 +177,6 @@ require (
 	github.com/pelletier/go-toml/v2 v2.3.1 // indirect
 	github.com/philhofer/fwd v1.2.0 // indirect
 	github.com/phpdave11/gofpdi v1.0.14-0.20211212211723-1f10f9844311 // indirect
-	github.com/pkg/errors v0.9.1 // indirect
 	github.com/planetscale/vtprotobuf v0.6.1-0.20240319094008-0393e58bdf10 // indirect
 	github.com/quic-go/qpack v0.6.0 // indirect
 	github.com/quic-go/quic-go v0.59.1 // indirect
@@ -199,6 +206,7 @@ require (
 	github.com/wk8/go-ordered-map/v2 v2.1.8 // indirect
 	github.com/xuri/efp v0.0.1 // indirect
 	github.com/xuri/nfp v0.0.2-0.20250530014748-2ddeb826f9a9 // indirect
+	github.com/yalue/onnxruntime_go v1.23.0 // indirect
 	github.com/yargevad/filepathx v1.0.0 // indirect
 	github.com/yuin/gopher-lua v1.1.1 // indirect
 	go.mongodb.org/mongo-driver/v2 v2.6.0 // indirect
@@ -210,6 +218,7 @@ require (
 	go.uber.org/atomic v1.11.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
+	gocv.io/x/gocv v0.37.0 // indirect
 	golang.org/x/arch v0.27.0 // indirect
 	golang.org/x/exp v0.0.0-20231226003508-02704c960a9b // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect
@@ -228,3 +237,7 @@ require (
 )
 
 replace github.com/infiniflow/infinity-go-sdk => github.com/infiniflow/infinity/go v0.0.0-20260723093510-ceb4bc518010
+
+// dla-native: local standalone module (DeepDoc det/DLA/TSR/OCR-rec Go port).
+// Only pulled in under -tags native_det.
+replace dla-native => ./internal/deepdoc/dla-native

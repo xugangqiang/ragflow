@@ -189,6 +189,14 @@ func (p *Parser) inferTSR(ctx context.Context, tb pdf.TableBuilder, cropped imag
 // ocrMergeChars and ocrDetectAndRecognize callers should funnel
 // through this helper.
 func (p *Parser) inferOCRDetect(ctx context.Context, doc pdf.DocAnalyzer, pageImg image.Image) ([]pdf.OCRBox, error) {
+	// Opt-in native detector: run in-process instead of the remote DeepDoc
+	// OCRDetect HTTP call. Falls back to the remote path on any native error
+	// so a misconfigured native build never breaks detection.
+	if nativeDetEnabled {
+		if boxes, err := nativeDetectFn(pageImg); err == nil {
+			return boxes, nil
+		}
+	}
 	if doc == nil || !doc.Health() {
 		return nil, nil
 	}

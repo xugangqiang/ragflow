@@ -1,0 +1,153 @@
+# DeepDoc Go-port drift gate.
+#
+# Three-way parity contract for the det / DLA / TSR / OCR-rec ports:
+#   1. Python oracle (ref_*.py, which import the *real* deepdoc package) is the
+#      source of truth.
+#   2. A pinned golden JSON (committed under internal/deepdoc/dla-native/testdata)
+#      captures the oracle output on a fixed fixture set.
+#   3. The Go port is compared against the same golden by the integration tests.
+#
+# This workflow enforces the *Python* half of that contract automatically:
+#   - python-drift:        re-runs the Python oracle on every committed fixture and
+#                          compares it to the pinned golden (check_drift.py). If
+#                          deepdoc's Python logic changes without the golden being
+#                          regenerated, this fails and alerts.
+#   - go-dla-native:       runs the dla-native model-backed integration tests
+#                          (Go vs the same golden) for DLA/TSR/OCR-rec/det on a
+#                          portable runner (ORT only, no CGO PDF static libs).
+#
+# The heavier parser/pdf native_det (CGO PDF rasterization) comparison already
+# runs in the self-hosted tests.yml pipeline; it is intentionally not duplicated
+# here to keep this workflow portable and fast.
+name: deepdoc-drift
+permissions:
+  contents: read
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'deepdoc/**'
+      - 'common/**'
+      - 'rag/**'
+      - 'internal/deepdoc/**'
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - 'deepdoc/**'
+      - 'common/**'
+      - 'rag/**'
+      - 'internal/deepdoc/**'
+  # Nightly: catches upstream deepdoc logic drift even when no repo file changed.
+  schedule:
+    - cron: '0 18 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  MODEL_REPO: InfiniFlow/deepdoc
+  MODEL_FILES: "det.onnx layout.onnx tsr.onnx rec.onnx ocr.res"
+  PYTHON_VERSION: '3.13'
+  GO_VERSION: '1.26'
+
+jobs:
+  python-drift:
+    name: python-oracle drift gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Cache uv package store
+        uses: actions/cache@v5
+        with:
+          path: ~/.cache/uv
+          key: uv-deepdoc-drift-${{ runner.os }}-${{ env.PYTHON_VERSION }}
+
+      - name: Cache DeepDoc models
+        uses: actions/cache@v5
+        with:
+          path: ${{ github.workspace }}/models/deepdoc
+          key: deepdoc-models-${{ env.MODEL_REPO }}-v1
+
+      - name: Provision environment + models
+        env:
+          MODEL_DIR: ${{ github.workspace }}/models/deepdoc
+        run: |
+          uv sync --python ${{ env.PYTHON_VERSION }} --frozen
+          # huggingface_hub is a transitive dep of deepdoc; ensure it for model pulls.
+          uv pip install --quiet huggingface_hub
+          mkdir -p "$MODEL_DIR"
+          uv run python - <<'PY'
+          import os
+          from huggingface_hub import hf_hub_download
+          repo = os.environ["MODEL_REPO"]
+          out = os.environ["MODEL_DIR"]
+          for f in os.environ["MODEL_FILES"].split():
+              hf_hub_download(repo_id=repo, filename=f, local_dir=out)
+          print("models ready:", sorted(os.listdir(out)))
+          PY
+
+      - name: Run drift gate (Python oracle vs pinned golden)
+        working-directory: internal/deepdoc/dla-native
+        env:
+          MODEL_DIR: ${{ github.workspace }}/models/deepdoc
+        run: uv run python check_drift.py
+
+  go-dla-native:
+    name: go DLA/TSR/OCR-rec/det integration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Install ORT shared lib (CPU)
+        id: ort
+        run: |
+          python3 -m pip install --quiet "onnxruntime==1.23.2"
+          echo "ORT_LIB=$(python3 -c 'import glob,onnxruntime,os;d=os.path.join(os.path.dirname(onnxruntime.__file__),"capi");c=[f for f in glob.glob(os.path.join(d,"libonnxruntime.so*")) if "providers" not in f][0];print(c)')" >> "$GITHUB_OUTPUT"
+
+      - name: Cache DeepDoc models
+        uses: actions/cache@v5
+        with:
+          path: ${{ github.workspace }}/models/deepdoc
+          key: deepdoc-models-${{ env.MODEL_REPO }}-v1
+
+      - name: Provision models
+        env:
+          MODEL_DIR: ${{ github.workspace }}/models/deepdoc
+        run: |
+          python3 -m pip install --quiet huggingface_hub
+          mkdir -p "$MODEL_DIR"
+          python3 - <<'PY'
+          import os
+          from huggingface_hub import hf_hub_download
+          repo = os.environ["MODEL_REPO"]
+          out = os.environ["MODEL_DIR"]
+          for f in os.environ["MODEL_FILES"].split():
+              hf_hub_download(repo_id=repo, filename=f, local_dir=out)
+          PY
+
+      - name: Run dla-native integration tests (Go vs pinned golden)
+        working-directory: internal/deepdoc/dla-native
+        env:
+          ORT_LIB: ${{ steps.ort.outputs.ORT_LIB }}
+          MODEL_DIR: ${{ github.workspace }}/models/deepdoc
+          CGO_ENABLED: '1'
+        run: go test -tags integration -count=1 ./native/

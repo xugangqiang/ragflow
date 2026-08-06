@@ -1,0 +1,235 @@
+package native
+
+// tsr.go — Table Structure Recognition recognizer.
+//
+// Ports the PP-Det style path in deepdoc/vision/recognizer.py (base
+// Recognizer.preprocess/postprocess, "scale_factor" branch off) plus the
+// column/row alignment in deepdoc/vision/table_structure_recognizer.py and the
+// wire mapping in deepdoc/server/adapters/tsr_adapter.py.
+
+import (
+	"encoding/json"
+	"path/filepath"
+	"strings"
+)
+
+const tsrInputSize = 640
+const tsrCandidates = 8400
+
+// tsrLabels mirrors TableStructureRecognizer.labels (also tsr_adapter.TSR_CLASS_MAP keys).
+var tsrLabels = []string{
+	"table", "table column", "table row",
+	"table column header", "table projected row header", "table spanning cell",
+}
+
+// TSRBox is one structural element (in original pixel coordinates).
+type TSRBox struct {
+	Label               string
+	Score               float32
+	X0, X1, Top, Bottom float32
+}
+
+// TSRResult is the aligned set of structural elements for one table region.
+// W/H are the source image dimensions, used to clamp boxes into bounds (mirrors
+// tsr_adapter.py, which clamps every coordinate to [0, width]/[0, height]).
+type TSRResult struct {
+	Boxes []TSRBox
+	W, H  int
+}
+
+// RunTSR runs table-structure recognition on a cropped table image.
+func RunTSR(modelDir string, img *Image) (TSRResult, error) {
+	blob, sf := tsrPreprocess(img)
+	sess, release, err := getModelSession(filepath.Join(modelDir, "tsr.onnx"), "images",
+		[]int64{1, 3, tsrInputSize, tsrInputSize}, "output0",
+		[]int64{1, 11, tsrCandidates})
+	if err != nil {
+		return TSRResult{}, err
+	}
+	defer release()
+
+	out, err := sess.Run(blob)
+	if err != nil {
+		return TSRResult{}, err
+	}
+	res := tsrPostprocess(out, sf)
+	res.W, res.H = img.W, img.H
+	return res, nil
+}
+
+func tsrPreprocess(img *Image) (blob []float32, scaleFactor [2]float32) {
+	bgr := img.ToBGR()
+	resized := BilinearResize(bgr, img.W, img.H, tsrInputSize, tsrInputSize)
+	blob = make([]float32, 3*tsrInputSize*tsrInputSize)
+	for y := 0; y < tsrInputSize; y++ {
+		for x := 0; x < tsrInputSize; x++ {
+			o := (y*tsrInputSize + x) * 3
+			blob[0*tsrInputSize*tsrInputSize+y*tsrInputSize+x] = float32(resized[o]) / 255.0
+			blob[1*tsrInputSize*tsrInputSize+y*tsrInputSize+x] = float32(resized[o+1]) / 255.0
+			blob[2*tsrInputSize*tsrInputSize+y*tsrInputSize+x] = float32(resized[o+2]) / 255.0
+		}
+	}
+	scaleFactor = [2]float32{float32(img.W) / tsrInputSize, float32(img.H) / tsrInputSize}
+	return
+}
+
+func tsrPostprocess(out []float32, sf [2]float32) TSRResult {
+	const scoreThr = 0.2
+	type cand struct {
+		Box
+		cls int
+	}
+	cands := make([]cand, 0, tsrCandidates)
+	for a := 0; a < tsrCandidates; a++ {
+		// Model output is [1, 11, 8400] (feature-major / channels-first), so
+		// flat index for feature c, anchor a is c*8400 + a.
+		// Class scores live in features 4..10; pick the max.
+		best, bestCls := float32(-1), 0
+		for c := 4; c < 11; c++ {
+			v := out[c*tsrCandidates+a]
+			if v > best {
+				best = v
+				bestCls = c - 4
+			}
+		}
+		if best <= scoreThr {
+			continue
+		}
+		if bestCls >= len(tsrLabels) {
+			continue
+		}
+		// Model emits [x, y, w, h] (center-based) in the 640-input space.
+		// Scale back to original pixels, then convert to xyxy (mirrors
+		// recognizer.py postprocess: multiply by scale_factor, then xywh2xyxy).
+		cx := out[0*tsrCandidates+a] * sf[0]
+		cy := out[1*tsrCandidates+a] * sf[1]
+		hw := out[2*tsrCandidates+a] * sf[0] * 0.5
+		hh := out[3*tsrCandidates+a] * sf[1] * 0.5
+		cands = append(cands, cand{
+			Box: Box{
+				X0:    cx - hw,
+				Y0:    cy - hh,
+				X1:    cx + hw,
+				Y1:    cy + hh,
+				Score: best,
+			},
+			cls: bestCls,
+		})
+	}
+
+	byClass := map[int][]int{}
+	for i, c := range cands {
+		byClass[c.cls] = append(byClass[c.cls], i)
+	}
+	boxes := make([]TSRBox, 0, len(cands))
+	for cls, idxs := range byClass {
+		sub := make([]Box, len(idxs))
+		for k, i := range idxs {
+			sub[k] = cands[i].Box
+		}
+		for _, keep := range NMS(sub, 0.2, false) {
+			b := sub[keep]
+			boxes = append(boxes, TSRBox{
+				Label: tsrLabels[cls],
+				Score: round4(b.Score),
+				X0:    round2(b.X0), X1: round2(b.X1),
+				Top: round2(b.Y0), Bottom: round2(b.Y1),
+			})
+		}
+	}
+
+	alignTSR(boxes)
+	return TSRResult{Boxes: boxes}
+}
+
+// alignTSR pulls row/header boxes to the table's horizontal extremes and
+// column boxes to its vertical extremes (mirrors TableStructureRecognizer.__call__).
+func alignTSR(boxes []TSRBox) {
+	var leftVals, rightVals, topVals, botVals []float32
+	for _, b := range boxes {
+		if strings.Contains(b.Label, "row") || strings.Contains(b.Label, "header") {
+			leftVals = append(leftVals, b.X0)
+			rightVals = append(rightVals, b.X1)
+		}
+		if b.Label == "table column" {
+			topVals = append(topVals, b.Top)
+			botVals = append(botVals, b.Bottom)
+		}
+	}
+	if len(leftVals) == 0 {
+		return
+	}
+	left := minOf(leftVals)
+	right := maxOf(rightVals)
+	for i := range boxes {
+		if strings.Contains(boxes[i].Label, "row") || strings.Contains(boxes[i].Label, "header") {
+			if boxes[i].X0 > left {
+				boxes[i].X0 = left
+			}
+			if boxes[i].X1 < right {
+				boxes[i].X1 = right
+			}
+		}
+	}
+	if len(topVals) == 0 {
+		return
+	}
+	top := minOf(topVals)
+	bot := maxOf(botVals)
+	for i := range boxes {
+		if boxes[i].Label == "table column" {
+			if boxes[i].Top > top {
+				boxes[i].Top = top
+			}
+			if boxes[i].Bottom < bot {
+				boxes[i].Bottom = bot
+			}
+		}
+	}
+}
+
+var tsrClassMap = map[string]int{
+	"table": 0, "table column": 1, "table row": 2,
+	"table column header": 3, "table projected row header": 4, "table spanning cell": 5,
+}
+
+// Wire emits the Go DocAnalyzer TSR format:
+// {"bboxes": [[x0,y0,x1,y1,score,class_id], ...]}.
+func (r TSRResult) Wire() string {
+	rows := make([][]float32, 0, len(r.Boxes))
+	w, h := float32(r.W), float32(r.H)
+	for _, b := range r.Boxes {
+		cls, ok := tsrClassMap[b.Label]
+		if !ok {
+			continue
+		}
+		// Clamp into image bounds (mirrors tsr_adapter.py).
+		x0 := minf(maxf(b.X0, 0), w)
+		x1 := minf(maxf(b.X1, 0), w)
+		top := minf(maxf(b.Top, 0), h)
+		bot := minf(maxf(b.Bottom, 0), h)
+		rows = append(rows, []float32{x0, top, x1, bot, b.Score, float32(cls)})
+	}
+	out, _ := json.Marshal(map[string]any{"bboxes": rows})
+	return string(out)
+}
+
+func minOf(v []float32) float32 {
+	m := v[0]
+	for _, x := range v[1:] {
+		if x < m {
+			m = x
+		}
+	}
+	return m
+}
+
+func maxOf(v []float32) float32 {
+	m := v[0]
+	for _, x := range v[1:] {
+		if x > m {
+			m = x
+		}
+	}
+	return m
+}
