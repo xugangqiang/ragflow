@@ -282,20 +282,26 @@ jobs:
           set -e
           sudo apt-get update
           sudo apt-get install -y lld
-          mkdir -p "$NL"
+          # Each upstream tarball contains top-level `lib/` + `include/` (no
+          # `<name>/` prefix), but the Run step references `$NL/<name>/lib/...`.
+          # Extract into the named subdir so the CGO_LDFLAGS paths resolve —
+          # flattening into $NL root makes every `.a` path dangle and the link
+          # fails. Versions must track build.sh (OFFICE_OXIDE_VERSION /
+          # PDFIUM_STATIC_VERSION / PDF_OXIDE_VERSION).
+          mkdir -p "$NL/office_oxide" "$NL/pdfium-static" "$NL/pdf_oxide"
           cd /tmp
           # pdfium (Chromium static build; needs libc++ + lld to link)
           curl -fSL https://github.com/kognitos/pdfium-static/releases/download/chromium%2F7809/pdfium-linux-x64-static.tgz -o pdfium.tgz || \
             curl -fSL https://gh-proxy.com/https://github.com/kognitos/pdfium-static/releases/download/chromium%2F7809/pdfium-linux-x64-static.tgz -o pdfium.tgz
-          tar xzf pdfium.tgz -C "$NL"
-          # pdf_oxide
-          curl -fSL https://github.com/yfedoseev/pdf_oxide/releases/download/v0.3.73/pdf_oxide-go-ffi-linux-amd64.tar.gz -o pdfoxide.tgz || \
-            curl -fSL https://gh-proxy.com/https://github.com/yfedoseev/pdf_oxide/releases/download/v0.3.73/pdf_oxide-go-ffi-linux-amd64.tar.gz -o pdfoxide.tgz
-          tar xzf pdfoxide.tgz -C "$NL"
+          tar xzf pdfium.tgz -C "$NL/pdfium-static"
+          # pdf_oxide — version tracks build.sh PDF_OXIDE_VERSION (0.3.67)
+          curl -fSL https://github.com/yfedoseev/pdf_oxide/releases/download/v0.3.67/pdf_oxide-go-ffi-linux-amd64.tar.gz -o pdfoxide.tgz || \
+            curl -fSL https://gh-proxy.com/https://github.com/yfedoseev/pdf_oxide/releases/download/v0.3.67/pdf_oxide-go-ffi-linux-amd64.tar.gz -o pdfoxide.tgz
+          tar xzf pdfoxide.tgz -C "$NL/pdf_oxide"
           # office_oxide
           curl -fSL https://github.com/yfedoseev/office_oxide/releases/download/v0.1.8/native-linux-x86_64.tar.gz -o office.tgz || \
             curl -fSL https://gh-proxy.com/https://github.com/yfedoseev/office_oxide/releases/download/v0.1.8/native-linux-x86_64.tar.gz -o office.tgz
-          tar xzf office.tgz -C "$NL"
+          tar xzf office.tgz -C "$NL/office_oxide"
 
       - name: Cache DeepDoc models
         uses: actions/cache@v5
