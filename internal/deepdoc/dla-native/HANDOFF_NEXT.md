@@ -64,11 +64,11 @@
   **并移除了 `continue-on-error`**，现已成为阻断闸门（生产路径已是 nogocv，见 P3；gocv 仅作 cv2 1:1
   parity 交叉校验，理应稳定）。验证见 CI run（gocv job 变绿）。注意：本地 opencv 是 4.6.0 且在默认路径，
   所以本地 gocv 一直 ok——此 bug 只在 CI 从源码构建 4.10 时暴露。
-- **`python-drift`（python-oracle）✅ 已修复（commit `9ee9b6363`）**：原失败根因是 run 步骤的
+- **`python-drift`（python-oracle）✅ 已修复并验证（commit `9ee9b6363`，run `31171551259` 全绿）**：原失败根因是 run 步骤的
   `ref_det.py` 做 `from deepdoc.vision.ocr import TextDetector`，但 `uv sync` 不会把仓库根的 `deepdoc`
   包装进 venv（该包位于仓库根 `deepdoc/`）。修复：给 run 步骤加 `PYTHONPATH=${{ github.workspace }}`
   （与 `check_drift.py` 文档里的本地调用一致），`import deepdoc` 即解析。此属独立供给 bug，与 Go-port
-  代码改动无关，是漂移门最后一个红灯；修复后漂移门四 job 应全绿。验证见 CI run。
+  代码改动无关，是漂移门最后一个红灯；修复后漂移门四 job 全绿。
 - 注：若 CI run 中 `go-native-det` 失败，先排查是 (a) 原生库下载/链接问题，还是 (b) 真实回归。
   链接/下载问题是 job 自身供给问题（非阻断期内可迭代），真实回归则需回退对应改动。
 
@@ -150,4 +150,5 @@ gh run view 31157005421 -R xugangqiang/ragflow
   `go-native-det` 变绿，并据此将其改为阻断闸门）；`31164445982`（P2 后验证 native_det/nogocv 仍绿，
   gocv 与 python-drift 仍因独立供给 bug 红——gocv 已在 `e76128f58` 修复）；`31167591590`（验证 gocv
   修复：gocv job 变绿且作为阻断闸门通过，OpenCV 4.10 从源码构建 + gocv 集成全跑通；仅 `python-drift`
-  仍因独立 PYTHONPATH 供给 bug 红）；`311XXXXXXXXXX`（验证 python-drift 修复 `9ee9b6363`：四 job 应全绿）。
+  仍因独立 PYTHONPATH 供给 bug 红）；`31171551259`（验证 python-drift 修复 `9ee9b6363`：四 job 全绿，
+  漂移门整体转绿）。
