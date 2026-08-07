@@ -16,11 +16,9 @@
 #                          (Go vs the same golden) for DLA/TSR/OCR-rec/det on a
 #                          portable runner (ORT only, no CGO PDF static libs).
 #
-# The production-wired parser/pdf native_det path (dla-native RunDet, needs
-# the CGO PDF native static libs) is covered by the go-native-det job below. It
-# provisions those libs (office_oxide/pdfium/pdf_oxide) in CI rather than
-# depending on the self-hosted tests.yml builder, keeping this drift gate
-# self-contained; tests.yml remains the heavier self-hosted pipeline.
+# det is exercised in go-dla-native (and go-dla-native-gocv) purely as a
+# Golden-comparison tool (RunDet vs the Python reference), NOT as a
+# production-wired path — there is no parser/pdf native_det seam.
 name: deepdoc-drift
 permissions:
   contents: read
@@ -255,102 +253,3 @@ jobs:
           PKG_CONFIG_PATH: ${{ runner.workspace }}/opencv-4.10/lib/pkgconfig
           LD_LIBRARY_PATH: ${{ runner.workspace }}/opencv-4.10/lib
         run: go test -tags "integration gocv" -count=1 ./native/
-
-  # native_det integration: the PRODUCTION-wired DB detector path
-  # (internal/deepdoc/parser/pdf nativeOCRDetect -> dla-native RunDet).
-  # Unlike the ORT-only jobs above, the parser/pdf package links the PDF
-  # native static libs (office_oxide/pdfium/pdf_oxide), so this job provisions
-  # only those three archives (not the full download_go_deps.py dep set) and
-  # mirrors build.sh's setup_cgo_env. It runs only TestNativeOCRDetect*.
-  #
-  # Rollout note: non-blocking on first landing because the native-lib
-  # provisioning cannot be validated outside CI. Once it is green in CI,
-  # remove `continue-on-error` so a native_det regression blocks the gate.
-  go-native-det:
-    name: go native_det (production DB detector) integration
-    runs-on: ubuntu-latest
-    # Blocking gate: native-lib provisioning (named-subdir extraction + version
-    # pins tracking build.sh) is now verified green in CI. A native_det
-    # regression must block the drift gate / main.
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: ${{ env.GO_VERSION }}
-
-      - name: Install ORT shared lib (CPU)
-        id: ort
-        run: |
-          python3 -m pip install --quiet "onnxruntime==1.23.2"
-          echo "ORT_LIB=$(python3 -c 'import glob,onnxruntime,os;d=os.path.join(os.path.dirname(onnxruntime.__file__),"capi");c=[f for f in glob.glob(os.path.join(d,"libonnxruntime.so*")) if "providers" not in f][0];print(c)')" >> "$GITHUB_OUTPUT"
-
-      - name: Install lld + provision Go native libs
-        env:
-          NL: ${{ runner.workspace }}/ragflow-native-libs
-        run: |
-          set -e
-          sudo apt-get update
-          sudo apt-get install -y lld
-          # Each upstream tarball contains top-level `lib/` + `include/` (no
-          # `<name>/` prefix), but the Run step references `$NL/<name>/lib/...`.
-          # Extract into the named subdir so the CGO_LDFLAGS paths resolve —
-          # flattening into $NL root makes every `.a` path dangle and the link
-          # fails. Versions must track build.sh (OFFICE_OXIDE_VERSION /
-          # PDFIUM_STATIC_VERSION / PDF_OXIDE_VERSION).
-          mkdir -p "$NL/office_oxide" "$NL/pdfium-static" "$NL/pdf_oxide"
-          cd /tmp
-          # pdfium (Chromium static build; needs libc++ + lld to link)
-          curl -fSL https://github.com/kognitos/pdfium-static/releases/download/chromium%2F7809/pdfium-linux-x64-static.tgz -o pdfium.tgz || \
-            curl -fSL https://gh-proxy.com/https://github.com/kognitos/pdfium-static/releases/download/chromium%2F7809/pdfium-linux-x64-static.tgz -o pdfium.tgz
-          tar xzf pdfium.tgz -C "$NL/pdfium-static"
-          # pdf_oxide — version tracks build.sh PDF_OXIDE_VERSION (0.3.67)
-          curl -fSL https://github.com/yfedoseev/pdf_oxide/releases/download/v0.3.67/pdf_oxide-go-ffi-linux-amd64.tar.gz -o pdfoxide.tgz || \
-            curl -fSL https://gh-proxy.com/https://github.com/yfedoseev/pdf_oxide/releases/download/v0.3.67/pdf_oxide-go-ffi-linux-amd64.tar.gz -o pdfoxide.tgz
-          tar xzf pdfoxide.tgz -C "$NL/pdf_oxide"
-          # office_oxide
-          curl -fSL https://github.com/yfedoseev/office_oxide/releases/download/v0.1.8/native-linux-x86_64.tar.gz -o office.tgz || \
-            curl -fSL https://gh-proxy.com/https://github.com/yfedoseev/office_oxide/releases/download/v0.1.8/native-linux-x86_64.tar.gz -o office.tgz
-          tar xzf office.tgz -C "$NL/office_oxide"
-
-      - name: Cache DeepDoc models
-        uses: actions/cache@v5
-        with:
-          path: ${{ github.workspace }}/models/deepdoc
-          key: deepdoc-models-${{ env.MODEL_REPO }}-v1
-
-      - name: Provision models
-        env:
-          MODEL_DIR: ${{ github.workspace }}/models/deepdoc
-        run: |
-          python3 -m pip install --quiet huggingface_hub
-          mkdir -p "$MODEL_DIR"
-          python3 - <<'PY'
-          import os
-          from huggingface_hub import hf_hub_download
-          repo = os.environ["MODEL_REPO"]
-          out = os.environ["MODEL_DIR"]
-          for f in os.environ["MODEL_FILES"].split():
-              hf_hub_download(repo_id=repo, filename=f, local_dir=out)
-          PY
-
-      - name: Run native_det integration tests
-        env:
-          ORT_LIB: ${{ steps.ort.outputs.ORT_LIB }}
-          MODEL_DIR: ${{ github.workspace }}/models/deepdoc
-          CGO_ENABLED: '1'
-          NL: ${{ runner.workspace }}/ragflow-native-libs
-        run: |
-          set -e
-          OO="$NL/office_oxide"
-          mkdir -p "$OO/lib/v0.1.8"
-          [ -e "$OO/lib/v0.1.8/liboffice_oxide.a" ] || ln -sf "$OO/lib/liboffice_oxide.a" "$OO/lib/v0.1.8/liboffice_oxide.a"
-          export CGO_CFLAGS="-I$OO/include/office_oxide_c"
-          export CGO_LDFLAGS="$OO/lib/v0.1.8/liboffice_oxide.a"
-          PF="$NL/pdfium-static"
-          export CGO_LDFLAGS="$CGO_LDFLAGS $PF/lib/libpdfium.a $PF/lib/libc++.a $PF/lib/libc++abi.a -fuse-ld=lld -Wl,--allow-multiple-definition"
-          PO="$NL/pdf_oxide"
-          export CGO_LDFLAGS="$CGO_LDFLAGS $PO/lib/linux_amd64/libpdf_oxide.a -lm -lpthread -ldl -lrt -lgcc_s -lutil -lc"
-          go test -tags "native_det integration" -run 'TestNativeOCRDetect' -count=1 ./internal/deepdoc/parser/pdf/

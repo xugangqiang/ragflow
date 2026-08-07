@@ -6,7 +6,6 @@ import (
 	"image"
 	"log/slog"
 	"math"
-	"os"
 	"sort"
 	"sync"
 
@@ -65,14 +64,6 @@ type pageResult struct {
 
 // New creates a new Parser with the given config.
 func NewParser(cfg pdf.ParserConfig) *Parser {
-	// Opt in to the in-process native DB text detector (dla-native) when
-	// RAGFLOW_NATIVE_DET=1 and the binary was built with -tags native_det.
-	// See native_det.go / HANDOFF.md §8 C1/C2. No-op under the default build
-	// (stub), and inferOCRDetect falls back to the remote DeepDoc service if
-	// the native path is unavailable.
-	if os.Getenv("RAGFLOW_NATIVE_DET") == "1" {
-		EnableNativeDet(true)
-	}
 	return &Parser{Config: cfg}
 }
 
