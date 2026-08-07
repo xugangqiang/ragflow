@@ -6,6 +6,8 @@
 >
 > **重要**：`HANDOFF.md` 中 §8「A2·session 复用」描述的**无界** `detSessionPools sync.Map`
 > 已被本轮回合**替换**为有界 LRU（见 §1.1）。新会话勿以旧描述为基准。
+>
+> **设计说明（ADR 风格，权威）见同目录 `README.md`**——定位、边界、纯 Go 决策、3px 地板、golden 生成与漂移门语义均以其为准；本文件与 `HANDOFF.md` 仅为历史上下文。
 
 ## 0. TL;DR（新会话从这里开始）
 

@@ -15,6 +15,7 @@ package native
 // transport now encodes pages/crops as lossless PNG.
 
 import (
+	"fmt"
 	"image"
 	"image/draw"
 	_ "image/jpeg"
@@ -22,10 +23,34 @@ import (
 	"os"
 )
 
+// Decode bounds guard against decompression bombs. The comparison tool only
+// decodes fixed fixtures today, but if it ever ingests untrusted input the
+// image/* decoders perform no size check of their own, so we cap dimensions
+// and total pixels before materializing the raster.
+const (
+	maxImageDim    = 16384
+	maxImagePixels = 100_000_000 // 100 MP
+)
+
 // Image is a decoded raster in R,G,B byte order, row-major (len H*W*3).
 type Image struct {
 	W, H int
 	Pix  []byte
+}
+
+// checkImageBounds rejects empty, oversized, or decompression-bomb rasters.
+func checkImageBounds(b image.Rectangle) error {
+	if b.Dx() <= 0 || b.Dy() <= 0 {
+		return fmt.Errorf("native: empty image")
+	}
+	if b.Dx() > maxImageDim || b.Dy() > maxImageDim {
+		return fmt.Errorf("native: image dimension %dx%d exceeds cap %d",
+			b.Dx(), b.Dy(), maxImageDim)
+	}
+	if px := int64(b.Dx()) * int64(b.Dy()); px > maxImagePixels {
+		return fmt.Errorf("native: image has %d pixels, exceeds cap %d", px, maxImagePixels)
+	}
+	return nil
 }
 
 // Decode reads an image file (any format Go's image package can decode,
@@ -39,6 +64,9 @@ func Decode(path string) (*Image, error) {
 	defer f.Close()
 	img, _, err := image.Decode(f)
 	if err != nil {
+		return nil, err
+	}
+	if err := checkImageBounds(img.Bounds()); err != nil {
 		return nil, err
 	}
 	b := img.Bounds()
