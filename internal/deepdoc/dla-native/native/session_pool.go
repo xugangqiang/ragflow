@@ -30,15 +30,17 @@ var modelSessionPools sync.Map // modelSessKey -> *sync.Pool
 type modelSessKey struct {
 	modelPath, inName, outName string
 	inShape, outShape          string
+	intraOpThreads             int
 }
 
-func modelSessKeyOf(modelPath, inName string, inShape []int64, outName string, outShape []int64) modelSessKey {
+func modelSessKeyOf(modelPath, inName string, inShape []int64, outName string, outShape []int64, intraOpThreads int) modelSessKey {
 	return modelSessKey{
-		modelPath: modelPath,
-		inName:    inName,
-		outName:   outName,
-		inShape:   shapeKey(inShape),
-		outShape:  shapeKey(outShape),
+		modelPath:     modelPath,
+		inName:        inName,
+		outName:       outName,
+		inShape:       shapeKey(inShape),
+		outShape:      shapeKey(outShape),
+		intraOpThreads: intraOpThreads,
 	}
 }
 
@@ -54,8 +56,8 @@ func shapeKey(s []int64) string {
 // a release func. The caller must call release exactly once. On a pool miss a
 // fresh session is created; creation errors are propagated and nothing is
 // cached.
-func getModelSession(modelPath, inName string, inShape []int64, outName string, outShape []int64) (*Session, func(), error) {
-	key := modelSessKeyOf(modelPath, inName, inShape, outName, outShape)
+func getModelSession(modelPath, inName string, inShape []int64, outName string, outShape []int64, intraOpThreads int) (*Session, func(), error) {
+	key := modelSessKeyOf(modelPath, inName, inShape, outName, outShape, intraOpThreads)
 	v, _ := modelSessionPools.LoadOrStore(key, &sync.Pool{})
 	pool := v.(*sync.Pool)
 	if got := pool.Get(); got != nil {
@@ -63,7 +65,7 @@ func getModelSession(modelPath, inName string, inShape []int64, outName string, 
 			return s, func() { pool.Put(s) }, nil
 		}
 	}
-	s, err := NewSession(modelPath, inName, inShape, outName, outShape)
+	s, err := NewSession(modelPath, inName, inShape, outName, outShape, intraOpThreads)
 	if err != nil {
 		return nil, nil, err
 	}

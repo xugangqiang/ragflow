@@ -16,9 +16,11 @@
 #                          (Go vs the same golden) for DLA/TSR/OCR-rec/det on a
 #                          portable runner (ORT only, no CGO PDF static libs).
 #
-# The heavier parser/pdf native_det (CGO PDF rasterization) comparison already
-# runs in the self-hosted tests.yml pipeline; it is intentionally not duplicated
-# here to keep this workflow portable and fast.
+# The production-wired parser/pdf native_det path (dla-native RunDet, needs
+# the CGO PDF native static libs) is covered by the go-native-det job below. It
+# provisions those libs (office_oxide/pdfium/pdf_oxide) in CI rather than
+# depending on the self-hosted tests.yml builder, keeping this drift gate
+# self-contained; tests.yml remains the heavier self-hosted pipeline.
 name: deepdoc-drift
 permissions:
   contents: read
@@ -151,3 +153,186 @@ jobs:
           MODEL_DIR: ${{ github.workspace }}/models/deepdoc
           CGO_ENABLED: '1'
         run: go test -tags integration -count=1 ./native/
+
+  # gocv build: the cv2 decode/resize path that reaches 1:1 parity with the
+  # Python reference (the pure-Go build in go-dla-native carries a ~2.6px
+  # decode/resize floor). This is D2·gocv from HANDOFF.md — optional coverage,
+  # so it is non-blocking (continue-on-error) and does not gate delivery.
+  # OpenCV 4.10 is built once into a cached prefix keyed on the version.
+  go-dla-native-gocv:
+    name: go DLA/TSR/OCR-rec/det integration (gocv / OpenCV 4.10)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Install ORT shared lib (CPU)
+        id: ort
+        run: |
+          python3 -m pip install --quiet "onnxruntime==1.23.2"
+          echo "ORT_LIB=$(python3 -c 'import glob,onnxruntime,os;d=os.path.join(os.path.dirname(onnxruntime.__file__),"capi");c=[f for f in glob.glob(os.path.join(d,"libonnxruntime.so*")) if "providers" not in f][0];print(c)')" >> "$GITHUB_OUTPUT"
+
+      - name: Cache OpenCV 4.10 build
+        id: ocv-cache
+        uses: actions/cache@v5
+        with:
+          path: ${{ runner.workspace }}/opencv-4.10
+          key: opencv-4.10.0-${{ runner.os }}
+
+      - name: Build OpenCV 4.10 (skip on cache hit)
+        env:
+          OPENCV_VERSION: '4.10.0'
+          OCV_PREFIX: ${{ runner.workspace }}/opencv-4.10
+        run: |
+          set -e
+          PC="$OCV_PREFIX/lib/pkgconfig/opencv4.pc"
+          if [ -f "$PC" ]; then
+            echo "OpenCV cache hit at $OCV_PREFIX"
+            exit 0
+          fi
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake pkg-config unzip curl git wget
+          TMP="$(mktemp -d)"
+          curl -Lo "$TMP/opencv.zip" "https://github.com/opencv/opencv/archive/refs/tags/${OPENCV_VERSION}.zip"
+          unzip -q "$TMP/opencv.zip" -d "$TMP"
+          mkdir -p "$TMP/opencv-${OPENCV_VERSION}/build"
+          cd "$TMP/opencv-${OPENCV_VERSION}/build"
+          cmake -D CMAKE_BUILD_TYPE=RELEASE \
+                -D CMAKE_INSTALL_PREFIX="$OCV_PREFIX" \
+                -D BUILD_SHARED_LIBS=ON \
+                -D BUILD_DOCS=OFF -D BUILD_EXAMPLES=OFF \
+                -D BUILD_TESTS=OFF -D BUILD_PERF_TESTS=OFF \
+                -D BUILD_opencv_java=NO -D BUILD_opencv_python=NO \
+                -D BUILD_opencv_python2=NO -D BUILD_opencv_python3=NO \
+                -D WITH_JASPER=OFF -D OPENCV_GENERATE_PKGCONFIG=ON ..
+          make -j "$(nproc)"
+          make install
+          pkg-config --modversion opencv4
+
+      - name: Cache DeepDoc models
+        uses: actions/cache@v5
+        with:
+          path: ${{ github.workspace }}/models/deepdoc
+          key: deepdoc-models-${{ env.MODEL_REPO }}-v1
+
+      - name: Provision models
+        env:
+          MODEL_DIR: ${{ github.workspace }}/models/deepdoc
+        run: |
+          python3 -m pip install --quiet huggingface_hub
+          mkdir -p "$MODEL_DIR"
+          python3 - <<'PY'
+          import os
+          from huggingface_hub import hf_hub_download
+          repo = os.environ["MODEL_REPO"]
+          out = os.environ["MODEL_DIR"]
+          for f in os.environ["MODEL_FILES"].split():
+              hf_hub_download(repo_id=repo, filename=f, local_dir=out)
+          PY
+
+      - name: Run dla-native integration tests (gocv build)
+        working-directory: internal/deepdoc/dla-native
+        env:
+          ORT_LIB: ${{ steps.ort.outputs.ORT_LIB }}
+          MODEL_DIR: ${{ github.workspace }}/models/deepdoc
+          CGO_ENABLED: '1'
+          PKG_CONFIG_PATH: ${{ runner.workspace }}/opencv-4.10/lib/pkgconfig
+          LD_LIBRARY_PATH: ${{ runner.workspace }}/opencv-4.10/lib
+        run: go test -tags "integration gocv" -count=1 ./native/
+
+  # native_det integration: the PRODUCTION-wired DB detector path
+  # (internal/deepdoc/parser/pdf nativeOCRDetect -> dla-native RunDet).
+  # Unlike the ORT-only jobs above, the parser/pdf package links the PDF
+  # native static libs (office_oxide/pdfium/pdf_oxide), so this job provisions
+  # only those three archives (not the full download_go_deps.py dep set) and
+  # mirrors build.sh's setup_cgo_env. It runs only TestNativeOCRDetect*.
+  #
+  # Rollout note: non-blocking on first landing because the native-lib
+  # provisioning cannot be validated outside CI. Once it is green in CI,
+  # remove `continue-on-error` so a native_det regression blocks the gate.
+  go-native-det:
+    name: go native_det (production DB detector) integration
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Install ORT shared lib (CPU)
+        id: ort
+        run: |
+          python3 -m pip install --quiet "onnxruntime==1.23.2"
+          echo "ORT_LIB=$(python3 -c 'import glob,onnxruntime,os;d=os.path.join(os.path.dirname(onnxruntime.__file__),"capi");c=[f for f in glob.glob(os.path.join(d,"libonnxruntime.so*")) if "providers" not in f][0];print(c)')" >> "$GITHUB_OUTPUT"
+
+      - name: Install lld + provision Go native libs
+        env:
+          NL: ${{ runner.workspace }}/ragflow-native-libs
+        run: |
+          set -e
+          sudo apt-get update
+          sudo apt-get install -y lld
+          mkdir -p "$NL"
+          cd /tmp
+          # pdfium (Chromium static build; needs libc++ + lld to link)
+          curl -fSL https://github.com/kognitos/pdfium-static/releases/download/chromium%2F7809/pdfium-linux-x64-static.tgz -o pdfium.tgz || \
+            curl -fSL https://gh-proxy.com/https://github.com/kognitos/pdfium-static/releases/download/chromium%2F7809/pdfium-linux-x64-static.tgz -o pdfium.tgz
+          tar xzf pdfium.tgz -C "$NL"
+          # pdf_oxide
+          curl -fSL https://github.com/yfedoseev/pdf_oxide/releases/download/v0.3.73/pdf_oxide-go-ffi-linux-amd64.tar.gz -o pdfoxide.tgz || \
+            curl -fSL https://gh-proxy.com/https://github.com/yfedoseev/pdf_oxide/releases/download/v0.3.73/pdf_oxide-go-ffi-linux-amd64.tar.gz -o pdfoxide.tgz
+          tar xzf pdfoxide.tgz -C "$NL"
+          # office_oxide
+          curl -fSL https://github.com/yfedoseev/office_oxide/releases/download/v0.1.8/native-linux-x86_64.tar.gz -o office.tgz || \
+            curl -fSL https://gh-proxy.com/https://github.com/yfedoseev/office_oxide/releases/download/v0.1.8/native-linux-x86_64.tar.gz -o office.tgz
+          tar xzf office.tgz -C "$NL"
+
+      - name: Cache DeepDoc models
+        uses: actions/cache@v5
+        with:
+          path: ${{ github.workspace }}/models/deepdoc
+          key: deepdoc-models-${{ env.MODEL_REPO }}-v1
+
+      - name: Provision models
+        env:
+          MODEL_DIR: ${{ github.workspace }}/models/deepdoc
+        run: |
+          python3 -m pip install --quiet huggingface_hub
+          mkdir -p "$MODEL_DIR"
+          python3 - <<'PY'
+          import os
+          from huggingface_hub import hf_hub_download
+          repo = os.environ["MODEL_REPO"]
+          out = os.environ["MODEL_DIR"]
+          for f in os.environ["MODEL_FILES"].split():
+              hf_hub_download(repo_id=repo, filename=f, local_dir=out)
+          PY
+
+      - name: Run native_det integration tests
+        env:
+          ORT_LIB: ${{ steps.ort.outputs.ORT_LIB }}
+          MODEL_DIR: ${{ github.workspace }}/models/deepdoc
+          CGO_ENABLED: '1'
+          NL: ${{ runner.workspace }}/ragflow-native-libs
+        run: |
+          set -e
+          OO="$NL/office_oxide"
+          mkdir -p "$OO/lib/v0.1.8"
+          [ -e "$OO/lib/v0.1.8/liboffice_oxide.a" ] || ln -sf "$OO/lib/liboffice_oxide.a" "$OO/lib/v0.1.8/liboffice_oxide.a"
+          export CGO_CFLAGS="-I$OO/include/office_oxide_c"
+          export CGO_LDFLAGS="$OO/lib/v0.1.8/liboffice_oxide.a"
+          PF="$NL/pdfium-static"
+          export CGO_LDFLAGS="$CGO_LDFLAGS $PF/lib/libpdfium.a $PF/lib/libc++.a $PF/lib/libc++abi.a -fuse-ld=lld -Wl,--allow-multiple-definition"
+          PO="$NL/pdf_oxide"
+          export CGO_LDFLAGS="$CGO_LDFLAGS $PO/lib/linux_amd64/libpdf_oxide.a -lm -lpthread -ldl -lrt -lgcc_s -lutil -lc"
+          go test -tags "native_det integration" -run 'TestNativeOCRDetect' -count=1 ./internal/deepdoc/parser/pdf/

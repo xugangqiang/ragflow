@@ -63,6 +63,10 @@ func TestNativeOCRDetectMultiPage(t *testing.T) {
 		{"mp_cn_std_p0", 14, false}, // Chinese technical standard (dense CN)
 		{"mp_sec_p0", 109, false},   // Chinese securities report (table-heavy)
 		{"mp_en_dense_p0", 96, false}, // English dense two-column paper
+		{"deg_multicol", 11, false}, // synthesized two-column dense text
+		{"mp_textbook_en_p0", 32, false}, // EN high-school textbook (figures)
+		{"mp_paper_eq_p0", 104, false},   // EN paper with equations (rare class)
+		{"mp_zhtw_ent_p0", 48, false},    // ZH-TW enterprise doc (extra layout)
 		{"blank", 0, true},          // synthetic blank page
 	}
 
@@ -240,6 +244,13 @@ func TestNativeOCRDetectDegenerate(t *testing.T) {
 		{"deg_single_line", false},
 		{"deg_skewed", false},
 		{"deg_low_contrast", false},
+		{"deg_colored_bg", false},    // colored background preprocessing
+		{"deg_tiny_text", false},     // min-size / small box
+		{"deg_combined_degrade", false}, // skew + low-contrast + noise edge
+		{"deg_watermark", false},     // faint watermark over text
+		{"deg_vertical_cjk", false},  // vertical CJK writing (rare orientation)
+		{"deg_equation", false},      // math-formula line
+		{"mp_whitepaper_cn_p0", false}, // CN whitepaper (2 boxes, too few for multi-page)
 		{"deg_noise", true},
 		{"deg_solid", true},
 		{"deg_gradient", true},

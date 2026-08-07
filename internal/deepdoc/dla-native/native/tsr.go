@@ -10,6 +10,7 @@ package native
 import (
 	"encoding/json"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -40,9 +41,11 @@ type TSRResult struct {
 // RunTSR runs table-structure recognition on a cropped table image.
 func RunTSR(modelDir string, img *Image) (TSRResult, error) {
 	blob, sf := tsrPreprocess(img)
+	// 0 → all cores, matching deepdoc's Python onnxruntime for bit-stable
+	// parity (no contour extraction in the TSR Run path).
 	sess, release, err := getModelSession(filepath.Join(modelDir, "tsr.onnx"), "images",
 		[]int64{1, 3, tsrInputSize, tsrInputSize}, "output0",
-		[]int64{1, 11, tsrCandidates})
+		[]int64{1, 11, tsrCandidates}, 0)
 	if err != nil {
 		return TSRResult{}, err
 	}
@@ -57,10 +60,12 @@ func RunTSR(modelDir string, img *Image) (TSRResult, error) {
 	return res, nil
 }
 
-func tsrPreprocess(img *Image) (blob []float32, scaleFactor [2]float32) {
-	bgr := img.ToBGR()
-	resized := BilinearResize(bgr, img.W, img.H, tsrInputSize, tsrInputSize)
-	blob = make([]float32, 3*tsrInputSize*tsrInputSize)
+// tsrBlob assembles the CHW float blob (/255) the TSR model consumes from an
+// already-resized BGR raster (tsrInputSize*tsrInputSize*3, row-major). Shared
+// by both build paths; only the resize source differs (Go BilinearResize vs
+// cv2 via gocv).
+func tsrBlob(resized []byte) []float32 {
+	blob := make([]float32, 3*tsrInputSize*tsrInputSize)
 	for y := 0; y < tsrInputSize; y++ {
 		for x := 0; x < tsrInputSize; x++ {
 			o := (y*tsrInputSize + x) * 3
@@ -69,8 +74,12 @@ func tsrPreprocess(img *Image) (blob []float32, scaleFactor [2]float32) {
 			blob[2*tsrInputSize*tsrInputSize+y*tsrInputSize+x] = float32(resized[o+2]) / 255.0
 		}
 	}
-	scaleFactor = [2]float32{float32(img.W) / tsrInputSize, float32(img.H) / tsrInputSize}
-	return
+	return blob
+}
+
+// tsrScaleFactor builds the [W/640, H/640] mapping (mirrors ref_tsr.py sf).
+func tsrScaleFactor(img *Image) [2]float32 {
+	return [2]float32{float32(img.W) / tsrInputSize, float32(img.H) / tsrInputSize}
 }
 
 func tsrPostprocess(out []float32, sf [2]float32) TSRResult {
@@ -139,6 +148,29 @@ func tsrPostprocess(out []float32, sf [2]float32) TSRResult {
 	}
 
 	alignTSR(boxes)
+	// Deterministic ordering: tsrPostprocess iterates a class->index map, whose
+	// iteration order is unspecified in Go. Sort so identical detections always
+	// serialize identically (e.g. for stable Wire() across runs / session reuse).
+	sort.Slice(boxes, func(i, j int) bool {
+		a, b := boxes[i], boxes[j]
+		ca, cb := tsrClassMap[a.Label], tsrClassMap[b.Label]
+		if ca != cb {
+			return ca < cb
+		}
+		if a.X0 != b.X0 {
+			return a.X0 < b.X0
+		}
+		if a.Top != b.Top {
+			return a.Top < b.Top
+		}
+		if a.X1 != b.X1 {
+			return a.X1 < b.X1
+		}
+		if a.Bottom != b.Bottom {
+			return a.Bottom < b.Bottom
+		}
+		return a.Score < b.Score
+	})
 	return TSRResult{Boxes: boxes}
 }
 

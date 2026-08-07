@@ -101,14 +101,14 @@ DLA_DUMP_QUADS=1 CGO_ENABLED=1 \
   CGO_LDFLAGS="-Wl,-rpath,/home/shenyushi/opt/opencv-4.10/lib" \
   ORT_LIB=$ORT_LIB MODEL_DIR=$MODEL_DIR \
   go run -tags gocv . -task det -image testdata/page0.jpg
-# 2) 用 pyclipper 生成 oracle，覆盖写 testdata/clipper_quads4.json
-PYTHONPATH=/home/shenyushi/workspace/ragflow /home/shenyushi/workspace/ragflow/.venv/bin/python gen_clipper_ref.py
+# 2) 回归 oracle 夹具 testdata/clipper_quads4.json 已提交仓库；如需重生成，由
+#    det_core.go 的 dlaFlushPreUnclip（Gate: DLA_DUMP_QUADS）导出 /tmp/go_quads_pre.json
+#    后用 pyclipper 复算（原 gen_clipper_ref.py 已删除）。
 # 3) 确认回归测试通过（gocv 与默认 build 都要跑）
 go test -tags gocv ./native/ -run TestClipperOffsetMatchesPyclipper -v
 go test ./native/ -run TestClipperOffsetMatchesPyclipper -v
 ```
-`gen_clipper_ref.py` 读取 `/tmp/go_quads_pre.json`（由 `det_core.go` 的 `dlaFlushPreUnclip` 写出，
-Gate 由 `DLA_DUMP_QUADS` 控制）。
+（夹具由 `det_core.go` 的 `dlaFlushPreUnclip` 写出 `/tmp/go_quads_pre.json`，Gate 由 `DLA_DUMP_QUADS` 控制，再用 pyclipper 复算。）
 
 ## 6. 运行 / 对比命令
 
@@ -140,8 +140,6 @@ PYTHONPATH=/home/shenyushi/workspace/ragflow /home/shenyushi/workspace/ragflow/.
 | `native/clipper_offset_test.go` | `TestClipperOffsetMatchesPyclipper`（夹具 0.000px）、`TestTuneArcTol`、`TestDebugRotatedSquare` |
 | `native/minarearect_test.go` | `minAreaRect`+`getMiniBoxes` raw/hull/deepdoc 对比（用 `testdata/contours.json`） |
 | `testdata/clipper_quads4.json` | 回归 oracle 夹具（15 quad） |
-| `gen_clipper_ref.py` | 由 `/tmp/go_quads_pre.json` 生成夹具 |
-| `dump_ref_det_quads.py` | deepdoc oracle（确认其用 pyclipper `JT_ROUND`/`ET_CLOSEDPOLYGON`） |
 | `ref_det.py` / `ref_dla.py` / `ref_tsr.py` / `ref_ocr_rec.py` | 各组件 Python 参考 |
 | `run.sh` | 四组件一键 Go-vs-Python 对比（含 `compare_boxes`） |
 
@@ -155,12 +153,12 @@ PYTHONPATH=/home/shenyushi/workspace/ragflow /home/shenyushi/workspace/ragflow/.
     - 新增 `internal/deepdoc/parser/pdf/native_det_seam_test.go`（`//go:build !native_det`，默认单测层、无需 ORT_LIB/MODEL_DIR）6 个用例：`NativeOffUsesRemote`、`NativeErrorFallsBack`、`NativeEmptyBoxes`、`NativeValidBoxes`、`OCRDetectAndRecognizeNativeEmpty`、`OCRDetectAndRecognizeNativeDegenerateAndValid`，覆盖 native 分支在空结果 / error / 退化(零面积)quad / 越界坐标下的逐页兜底与回退。
     - 默认 `go test ./internal/deepdoc/parser/pdf/` 与 `-tags native_det` 编译均 `ok`，无回归。
   - **A2·多页集成 ✅ 已完成**：不再阻塞。
-    - 多页异质 fixture 由 `internal/deepdoc/parser/pdf/testdata/real_pdfs/` 渲染（pypdfium2 @ SCALE=3.0，与 `generate_crops.py` 同路径），落入 `dla-native/testdata/`：`mp_arxiv_p0.jpg`(英文标题/摘要)、`mp_arxiv_p1.jpg`(英文双栏正文)、`mp_physics_p5.jpg`(英文教材)、`mp_cn_qa_p0.jpg`(中文问答)、`mp_cn_sm_p0.jpg`(中文手册/大页)、`blank.jpg`(合成空白)。每个 fixture 的 golden 由 Python oracle `ref_det.py`(deepdoc `TextDetector`) 预生成 `<stem>.det.golden.json`（`{"output":[[quads]]}` 格式）。
+    - 多页异质 fixture 由 `internal/deepdoc/parser/pdf/testdata/real_pdfs/` 渲染（pypdfium2 @ SCALE=3.0），落入 `dla-native/testdata/`：`mp_arxiv_p0.jpg`(英文标题/摘要)、`mp_arxiv_p1.jpg`(英文双栏正文)、`mp_physics_p5.jpg`(英文教材)、`mp_cn_qa_p0.jpg`(中文问答)、`mp_cn_sm_p0.jpg`(中文手册/大页)、`blank.jpg`(合成空白)。每个 fixture 的 golden 由 Python oracle `ref_det.py`(deepdoc `TextDetector`) 预生成 `<stem>.det.golden.json`（`{"output":[[quads]]}` 格式）。
     - 新增 `TestNativeOCRDetectMultiPage`（`//go:build native_det && integration`）：循环上述 7 个 fixture，经 `nativeOCRDetect` 跑 `RunDet`，断言每页 8 字段有限且在界内；空白页恰为 0 box；非空白页 box 数在 oracle 的 15% 容差内（已知 pure-Go 几何 ~3px 残差，见 A3）。结果（gocv 路径；纯 Go 几何同前）：page0 15/15、arxiv_p0 93/94、arxiv_p1 98/98、physics_p5 21/20、cn_qa_p0 83/83、cn_sm_p0 309/312、blank 0/0 —— **证明未过拟合单页，跨异质页面稳健**。
     - 复跑确认无回归：原 `TestNativeOCRDetect`(page0) 仍 PASS；dla-native 默认 + gocv 单测仍 `ok`。
   - **A2·覆盖扩展 ✅ 已完成**：在 A2·多页集成基础上，按需求扩充 fixture 覆盖，降低稀有路径漏检。
     - 多语言/多布局：从 `real_pdfs` 渲染 5 个真实页，覆盖日文(`mp_jp_p0`,oracle 55)、繁体中文(`mp_zhtw_p0`,26)、中文技术规范(`mp_cn_std_p0`,14)、中文证券报表(表格密集,`mp_sec_p0`,109)、英文双栏密排(`mp_en_dense_p0`,96)。golden 由 `ref_det.py` 生成，Go 计数在 15% 容差内（`mp_en_dense_p0` go=91 vs 96 为已知 ~3px 残差）。
-    - 退化样例：用 `gen_broad_fixtures.py`(PIL 合成) 新增 7 个 `deg_*`，覆盖单字形 / 单行文本 / 旋转行 / 椒盐噪声 / 纯色块 / 渐变 / 近阈值低对比文本；golden 由 `ref_det.py` 生成。
+    - 退化样例：用 PIL 合成新增 7 个 `deg_*`，覆盖单字形 / 单行文本 / 旋转行 / 椒盐噪声 / 纯色块 / 渐变 / 近阈值低对比文本；golden 由 `ref_det.py` 生成。
     - 新增 `TestNativeOCRDetectDegenerate`(`native_det && integration`)：噪声/纯色/渐变断言恰为 0 box；单字形/单行/旋转/低对比断言 Go 计数与 oracle 差 ≤1。证明检测器在退化输入上不产伪框、也不漏掉孤立真框。
     - 复跑 `TestNativeOCRDetectMultiPage`(扩展后 12 fixture 全 PASS) + `TestNativeOCRDetectDegenerate`(7/7) + 全量 `TestNativeOCRDetect*`（见下方回归）无回归；dla-native 默认 + gocv 单测 `ok`。
   - **A2·空白边界 ✅ 已完成**：新增 `TestNativeOCRDetectBlankEdges`(`native_det && integration`)，覆盖空白页检测的边界情形，全部断言恰为 0 box 且与 oracle 一致：
@@ -204,6 +202,7 @@ PYTHONPATH=/home/shenyushi/workspace/ragflow /home/shenyushi/workspace/ragflow/.
   2. `go-dla-native`：装 ORT CPU，跑 `go test -tags integration ./native/`（Go 对比同一 golden，覆盖 DLA/TSR/OCR-rec/det）。
   三路一致性契约（Python oracle / golden / Go）现在在 CI 中闭环；nightly schedule 还能捕捉上游 deepdoc 逻辑漂移。
   - 可选覆盖项（不阻塞）：让 gocv build 的 opencv-4.10 也进 CI——需在 CI runner 预置 `/home/shenyushi/opt/opencv-4.10` 或等价前缀，使 D1 的 gocv 步骤实际触发；当前便携 runner 只跑默认（纯 Go）build。
+  - **D2·gocv ✅ 已完成（2026-08-07）**：新增 `go-dla-native-gocv` job（`.github/workflows/deepdoc-drift.yml`，`continue-on-error: true`，非阻塞），在 CI 内从源码构建 OpenCV 4.10 到缓存前缀 `runner.workspace/opencv-4.10`（按版本缓存），并跑 `go test -tags "integration gocv"`。现在 CI 同时覆盖纯 Go（~2.6px 地板）与 gocv（cv2，1:1 奇偶）两条构建路径。
 
 ### 依赖图
 ```
@@ -214,7 +213,7 @@ B  (DLA/TSR/OCR-rec) ✅ 已完成（含 session 复用）
 C1 (接 ingestion)    ✅ 已完成
 C2 (服务接口)        ✅ 已完成
 D1 (build.sh 覆盖)   ✅ 已完成
-D2 (CI 漂移自动告警)  ✅ 已完成（见 §8 D2；gocv opencv-4.10 CI 预置为可选覆盖项）
+D2 (CI 漂移自动告警)  ✅ 已完成（见 §8 D2；gocv opencv-4.10 CI 覆盖项 D2·gocv 亦已完成）
 ```
 
 **已完成全部可推进项**。唯一剩余阻塞项为 A3（box#8 3px 硬下限），非交付阻塞点，需外部决策后才可推进。
@@ -232,7 +231,7 @@ D2 (CI 漂移自动告警)  ✅ 已完成（见 §8 D2；gocv opencv-4.10 CI 预
 |----|------|----------|----------|--------------|
 | **A3** | 压低 det box#8 的 3px 残差 | 浮点 `minAreaRect` 已落地；Go calipers 未逐位复现 cv2 的 1e-4 伪影，使 `clipperOffset` 截断到不同整数边界（`clipper_offset.go` 与 pyclipper 0.000px 一致、不可改） | 明确决定做 **cv2 逐位浮点 minAreaRect 仿真**（复现 1e-4 伪影，脆弱）并放宽 §9 | 否（硬下限，且源自 cv2 自身取整） |
 | **D2** | DeepDoc 三路一致性 CI 漂移告警 | 已完成：`.github/workflows/deepdoc-drift.yml` 在便携 runner 跑 `check_drift.py`（Python oracle↔golden）+ dla-native Go 集成（Go↔golden），nightly 捕捉上游 deepdoc 漂移 | —（已交付） | 否 |
-| **D2·gocv** | gocv build 的 opencv-4.10 也进 CI | 便携 runner 仅跑默认（纯 Go）build；gocv 步骤需 opencv-4.10 前缀 | CI runner 预置 `/home/shenyushi/opt/opencv-4.10` 或等价前缀，使 D1 的 gocv 步骤触发 | 否（本地 gocv 已验证，CI 仅覆盖度） |
+| **D2·gocv** | gocv build 的 opencv-4.10 也进 CI | 便携 runner 仅跑默认（纯 Go）build；gocv 步骤需 opencv-4.10 前缀 | CI 内从源码构建 OpenCV 4.10 到缓存前缀并跑 `go test -tags "integration gocv"`（`go-dla-native-gocv` job，`continue-on-error`，非阻塞） | 否（本地 gocv 已验证，CI 仅覆盖度） | ✅ 已完成 |
 
 **接力建议**：
 - 若要让 CI 也跑 gocv 集成：做 **D2·gocv**（CI runner 预置 opencv-4.10 前缀）。

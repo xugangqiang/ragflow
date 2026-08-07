@@ -46,8 +46,17 @@ type Session struct {
 
 // NewSession opens modelPath. inShape/outShape describe the fixed tensor
 // dimensions; outSize is the total element count of the output tensor.
+// intraOpThreads controls ONNX Runtime's intra-op parallelism. The DB detector
+// must pass 1 (single-threaded): a multi-threaded Run leaves worker threads
+// settling while the detector's postprocess invokes OpenCV's findContours,
+// whose parallel_for_ then under-runs and returns contracted contours. The
+// other recognizers (DLA/TSR/OCR-rec) do no contour extraction in the Run path,
+// so they pass 0 to use all cores — matching deepdoc's Python onnxruntime
+// (intra_op_num_threads defaults to 0 = all cores). The parallel reduction
+// order must match Python's for bit-stable parity; a single-threaded run folds
+// reductions in a different order and drifts from the Python reference.
 // InitORT must have been called first.
-func NewSession(modelPath, inName string, inShape []int64, outName string, outShape []int64) (*Session, error) {
+func NewSession(modelPath, inName string, inShape []int64, outName string, outShape []int64, intraOpThreads int) (*Session, error) {
 	in := make([]float32, prod(inShape))
 	out := make([]float32, prod(outShape))
 	inT, err := ort.NewTensor(ort.NewShape(inShape...), in)
@@ -65,12 +74,10 @@ func NewSession(modelPath, inName string, inShape []int64, outName string, outSh
 		outT.Destroy()
 		return nil, err
 	}
-	// Run ORT single-threaded. A multi-threaded ORT run leaves worker threads
-	// settling while the caller (still nested inside Session.Run) invokes
-	// OpenCV's findContours, whose parallel_for_ then under-runs and returns
-	// contracted contours. Single-threaded inference avoids the conflict and
-	// is fully deterministic.
-	if err := opts.SetIntraOpNumThreads(1); err != nil {
+	// intraOpThreads == 0 → all cores (mirrors Python's onnxruntime default);
+	// the DB detector passes 1 to keep findContours free of competing worker
+	// threads (see NewSession doc above).
+	if err := opts.SetIntraOpNumThreads(intraOpThreads); err != nil {
 		opts.Destroy()
 		inT.Destroy()
 		outT.Destroy()

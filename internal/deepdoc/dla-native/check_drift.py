@@ -122,8 +122,11 @@ def check_bboxes(stem, gold, script):
 
 def check_ocr(stem, gold):
     got = run_ref("ref_ocr_rec.py", stem)
-    gt = gold["output"][0][0][0][0][0]
-    nt = got["output"][0][0][0][0][0]
+    # Wire format: output[batch][page][items][pair] -> [text, score]; the text
+    # is the string at output[0][0][0][0] (4 levels), not a 5th index which
+    # would slice into the first character.
+    gt = gold["output"][0][0][0][0]
+    nt = got["output"][0][0][0][0]
     if gt != nt:
         return False, f"text mismatch: got {nt!r} gold {gt!r}"
     return True, f"text {nt!r}"

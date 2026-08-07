@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"math"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -47,9 +48,11 @@ var (
 // RunDLA runs layout detection on a page image.
 func RunDLA(modelDir string, img *Image) (DLAResult, error) {
 	blob, sf := dlaPreprocess(img)
+	// 0 → all cores, matching deepdoc's Python onnxruntime for bit-stable
+	// parity (no contour extraction in the DLA Run path).
 	sess, release, err := getModelSession(filepath.Join(modelDir, "layout.onnx"), "images",
 		[]int64{1, 3, dlaInputSize, dlaInputSize}, "output0",
-		[]int64{1, dlaMaxBoxes, 6})
+		[]int64{1, dlaMaxBoxes, 6}, 0)
 	if err != nil {
 		return DLAResult{}, err
 	}
@@ -64,20 +67,27 @@ func RunDLA(modelDir string, img *Image) (DLAResult, error) {
 	return res, nil
 }
 
-func dlaPreprocess(img *Image) (blob []float32, scaleFactor [4]float32) {
+// dlaGeom computes the letterbox geometry (mirrors ref_dla.py): the resize
+// target (newW,newH) and the symmetric padding (dw,dh) that centers the
+// resized image in the dlaInputSize canvas.
+func dlaGeom(img *Image) (newW, newH int, dw, dh float64) {
 	r := math.Min(float64(dlaInputSize)/float64(img.H), float64(dlaInputSize)/float64(img.W))
-	newW := int(math.Round(float64(img.W) * r))
-	newH := int(math.Round(float64(img.H) * r))
-	dw := (float64(dlaInputSize) - float64(newW)) / 2.0
-	dh := (float64(dlaInputSize) - float64(newH)) / 2.0
+	newW = int(math.Round(float64(img.W) * r))
+	newH = int(math.Round(float64(img.H) * r))
+	dw = (float64(dlaInputSize) - float64(newW)) / 2.0
+	dh = (float64(dlaInputSize) - float64(newH)) / 2.0
+	return
+}
 
-	bgr := img.ToBGR()
-	resized := BilinearResize(bgr, img.W, img.H, newW, newH)
-
+// dlaLetterbox places the already-resized BGR raster (newH*newW*3, row-major)
+// into the dlaInputSize canvas with 114-filled borders and returns the CHW
+// float blob (/255) the YOLOv10 layout model consumes. Shared by both build
+// paths; only the resize source differs (Go BilinearResize vs cv2 via gocv).
+func dlaLetterbox(resized []byte, newW, newH int, dw, dh float64) []float32 {
 	top := int(math.Round(dh - 0.1))
 	left := int(math.Round(dw - 0.1))
 
-	blob = make([]float32, 3*dlaInputSize*dlaInputSize)
+	blob := make([]float32, 3*dlaInputSize*dlaInputSize)
 	for y := 0; y < dlaInputSize; y++ {
 		for x := 0; x < dlaInputSize; x++ {
 			var cr, cg, cb float32 = 114, 114, 114
@@ -94,12 +104,18 @@ func dlaPreprocess(img *Image) (blob []float32, scaleFactor [4]float32) {
 			blob[2*dlaInputSize*dlaInputSize+y*dlaInputSize+x] = cr / 255.0
 		}
 	}
-	scaleFactor = [4]float32{
+	return blob
+}
+
+// dlaScaleFactor builds the [W/newW, H/newH, dw, dh] mapping (mirrors
+// ref_dla.py scale_factor) used by dlaPostprocess to map model coords back to
+// source pixels.
+func dlaScaleFactor(img *Image, newW, newH int, dw, dh float64) [4]float32 {
+	return [4]float32{
 		float32(float64(img.W) / float64(newW)),
 		float32(float64(img.H) / float64(newH)),
 		float32(dw), float32(dh),
 	}
-	return
 }
 
 func dlaPostprocess(out []float32, sf [4]float32) DLAResult {
@@ -158,6 +174,28 @@ func dlaPostprocess(out []float32, sf [4]float32) DLAResult {
 		mapped = append(mapped, b)
 	}
 	res.Boxes = mapped
+	// Deterministic ordering: dlaPostprocess iterates a class->index map, whose
+	// iteration order is unspecified in Go. Sort so identical detections always
+	// serialize identically (e.g. for stable Wire() across runs / session reuse).
+	sort.Slice(res.Boxes, func(i, j int) bool {
+		a, b := res.Boxes[i], res.Boxes[j]
+		if a.Class != b.Class {
+			return a.Class < b.Class
+		}
+		if a.X0 != b.X0 {
+			return a.X0 < b.X0
+		}
+		if a.Y0 != b.Y0 {
+			return a.Y0 < b.Y0
+		}
+		if a.X1 != b.X1 {
+			return a.X1 < b.X1
+		}
+		if a.Y1 != b.Y1 {
+			return a.Y1 < b.Y1
+		}
+		return a.Score < b.Score
+	})
 	return res
 }
 

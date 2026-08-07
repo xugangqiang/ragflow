@@ -35,9 +35,11 @@ func RunOCRRec(modelDir string, img *Image) (OCRRecResult, error) {
 		return OCRRecResult{}, err
 	}
 	blob := ocrRecPreprocess(img)
+	// 0 → all cores, matching deepdoc's Python onnxruntime for bit-stable
+	// parity (no contour extraction in the OCR-rec Run path).
 	sess, release, err := getModelSession(filepath.Join(modelDir, "rec.onnx"), "x",
 		[]int64{recMaxBatch, 3, recH, recW}, "softmax_11.tmp_0",
-		[]int64{recMaxBatch, recSeqLen, recVocab})
+		[]int64{recMaxBatch, recSeqLen, recVocab}, 0)
 	if err != nil {
 		return OCRRecResult{}, err
 	}
