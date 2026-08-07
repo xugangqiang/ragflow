@@ -156,13 +156,12 @@ jobs:
 
   # gocv build: the cv2 decode/resize path that reaches 1:1 parity with the
   # Python reference (the pure-Go build in go-dla-native carries a ~2.6px
-  # decode/resize floor). This is D2·gocv from HANDOFF.md — optional coverage,
-  # so it is non-blocking (continue-on-error) and does not gate delivery.
-  # OpenCV 4.10 is built once into a cached prefix keyed on the version.
+  # decode/resize floor). This is D2·gocv from HANDOFF.md. OpenCV 4.10 is built
+  # once into a cached prefix keyed on the version. Now a blocking gate: the
+  # pkg-config provisioning bug is fixed, so a gocv regression must block.
   go-dla-native-gocv:
     name: go DLA/TSR/OCR-rec/det integration (gocv / OpenCV 4.10)
     runs-on: ubuntu-latest
-    continue-on-error: true
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v6
@@ -213,6 +212,12 @@ jobs:
                 -D WITH_JASPER=OFF -D OPENCV_GENERATE_PKGCONFIG=ON ..
           make -j "$(nproc)"
           make install
+          # Verify opencv4.pc is resolvable where the run step expects it. The
+          # run step exports PKG_CONFIG_PATH, but this verification must point
+          # pkg-config at the install prefix itself or it searches the default
+          # path and reports "Package opencv4 was not found", failing the build
+          # step and skipping the test step.
+          export PKG_CONFIG_PATH="$OCV_PREFIX/lib/pkgconfig"
           pkg-config --modversion opencv4
 
       - name: Cache DeepDoc models
