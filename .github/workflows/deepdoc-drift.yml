@@ -106,6 +106,11 @@ jobs:
         working-directory: internal/deepdoc/dla-native
         env:
           MODEL_DIR: ${{ github.workspace }}/models/deepdoc
+          # The ref_*.py oracles do `from deepdoc.vision.ocr import ...`; the
+          # deepdoc package lives at the repo root, which uv sync does not
+          # install into the venv. Point PYTHONPATH at the workspace root so the
+          # import resolves (matches check_drift.py's documented local invocation).
+          PYTHONPATH: ${{ github.workspace }}
         run: uv run python check_drift.py
 
   go-dla-native:
