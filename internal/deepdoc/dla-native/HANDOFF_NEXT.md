@@ -20,8 +20,9 @@
   pdf_oxide 对齐到 `v0.3.67`。已在本地验证（修正布局链接通过、全部 `TestNativeOCRDetect*` 对 golden 通过），
   提交 `2ed53bec8` 推送后派发 run **https://github.com/xugangqiang/ragflow/actions/runs/31160394410**
   确认 `go-native-det` 变绿，随后提交 `8db3f0c1f` **移除 `continue-on-error`** 使其成为阻断闸门。
-- 剩余：见 §3（P1/P2/P3；P0 仅剩 `go-dla-native-gocv` 的收尾，但 gocv job 仍有独立的 pkg-config 供给
-  bug，见 §3 P0 注）。**`python-drift` 也失败（独立供给 bug，见 §3 P0 注），与本轮回合代码改动无关。**
+- 剩余：见 §3（P1/P3；P2 收口暴露面与健壮性已在本会话完成，见 §3 P2 与 commit `b8437c732`。P0 仅剩
+  `go-dla-native-gocv` 的收尾，但 gocv job 仍有独立的 pkg-config 供给 bug，见 §3 P0 注）。
+  **`python-drift` 也失败（独立供给 bug，见 §3 P0 注），与本轮回合代码改动无关。**
 
 ## 1. 本轮回合已落地（均本地验证通过）
 
@@ -32,6 +33,7 @@
 | P5 清理 `TSR_RAW_DUMP` | 删除 `os.Getenv("TSR_RAW_DUMP")` 调试块及连带无用的 `os`/`math` import | `native/tsr.go` | 两构建编译通过；gocv integration `ok` |
 | P4 gocv CI 覆盖 | 新增 `go-dla-native-gocv` job：CI 内从源码构建 OpenCV 4.10 到缓存前缀并跑 `go test -tags "integration gocv"`，`continue-on-error` 非阻断 | `deepdoc-drift.yml`（job `go-dla-native-gocv`，约 :162） | YAML 校验通过；本地 gocv 集成 `ok` |
 | native_det 生产路径 CI 入口（P0） | 新增 `go-native-det` job：自包含拉取并链接 3 个 PDF 原生静态库（office_oxide v0.1.8 / pdfium chromium/7809 / pdf_oxide v0.3.73），跑 `TestNativeOCRDetect*`，`continue-on-error` 非阻断 | `deepdoc-drift.yml`（job `go-native-det`，约 :259） | `go vet -tags "native_det integration"` 类型检查通过；最终 link 依赖原生库，按设计在真实 CI 验证 |
+| P2 收口暴露面与健壮性 | (1) 降为未导出 `Session→session`/`Box→nmsBox`/`NMS→nms`/`BilinearResize→bilinearResize`；(2) `session.Run` 补 `len` 守卫拒绝长度不符的输入；(3) `Run*` 系列加 `context.Context` 首参，`session.Run` 改用 `RunWithOptions` + `RunOptions.Terminate()` 实现真取消，终止的 session 标记 `poisoned` 并由池 `Destroy()`（不回池）。测试 json 字段 `Box` 保留导出以恢复被 blanket rename 引入的序列化回归 | `native/session.go`/`session_pool.go`/`det_core.go`/`dla.go`/`tsr.go`/`ocr_rec.go`，`native/clipper_offset_test.go`，`parser/pdf/native_det.go`，`dla-native/main.go`，`native/native_integration_test.go` | dla-native `./native/` 构建+vet（`integration`）通过，default 单测 `ok`（含 `TestClipperOffsetMatchesPyclipper` 0px）；`parser/pdf` `-tags native_det` 构建+vet 通过 |
 
 ## 2. 关键事实（避免新会话重复踩坑）
 
@@ -75,14 +77,18 @@
 - 验收：双池合一后 `TestDetSessionPoolBounded` / `TestDLASessionReuse` / `TestTSRSessionReuse` /
   `TestOCRRecSessionReuse` 仍通过，且 `go test -tags integration ./native/`（nogocv + gocv）`ok`。
 
-### P2 — 收口暴露面与健壮性
-- 降为未导出：`native` 包导出的 `NMS` / `BilinearResize` / `Session` / `Box` 仅为本包/测试使用，应改为未导出。
-  （注意：跨 package 的测试若引用需保留或挪到 internal 测试；先 grep 引用面再改。）
-- `Session.Run` 补 `len` 长度守卫：当前 `copy(s.in.GetData(), input)` 无长度校验，
-  `input` 长度不符会 panic/越界。先校验 `len(input) == len(s.in.GetData())`。
-- `Run*` 系列（`RunDet`/`RunDLA`/`RunTSR`/`RunOCRRec`）补 `context.Context` + 超时：
-  当前无取消/超时，长页/异常输入无上限。池是单 owner 复用，`ctx` 应透传到 `Session.Run` 的 ORT 调用（若 ORT binding 支持）。
-- 验收：上述改动后全量 `integration` + `unit` 测试仍 `ok`，且暴露 API 面收窄（不影响 `internal/deepdoc/parser/pdf` 的调用）。
+### P2 — 收口暴露面与健壮性 ✅ 已完成（commit `b8437c732`）
+- 降为未导出：`native` 包导出的 `NMS` / `BilinearResize` / `Session` / `Box` 已改为未导出
+  （`nms`/`bilinearResize`/`session`/`nmsBox`）。整仓 grep 确认无跨包引用残留。
+- `Session.Run` 已补 `len` 长度守卫：长度不符直接返回错误，不再 `copy` 越界/panic。
+- `Run*` 系列（`RunDet`/`RunDLA`/`RunTSR`/`RunOCRRec`）已加 `context.Context` 首参并透传到
+  `session.Run` 的 ORT `RunWithOptions`；ctx 取消时 `RunOptions.Terminate()` 强制中断在途推理，
+  被中断的 session 标记 `poisoned`、由池 `Destroy()` 而非回池（ORT 不保证终止后可复用）。
+- 回归修复：`Box→nmsBox` 的 blanket rename 把 `clipper_offset_test.go` 中 json 绑定字段变成未导出，
+  致 `encoding/json` 不再填充 → `TestClipperOffsetMatchesPyclipper` 静默失败；该测试结构体字段恢复为
+  导出的 `Box`（仅测试辅助结构，不扩大包公共 API）。
+- 验收：dla-native `./native/` 构建+vet（`integration`）通过，default 单测 `ok`（`TestClipperOffsetMatchesPyclipper` 0px diff）；
+  `parser/pdf` `-tags native_det` 构建+vet 通过；集成测试调用点改用 `t.Context()`，生产路径用 `context.Background()`。
 
 ### P3 — 需用户拍板的决策
 - **gocv / nogocv 双轨收敛**：两条构建语义一致，发行不必二选一，但双轨是长期维护债务。选项：
@@ -126,6 +132,7 @@ gh run view 31157005421 -R xugangqiang/ragflow
 - 本轮回合提交：`0a0688ff2` — “fix(deepdoc): bound DET session pool, stabilize gocv ordering, add CI jobs”。
 - P0 native_det 修复提交：`2ed53bec8` — “fix(ci): provision native_det libs into named subdirs + align pdf_oxide”，
   以及 `8db3f0c1f` — “ci(deepdoc-drift): make go-native-det a blocking gate”。
+- P2 收口提交：`b8437c732` — “refactor(deepdoc): P2 — narrow exported surface, add session guards, thread ctx”。
 - 已排除根目录 `client.py`（LitServe 自动生成的本地测试脚本，与本工作无关，未纳入提交）。
 - CI run：`31157005421`（含 `go-native-det`，首次失败，根因供给路径 bug）；`31160394410`（修复后验证
   `go-native-det` 变绿，并据此将其改为阻断闸门）。
