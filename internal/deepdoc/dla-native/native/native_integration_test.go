@@ -20,11 +20,17 @@ import (
 )
 
 const (
-	// px tolerance on box coordinates. The pure-Go build carries an inherent
-	// decode/resize fidelity floor (~3px on real-document fixtures, the same
-	// class of artifact as det's 3px floor) that this tolerance sits just above.
-	cmpTolCoord = 3.0
-	cmpTolScore = 0.05 // tolerance on detection scores
+	// coordFloor is the documented hard accuracy floor (px) of the comparison
+	// tool: det stabilizes at ~3px from bilinearResize + box#8 postprocess,
+	// format-independent. DLA/TSR are tighter, but tolerances are sized above
+	// this worst case so any regression past the floor trips the gate instead
+	// of hiding under it.
+	coordFloor = 3.0
+	// coordTolMargin lifts the coordinate tolerance just above coordFloor.
+	coordTolMargin = 0.5
+
+	cmpTolCoord = coordFloor + coordTolMargin // 3.5
+	cmpTolScore = 0.05                        // tolerance on detection scores
 )
 
 func skipIfNoModels(t *testing.T) {
@@ -419,9 +425,9 @@ func TestDetIntegration(t *testing.T) {
 	refBoxes := gold.Output[0][0]
 
 	// The pure-Go geometry reaches the 3px hard floor (HANDOFF §4.4, box#8).
-	// Tolerance is set just above that floor so a regression bumps it over the
-	// line.
-	detCoordTol := 3.5
+	// Tolerance is coordFloor + coordTolMargin, just above that floor, so a
+	// regression bumps it over the line.
+	detCoordTol := coordFloor + coordTolMargin
 	used := make([]bool, len(goBoxes))
 	matched, maxd := 0, 0.0
 	for _, rb := range refBoxes {
