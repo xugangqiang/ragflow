@@ -36,8 +36,8 @@ SCORE_TOL = 0.05
 
 
 def run_ref(script, stem):
-    """Run a ref_*.py script on <stem>.jpg and return parsed JSON output."""
-    img = os.path.join(TESTDATA, stem + ".jpg")
+    """Run a ref_*.py script on <stem>.png and return parsed JSON output."""
+    img = os.path.join(TESTDATA, stem + ".png")
     if not os.path.exists(img):
         raise FileNotFoundError(img)
     cmd = [sys.executable, os.path.join(HERE, script), img, MODEL_DIR]

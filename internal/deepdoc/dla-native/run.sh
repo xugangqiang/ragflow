@@ -40,9 +40,9 @@ print("  matched %d/%d  MAX COORD DIFF=%.4f px"%(n,len(ref),maxd))
 PY
 }
 
-echo "================ DLA (layout detection, page0.jpg) ================"
-go run . -task dla -image testdata/page0.jpg | tee /tmp/go_dla.json >/dev/null
-"$PY" ref_dla.py testdata/page0.jpg | tee /tmp/ref_dla.json >/dev/null
+echo "================ DLA (layout detection, page0.png) ================"
+go run . -task dla -image testdata/page0.png | tee /tmp/go_dla.json >/dev/null
+"$PY" ref_dla.py testdata/page0.png | tee /tmp/ref_dla.json >/dev/null
 echo "Go:"; cat /tmp/go_dla.json
 echo "Ref:"; cat /tmp/ref_dla.json
 # ref_dla prints a bare list; wrap for the comparator.
@@ -50,18 +50,18 @@ echo '{"bboxes":'"$(cat /tmp/go_dla.json | sed 's/^{"bboxes"://;s/}$//')"'}' > /
 echo '{"bboxes":'"$(cat /tmp/ref_dla.json)"'}' > /tmp/ref_dla_w.json
 echo "diff:"; compare_boxes /tmp/go_dla_w.json /tmp/ref_dla_w.json
 
-echo "================ TSR (table structure, table0.jpg) ================"
-go run . -task tsr -image testdata/table0.jpg | tee /tmp/go_tsr.json >/dev/null
-"$PY" ref_tsr.py testdata/table0.jpg | tee /tmp/ref_tsr.json >/dev/null
+echo "================ TSR (table structure, table0.png) ================"
+go run . -task tsr -image testdata/table0.png | tee /tmp/go_tsr.json >/dev/null
+"$PY" ref_tsr.py testdata/table0.png | tee /tmp/ref_tsr.json >/dev/null
 echo "Go:"; cat /tmp/go_tsr.json
 echo "Ref:"; cat /tmp/ref_tsr.json
 echo '{"bboxes":'"$(cat /tmp/go_tsr.json | sed 's/^{"bboxes"://;s/}$//')"'}' > /tmp/go_tsr_w.json
 echo '{"bboxes":'"$(cat /tmp/ref_tsr.json)"'}' > /tmp/ref_tsr_w.json
 echo "diff:"; compare_boxes /tmp/go_tsr_w.json /tmp/ref_tsr_w.json
 
-echo "================ OCR-rec (text recognition, line0.jpg) ================"
-go run . -task ocr-rec -image testdata/line0.jpg | tee /tmp/go_ocr.json >/dev/null
-"$PY" ref_ocr_rec.py testdata/line0.jpg | tee /tmp/ref_ocr.json >/dev/null
+echo "================ OCR-rec (text recognition, line0.png) ================"
+go run . -task ocr-rec -image testdata/line0.png | tee /tmp/go_ocr.json >/dev/null
+"$PY" ref_ocr_rec.py testdata/line0.png | tee /tmp/ref_ocr.json >/dev/null
 echo "Go:"; cat /tmp/go_ocr.json
 echo "Ref:"; cat /tmp/ref_ocr.json
 "$PY" - <<'PY'
@@ -73,11 +73,11 @@ print("  go :", g)
 print("  ref:", r)
 PY
 
-echo "================ DET (text detection, DB, page0.jpg) ================"
+echo "================ DET (text detection, DB, page0.png) ================"
 # Pure-Go DBPostProcess: expect box COUNT to match and coords within a few px
 # (miter offset vs Clipper round offset, convex hull vs exact contours).
-go run . -task det -image testdata/page0.jpg | tee /tmp/go_det.json >/dev/null
-"$PY" ref_det.py testdata/page0.jpg | tee /tmp/ref_det.json >/dev/null
+go run . -task det -image testdata/page0.png | tee /tmp/go_det.json >/dev/null
+"$PY" ref_det.py testdata/page0.png | tee /tmp/ref_det.json >/dev/null
 echo "Go:"; cat /tmp/go_det.json
 echo "Ref:"; cat /tmp/ref_det.json
 "$PY" - <<'PY'

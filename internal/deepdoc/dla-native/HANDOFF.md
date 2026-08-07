@@ -39,7 +39,7 @@
 | `build.sh --test` 覆盖 dla-native（默认 + gocv 单元） | **已接线**（见 §8 D1） |
 | `build.sh --test-integration` 覆盖 dla-native（默认 + gocv 集成） | **已接线**（见 §8 D1） |
 
-**结论**：DLA / TSR / OCR-rec 当前均 PASS（已验证），det 两种实现路径（默认连通域 / gocv 轮廓）在 `page0.jpg` 上锁定在同一精度
+**结论**：DLA / TSR / OCR-rec 当前均 PASS（已验证），det 两种实现路径（默认连通域 / gocv 轮廓）在 `page0.png` 上锁定在同一精度
 （15/15 @ 3px）。box#8 的 3px 为 **硬下限**（源自 cv2 自身浮点伪影，非 Go 缺陷），无法在不做 **cv2 逐位浮点 `minAreaRect` 仿真**的前提下进一步压缩
 （见 §4 / A3）。
 
@@ -65,7 +65,7 @@ export CGO_LDFLAGS="-Wl,-rpath,/home/shenyushi/opt/opencv-4.10/lib"
 ## 4. 关键技术结论（避免在新会话中重复踩坑）
 
 1. **"15 vs 160" 是诊断方向假象，不是 bug**。
-   `page0.jpg` 为 2376×1836 竖图 → resize 960×736。cv2 在正确朝向 (960,736) 返回 **15** 个轮廓；
+   `page0.png` 为 2376×1836 竖图 → resize 960×736。cv2 在正确朝向 (960,736) 返回 **15** 个轮廓；
    若被转置成 (736,960) 则返回 **160**。旧的"子进程隔离 / 堆损坏"推论建立在转置解读上，
    已被证伪。**整个子进程 re-exec 机制已删除**（`det_gocv.go` 的 `runDetChild`/`RunDetChildMain` 等已移除），
    内联路径产出字节一致的 15/15 @ 5px（后续经 convexify 降到 3px）。符合 AGENTS.md「优先删除而非兼容层」。
@@ -110,7 +110,7 @@ DLA_DUMP_QUADS=1 CGO_ENABLED=1 \
   PKG_CONFIG_PATH=/home/shenyushi/opt/opencv-4.10/lib/pkgconfig \
   CGO_LDFLAGS="-Wl,-rpath,/home/shenyushi/opt/opencv-4.10/lib" \
   ORT_LIB=$ORT_LIB MODEL_DIR=$MODEL_DIR \
-  go run -tags gocv . -task det -image testdata/page0.jpg
+  go run -tags gocv . -task det -image testdata/page0.png
 # 2) 回归 oracle 夹具 testdata/clipper_quads4.json 已提交仓库；如需重生成，由
 #    det_core.go 的 dlaFlushPreUnclip（Gate: DLA_DUMP_QUADS）导出 /tmp/go_quads_pre.json
 #    后用 pyclipper 复算（原 gen_clipper_ref.py 已删除）。
@@ -128,13 +128,13 @@ cd internal/deepdoc/dla-native
 ORT_LIB=$ORT_LIB MODEL_DIR=$MODEL_DIR CGO_ENABLED=1 \
   PKG_CONFIG_PATH=/home/shenyushi/opt/opencv-4.10/lib/pkgconfig \
   CGO_LDFLAGS="-Wl,-rpath,/home/shenyushi/opt/opencv-4.10/lib" \
-  go run -tags gocv . -task det -image testdata/page0.jpg
+  go run -tags gocv . -task det -image testdata/page0.png
 
 # 纯 Go 默认 build det
-ORT_LIB=$ORT_LIB MODEL_DIR=$MODEL_DIR go run . -task det -image testdata/page0.jpg
+ORT_LIB=$ORT_LIB MODEL_DIR=$MODEL_DIR go run . -task det -image testdata/page0.png
 
 # 与 deepdoc 参考对比（同目录还有 ref_dla.py / ref_tsr.py / ref_ocr_rec.py）
-PYTHONPATH=/home/shenyushi/workspace/ragflow /home/shenyushi/workspace/ragflow/.venv/bin/python ref_det.py testdata/page0.jpg
+PYTHONPATH=/home/shenyushi/workspace/ragflow /home/shenyushi/workspace/ragflow/.venv/bin/python ref_det.py testdata/page0.png
 # 一键跑全部四组件对比见 run.sh：bash run.sh（设 GOCV_TAGS=gocv 走 gocv 路径）
 ```
 
@@ -158,13 +158,13 @@ PYTHONPATH=/home/shenyushi/workspace/ragflow /home/shenyushi/workspace/ragflow/.
 
 ### A. det 收尾（基本完成）
 - **A1** 提交夹具刷新 + convexify 修复：无依赖，可选。
-- **A2** det 多图鲁棒性（不止 page0.jpg）：需多页测试图；对比脚本已就绪。验证是否过拟合单页。
+- **A2** det 多图鲁棒性（不止 page0.png）：需多页测试图；对比脚本已就绪。验证是否过拟合单页。
   - **A2·seam ✅ 已完成**：新增调用侧弹性单测，不依赖 ONNX。
     - `inferOCRDetect` 改为经由 seam `nativeDetectFn` 调用原生检测；`native_det.go` 与 `native_det_stub.go` 均定义 `var nativeDetectFn = nativeOCRDetect`（两 tag 都能解析），`EnableNativeDet`/`nativeDetEnabled` 行为不变。
     - 新增 `internal/deepdoc/parser/pdf/native_det_seam_test.go`（`//go:build !native_det`，默认单测层、无需 ORT_LIB/MODEL_DIR）6 个用例：`NativeOffUsesRemote`、`NativeErrorFallsBack`、`NativeEmptyBoxes`、`NativeValidBoxes`、`OCRDetectAndRecognizeNativeEmpty`、`OCRDetectAndRecognizeNativeDegenerateAndValid`，覆盖 native 分支在空结果 / error / 退化(零面积)quad / 越界坐标下的逐页兜底与回退。
     - 默认 `go test ./internal/deepdoc/parser/pdf/` 与 `-tags native_det` 编译均 `ok`，无回归。
   - **A2·多页集成 ✅ 已完成**：不再阻塞。
-    - 多页异质 fixture 由 `internal/deepdoc/parser/pdf/testdata/real_pdfs/` 渲染（pypdfium2 @ SCALE=3.0），落入 `dla-native/testdata/`：`mp_arxiv_p0.jpg`(英文标题/摘要)、`mp_arxiv_p1.jpg`(英文双栏正文)、`mp_physics_p5.jpg`(英文教材)、`mp_cn_qa_p0.jpg`(中文问答)、`mp_cn_sm_p0.jpg`(中文手册/大页)、`blank.jpg`(合成空白)。每个 fixture 的 golden 由 Python oracle `ref_det.py`(deepdoc `TextDetector`) 预生成 `<stem>.det.golden.json`（`{"output":[[quads]]}` 格式）。
+    - 多页异质 fixture 由 `internal/deepdoc/parser/pdf/testdata/real_pdfs/` 渲染（pypdfium2 @ SCALE=3.0），落入 `dla-native/testdata/`：`mp_arxiv_p0.png`(英文标题/摘要)、`mp_arxiv_p1.png`(英文双栏正文)、`mp_physics_p5.png`(英文教材)、`mp_cn_qa_p0.png`(中文问答)、`mp_cn_sm_p0.png`(中文手册/大页)、`blank.png`(合成空白)。每个 fixture 的 golden 由 Python oracle `ref_det.py`(deepdoc `TextDetector`) 预生成 `<stem>.det.golden.json`（`{"output":[[quads]]}` 格式）。
     - 新增 `TestNativeOCRDetectMultiPage`（`//go:build native_det && integration`）：循环上述 7 个 fixture，经 `nativeOCRDetect` 跑 `RunDet`，断言每页 8 字段有限且在界内；空白页恰为 0 box；非空白页 box 数在 oracle 的 15% 容差内（已知 pure-Go 几何 ~3px 残差，见 A3）。结果（gocv 路径；纯 Go 几何同前）：page0 15/15、arxiv_p0 93/94、arxiv_p1 98/98、physics_p5 21/20、cn_qa_p0 83/83、cn_sm_p0 309/312、blank 0/0 —— **证明未过拟合单页，跨异质页面稳健**。
     - 复跑确认无回归：原 `TestNativeOCRDetect`(page0) 仍 PASS；dla-native 默认 + gocv 单测仍 `ok`。
   - **A2·覆盖扩展 ✅ 已完成**：在 A2·多页集成基础上，按需求扩充 fixture 覆盖，降低稀有路径漏检。
@@ -184,7 +184,7 @@ PYTHONPATH=/home/shenyushi/workspace/ragflow /home/shenyushi/workspace/ragflow/.
     - `nativeOCRDetect` 改为 `nimg, _ := native.NewImageForDet(img)` 后直接 `RunDet`，删除 `os`/`image/jpeg` 临时文件逻辑；渲染页不再落盘。
     - 验证：pure-Go 与 gocv 两条构建下，多页(7 fixture)/空白边界(5)/单页/复用集成全 PASS，box 数与 oracle 一致（gocv：15/15、93/94、98/98、21/20、83/83、309/312、blank 0；pure-Go 同前）。dla-native 默认 + gocv 单测 `ok`。
 - **A3** 🚫 阻塞：压低 box#8 的 3px 残差。
-  - 现状：det 双路径（默认连通域 / gocv 轮廓）在 `page0.jpg` 上均锁定 15/15 @ **3.0px**，box#8 是硬下限。
+  - 现状：det 双路径（默认连通域 / gocv 轮廓）在 `page0.png` 上均锁定 15/15 @ **3.0px**，box#8 是硬下限。
   - 根因：`det_core.go` 的浮点 `minAreaRect` **已用于两套构建**（gocv 构建不走 int-only 的 gocv `RotatedRect`）。残差不在 minAreaRect 是否浮点，而在 **Go 浮点 calipers 未逐位复现 cv2 的 ~1e-4 伪影**（Go 给 `567.00000`，cv2 给 `566.99988`）——下游 `clipperOffset`（`math.Trunc`）据此截断到不同整数边界，经 unclip + scale(×2.49) + round（`det_gocv.go:155`）放大为 3px。其余 14 框已亚像素对齐（pre-unclip 与 deepdoc bit-exact，见 §4.2），故这是**单框量化地板**，且源自 cv2/Python 自身取整，而非 Go 缺陷。
   - 解锁条件：明确决定让浮点 `minAreaRect` **逐位复现 cv2 的浮点输出**（含 ~1e-4 伪影），且该仿真需与 cv2 `minAreaRect` 子像素对齐。当前无需求，故**顺延**，不阻塞交付。
   - 非阻塞佐证：多页(7 fixture)/空白边界(5)/单页集成全 PASS，box 数与 oracle 一致。
@@ -203,7 +203,7 @@ PYTHONPATH=/home/shenyushi/workspace/ragflow /home/shenyushi/workspace/ragflow/.
   - 主模块 `go.mod` 增加 `require dla-native v0.0.0` + `replace dla-native => ./internal/deepdoc/dla-native`。
   - 新增 `internal/deepdoc/parser/pdf/native_det.go`（`//go:build native_det`）：`nativeOCRDetect(img)` 跑 dla-native `RunDet` 并映射为 `pdf.OCRBox`（4 点 quad），`inferOCRDetect` 在 `nativeDetEnabled` 时优先走原生、失败回退远程。
   - `native_det_stub.go`（`//go:build !native_det`）：默认构建不引入 dla-native（无 ONNX/OpenCV 依赖），`nativeOCRDetect` 返回错误→回退。
-  - 回归：`TestNativeOCRDetect`（`//go:build native_det && integration`，需 ORT_LIB/MODEL_DIR）对 page0.jpg 产出 15 个合法 OCRBox，PASS。
+  - 回归：`TestNativeOCRDetect`（`//go:build native_det && integration`，需 ORT_LIB/MODEL_DIR）对 page0.png 产出 15 个合法 OCRBox，PASS。
 - **C2** ✅ 已完成：原生 det 已暴露为服务可选路径。`NewParser` 在 `RAGFLOW_NATIVE_DET=1` 时调用 `EnableNativeDet(true)`（默认构建为 no-op），经 `inferOCRDetect` 路由到原生检测。构建：默认 `go build ./...` 不受影响；`-tags native_det` 启用原生路径（需 ORT_LIB/MODEL_DIR + ONNX Runtime；纯 Go det 路径无需 opencv）。
 
 ### D. 构建 / CI

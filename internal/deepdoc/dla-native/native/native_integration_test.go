@@ -170,7 +170,7 @@ func TestDLAIntegration(t *testing.T) {
 	for _, stem := range dlaPages {
 		stem := stem
 		t.Run(stem, func(t *testing.T) {
-			img, err := Decode(filepath.Join("..", "testdata", stem+".jpg"))
+			img, err := Decode(filepath.Join("..", "testdata", stem+".png"))
 			if err != nil {
 				t.Fatalf("decode: %v", err)
 			}
@@ -195,7 +195,7 @@ func TestTSRIntegration(t *testing.T) {
 	for _, stem := range tsrPages {
 		stem := stem
 		t.Run(stem, func(t *testing.T) {
-			img, err := Decode(filepath.Join("..", "testdata", stem+".jpg"))
+			img, err := Decode(filepath.Join("..", "testdata", stem+".png"))
 			if err != nil {
 				t.Fatalf("decode: %v", err)
 			}
@@ -231,7 +231,7 @@ func TestTSRIntegration(t *testing.T) {
 // documenting the accepted floor amplification rather than hiding it.
 func TestTSRExtremeAspect(t *testing.T) {
 	skipIfNoModels(t)
-	img, err := Decode(filepath.Join("..", "testdata", "tsr_table_caption.jpg"))
+	img, err := Decode(filepath.Join("..", "testdata", "tsr_table_caption.png"))
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -283,7 +283,7 @@ func TestOCRRecIntegration(t *testing.T) {
 	for _, stem := range ocrRecLines {
 		stem := stem
 		t.Run(stem, func(t *testing.T) {
-			img, err := Decode(filepath.Join("..", "testdata", stem+".jpg"))
+			img, err := Decode(filepath.Join("..", "testdata", stem+".png"))
 			if err != nil {
 				t.Fatalf("decode: %v", err)
 			}
@@ -325,7 +325,7 @@ func TestOCRRecIntegration(t *testing.T) {
 
 func TestDLASessionReuse(t *testing.T) {
 	skipIfNoModels(t)
-	img, err := Decode(filepath.Join("..", "testdata", "page0.jpg"))
+	img, err := Decode(filepath.Join("..", "testdata", "page0.png"))
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -344,7 +344,7 @@ func TestDLASessionReuse(t *testing.T) {
 
 func TestTSRSessionReuse(t *testing.T) {
 	skipIfNoModels(t)
-	img, err := Decode(filepath.Join("..", "testdata", "table0.jpg"))
+	img, err := Decode(filepath.Join("..", "testdata", "table0.png"))
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -363,7 +363,7 @@ func TestTSRSessionReuse(t *testing.T) {
 
 func TestOCRRecSessionReuse(t *testing.T) {
 	skipIfNoModels(t)
-	img, err := Decode(filepath.Join("..", "testdata", "line0.jpg"))
+	img, err := Decode(filepath.Join("..", "testdata", "line0.png"))
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -382,7 +382,7 @@ func TestOCRRecSessionReuse(t *testing.T) {
 
 func TestDetIntegration(t *testing.T) {
 	skipIfNoModels(t)
-	imgPath := filepath.Join("..", "testdata", "page0.jpg")
+	imgPath := filepath.Join("..", "testdata", "page0.png")
 	img, err := Decode(imgPath)
 	if err != nil {
 		t.Fatalf("decode: %v", err)

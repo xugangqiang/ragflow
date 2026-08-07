@@ -9,7 +9,7 @@ package main
 //
 // Usage:
 //   ORT_LIB=/path/to/libonnxruntime.so.1.23.2 \
-//     go run . -task dla -image testdata/page0.jpg -modeldir /path/to/models
+//     go run . -task dla -image testdata/page0.png -modeldir /path/to/models
 //
 // Tasks: dla | tsr | ocr-rec | det
 // Wire formats (matching deepdoc/server/adapters/*):
@@ -28,7 +28,7 @@ import (
 
 func main() {
 	task := flag.String("task", "dla", "recognizer: dla | tsr | ocr-rec | det")
-	imagePath := flag.String("image", "testdata/page0.jpg", "input image (JPEG)")
+	imagePath := flag.String("image", "testdata/page0.png", "input image (any format Go's image package decodes)")
 	modelDir := flag.String("modeldir", os.Getenv("MODEL_DIR"), "dir containing *.onnx and ocr.res")
 	libPath := flag.String("lib", os.Getenv("ORT_LIB"), "path to libonnxruntime shared library")
 	flag.Parse()
