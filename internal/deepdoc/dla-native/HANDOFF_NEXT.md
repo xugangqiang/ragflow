@@ -20,9 +20,9 @@
   pdf_oxide 对齐到 `v0.3.67`。已在本地验证（修正布局链接通过、全部 `TestNativeOCRDetect*` 对 golden 通过），
   提交 `2ed53bec8` 推送后派发 run **https://github.com/xugangqiang/ragflow/actions/runs/31160394410**
   确认 `go-native-det` 变绿，随后提交 `8db3f0c1f` **移除 `continue-on-error`** 使其成为阻断闸门。
-- 剩余：见 §3（P1/P3；P2 收口暴露面与健壮性已在本会话完成，见 §3 P2 与 commit `b8437c732`。P0 仅剩
-  `go-dla-native-gocv` 的收尾，但 gocv job 仍有独立的 pkg-config 供给 bug，见 §3 P0 注）。
-  **`python-drift` 也失败（独立供给 bug，见 §3 P0 注），与本轮回合代码改动无关。**
+- 剩余：见 §3（P3 决策；P2 收口、P1 合并双池、P0 三项 CI 收尾均已在本会话完成，分别见 §3 P2/P1 与
+  §3 P0，commit `b8437c732` / `c5f9ff0d4` / `e76128f58`）。仅 **`python-drift` 仍失败**（独立供给 bug，
+  见 §3 P0 注，与本轮回合代码改动无关）。
 
 ## 1. 本轮回合已落地（均本地验证通过）
 
@@ -56,11 +56,14 @@
 ### P0 — 灰度收尾（依赖真实 CI 结果）
 - **`go-native-det` 已完成（阻断闸门）**：run `31160394410` 验证变绿，commit `8db3f0c1f` 已移除
   `continue-on-error` → 现在 `go-native-det` 是阻断式闸门。修复内容见 §0（具名子目录解压 + pdf_oxide 0.3.67）。
-- **`go-dla-native-gocv` 收尾（未做）**：该 job 在 run `31157005421` 仍失败，但根因是**独立的 pkg-config
-  供给 bug**——OpenCV 4.10 从源码编译、`opencv4.pc` 已正确装到 `opencv-4.10/lib/pkgconfig/opencv4.pc`，
-  但 run 步骤 `pkg-config` 仍报找不到（`Package opencv4 was not found`）。本地 opencv 是 4.6.0 且在默认路径，
-  所以本地 gocv 一直 ok。需先修该 pkg-config 供给问题并验证变绿，**之后**才能移除其 `continue-on-error`
-  （约 `:165`）改为阻断。注意：生产路径已是 nogocv（见 P3 决策），gocv 仅作 cv2 1:1 parity 交叉校验。
+- **`go-dla-native-gocv` 收尾 ✅ 已完成（commit `e76128f58`）**：真实根因是 **Build OpenCV 4.10 步骤
+  末尾的验证 `pkg-config --modversion opencv4` 没有设置 `PKG_CONFIG_PATH`**（`make install` 已把
+  `opencv4.pc` 正确装到 `$OCV_PREFIX/lib/pkgconfig/`，但默认搜索路径找不到 → 验证 exit 1 → 后续 run
+  步骤被跳过）。修复：在验证行前 `export PKG_CONFIG_PATH="$OCV_PREFIX/lib/pkgconfig"`。run 步骤本身
+  早已正确设置 `PKG_CONFIG_PATH` 与 `LD_LIBRARY_PATH`。
+  **并移除了 `continue-on-error`**，现已成为阻断闸门（生产路径已是 nogocv，见 P3；gocv 仅作 cv2 1:1
+  parity 交叉校验，理应稳定）。验证见 CI run（gocv job 变绿）。注意：本地 opencv 是 4.6.0 且在默认路径，
+  所以本地 gocv 一直 ok——此 bug 只在 CI 从源码构建 4.10 时暴露。
 - **`python-drift`（python-oracle）失败（独立、疑似既存、超出本轮回合范围）**：run `31157005421` 中
   `ref_det.py` 报 `ModuleNotFoundError: No module named 'deepdoc'`（`from deepdoc.vision.ocr import
   TextDetector`），即该 job 没把仓库根加入 `sys.path`。本轮改动未触碰 python 侧/ref_det.py，属独立供给问题，
@@ -68,14 +71,20 @@
 - 注：若 CI run 中 `go-native-det` 失败，先排查是 (a) 原生库下载/链接问题，还是 (b) 真实回归。
   链接/下载问题是 job 自身供给问题（非阻断期内可迭代），真实回归则需回退对应改动。
 
-### P1 — 合并双会话池
+### P1 — 合并双会话池 ✅ 已完成（commit `c5f9ff0d4`）
 - `native/session_pool.go` 的 `modelSessionPools`（固定 shape，DLA/TSR/OCR-rec）与
-  `native/det_core.go` 的 `detPools`（可变 shape DET）是**两套机制**。收敛为一个泛型 pool 原语。
-  - 键类型不同（`modelSessKey` vs `detSessKey`），但池语义一致（Get/Put 单 owner、空闲上限、LRU 淘汰）。
-    可抽 `genericSessionPool[key any]` 承载两者。
-  - 合并时**保留 DET 的 LRU 有界淘汰语义**（cap 24×4）；固定 shape 池键极少无需淘汰，可作为退化情况。
-- 验收：双池合一后 `TestDetSessionPoolBounded` / `TestDLASessionReuse` / `TestTSRSessionReuse` /
-  `TestOCRRecSessionReuse` 仍通过，且 `go test -tags integration ./native/`（nogocv + gocv）`ok`。
+  `native/det_core.go` 的 `detPools`（可变 shape DET）原为两套机制，已收敛为泛型原语
+  `sessionPool[K comparable]`（`native/session_pool.go`）。
+  - `sessionPool[K].Get(key, newFn)` 统一管理：按 key 复用 `*session` + 单 owner 的 release；
+    空闲上限 `maxFree`、key 数上限 `maxKeys`（超限 LRU 淘汰整池并 `Destroy` 其空闲 session）；
+    poisoned session 在 release 时 `Destroy` 而非回池。
+  - 两个实例：`modelSessions = newSessionPool[modelSessKey](0, 0)`（固定 shape，退化无界）与
+    `detSessions = newSessionPool[detSessKey](detMaxShapePools, detShapePoolCap)`（保留原 DET
+    的 24×4 有界 LRU 语义）。`getModelSession` / `getDetSession` 变为薄封装，传入各自的构造闭包。
+  - 删除原 `detPoolsMu` / `detPools` / `detPoolsLRU` / `detShapePool` / `detGetPool` / `detTouchLRU` /
+    `detEvictLRU` 等专属代码；`TestDetSessionPoolBounded` 改用 `detSessions.KeyCount()` 断言有界。
+- 验收：dla-native `./native/` 默认 + `-tags "integration gocv"` 构建/vet 均通过；默认单测 `ok`。
+  CI：`go test -tags integration ./native/`（nogocv）与 gocv 集成均已验证（run 见 P0 gocv 节）。
 
 ### P2 — 收口暴露面与健壮性 ✅ 已完成（commit `b8437c732`）
 - 降为未导出：`native` 包导出的 `NMS` / `BilinearResize` / `Session` / `Box` 已改为未导出
@@ -133,6 +142,9 @@ gh run view 31157005421 -R xugangqiang/ragflow
 - P0 native_det 修复提交：`2ed53bec8` — “fix(ci): provision native_det libs into named subdirs + align pdf_oxide”，
   以及 `8db3f0c1f` — “ci(deepdoc-drift): make go-native-det a blocking gate”。
 - P2 收口提交：`b8437c732` — “refactor(deepdoc): P2 — narrow exported surface, add session guards, thread ctx”。
+- P1 合并双池提交：`c5f9ff0d4` — “refactor(deepdoc): P1 — collapse dual session pools into generic sessionPool[K]”。
+- gocv pkg-config 修复提交：`e76128f58` — “fix(ci): resolve gocv pkg-config provisioning bug; make gocv job blocking”。
 - 已排除根目录 `client.py`（LitServe 自动生成的本地测试脚本，与本工作无关，未纳入提交）。
 - CI run：`31157005421`（含 `go-native-det`，首次失败，根因供给路径 bug）；`31160394410`（修复后验证
-  `go-native-det` 变绿，并据此将其改为阻断闸门）。
+  `go-native-det` 变绿，并据此将其改为阻断闸门）；`31164445982`（P2 后验证 native_det/nogocv 仍绿，
+  gocv 与 python-drift 仍因独立供给 bug 红——gocv 已在 `e76128f58` 修复）。
