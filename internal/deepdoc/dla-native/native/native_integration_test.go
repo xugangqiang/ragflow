@@ -507,9 +507,7 @@ func TestDetSessionPoolBounded(t *testing.T) {
 		}
 	}
 
-	detPoolsMu.Lock()
-	got := len(detPools)
-	detPoolsMu.Unlock()
+	got := detSessions.KeyCount()
 	if got > detMaxShapePools {
 		t.Fatalf("det session pool set grew unbounded: %d pools (cap %d) after %d distinct sizes",
 			got, detMaxShapePools, n)

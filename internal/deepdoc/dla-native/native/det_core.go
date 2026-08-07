@@ -20,7 +20,6 @@ import (
 	"math"
 	"os"
 	"path/filepath"
-	"sync"
 )
 
 // Det parameters mirrored from TextDetector / DBPostProcess.
@@ -48,26 +47,20 @@ type DetResult struct {
 	Boxes []DetBox
 }
 
-// detSessionPools caches ONNX sessions for the DB text detector. The detector
-// runs at a VARIABLE input size: each page is aspect-preserved-rescaled to a
-// round32 size bounded by detLimitSideLen, so the pool is keyed by the resized
+// detSessions caches ONNX sessions for the DB text detector. The detector runs
+// at a VARIABLE input size: each page is aspect-preserved-rescaled to a round32
+// size bounded by detLimitSideLen, so the pool is keyed by the resized
 // (height, width) and distinct page sizes get distinct sessions. Sessions are
 // pooled per instance, never shared across concurrent Run calls, because
 // session.Run mutates the session's fixed-shape input/output tensors; the
 // native det branch runs concurrently across the page worker pool, so a
 // naively shared single session would race.
 //
-// The set of distinct shapes is BOUNDED (detMaxShapePools). A plain sync.Map
-// would grow without limit in a long-running server ingesting many
-// differently-sized pages (each unique (modelPath, rh, rw) pins a pool plus
-// cached tensors forever). Instead the least-recently-used shape pool is
-// evicted and its idle sessions Destroyed, bounding memory.
-var (
-	detPoolsMu  sync.Mutex
-	detPools    = make(map[detSessKey]*detShapePool)
-	detPoolsLRU []detSessKey // front = least-recently-used
-)
-
+// The set of distinct shapes is BOUNDED (detMaxShapePools). A long-running
+// server ingesting many differently-sized pages would otherwise pin a pool
+// plus cached tensors per unique (modelPath, rh, rw) forever. The shared
+// sessionPool evicts the least-recently-used shape pool (and Destroys its idle
+// sessions) once the cap is exceeded, bounding memory.
 const (
 	// detMaxShapePools caps distinct (modelPath, rh, rw) pools. Pages within a
 	// document share one size, so a modest cap covers realistic concurrency
@@ -83,63 +76,9 @@ type detSessKey struct {
 	rh, rw    int64
 }
 
-// detShapePool holds reusable sessions for one resized shape. live flips to
-// false when the pool is evicted; checked-out sessions then Destroy themselves
-// on release rather than returning to a dead pool.
-type detShapePool struct {
-	mu   sync.Mutex
-	live bool
-	free []*session
-}
-
-func detGetPool(key detSessKey) *detShapePool {
-	detPoolsMu.Lock()
-	defer detPoolsMu.Unlock()
-	if p, ok := detPools[key]; ok {
-		detTouchLRU(key)
-		return p
-	}
-	if len(detPools) >= detMaxShapePools {
-		detEvictLRU()
-	}
-	p := &detShapePool{live: true}
-	detPools[key] = p
-	detPoolsLRU = append(detPoolsLRU, key)
-	return p
-}
-
-// detTouchLRU moves key to the most-recently-used end. Caller holds detPoolsMu.
-func detTouchLRU(key detSessKey) {
-	for i, k := range detPoolsLRU {
-		if k == key {
-			detPoolsLRU = append(detPoolsLRU[:i], detPoolsLRU[i+1:]...)
-			detPoolsLRU = append(detPoolsLRU, k)
-			return
-		}
-	}
-}
-
-// detEvictLRU drops the least-recently-used pool and destroys its idle
-// sessions. Caller holds detPoolsMu.
-func detEvictLRU() {
-	if len(detPoolsLRU) == 0 {
-		return
-	}
-	evict := detPoolsLRU[0]
-	detPoolsLRU = detPoolsLRU[1:]
-	p := detPools[evict]
-	delete(detPools, evict)
-	if p == nil {
-		return
-	}
-	p.mu.Lock()
-	p.live = false
-	for _, s := range p.free {
-		s.Destroy()
-	}
-	p.free = nil
-	p.mu.Unlock()
-}
+// detSessions is the variable-shape detector pool: bounded at detMaxShapePools
+// distinct shape-pools, each retaining up to detShapePoolCap idle sessions.
+var detSessions = newSessionPool[detSessKey](detMaxShapePools, detShapePoolCap)
 
 // getDetSession returns a reusable detector session for the given resized
 // shape plus a release func. The caller must call release exactly once. On a
@@ -147,41 +86,14 @@ func detEvictLRU() {
 // nothing is cached.
 func getDetSession(modelPath string, rh, rw int64) (*session, func(), error) {
 	key := detSessKey{modelPath, rh, rw}
-	p := detGetPool(key)
-	p.mu.Lock()
-	var s *session
-	if n := len(p.free); n > 0 {
-		s = p.free[n-1]
-		p.free = p.free[:n-1]
-	}
-	p.mu.Unlock()
-	if s == nil {
+	return detSessions.Get(key, func() (*session, error) {
 		// Single-threaded (1): a multi-threaded DB detector Run leaves worker
 		// threads settling while the postprocess invokes OpenCV findContours,
 		// whose parallel_for_ then under-runs and returns contracted contours.
-		var err error
-		s, err = NewSession(modelPath, "x",
+		return NewSession(modelPath, "x",
 			[]int64{1, 3, rh, rw}, "sigmoid_0.tmp_0",
 			[]int64{1, 1, rh, rw}, 1)
-		if err != nil {
-			return nil, nil, err
-		}
-	}
-	release := func() {
-		if s.poisoned {
-			s.Destroy()
-			return
-		}
-		p.mu.Lock()
-		if p.live && len(p.free) < detShapePoolCap {
-			p.free = append(p.free, s)
-			p.mu.Unlock()
-		} else {
-			p.mu.Unlock()
-			s.Destroy()
-		}
-	}
-	return s, release, nil
+	})
 }
 
 // RunDet runs preprocessing + ONNX inference + DB post-processing and returns
