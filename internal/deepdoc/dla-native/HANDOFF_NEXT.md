@@ -14,7 +14,14 @@
 - 已提交并推送到 `feat/deepdoc-go-port`：**commit `0a0688ff2`**。
 - 已派发 `deepdoc-drift`：**https://github.com/xugangqiang/ragflow/actions/runs/31157005421**
   （含 `go-native-det`，非阻断；还含 `python-drift` / `go-dla-native` / `go-dla-native-gocv`）。
-- 剩余：见 §3（架构评审后续 P0/P1/P2/P3）。**P0 灰度收尾需等新会话验证上述 CI run 后推进。**
+- **P0 native_det 已完成**：run `31157005421` 中 `go-native-det` 失败，根因是供给路径 bug（三个
+  tarball 被平铺进 `$NL` 根目录，而 run 步骤按 `$NL/<name>/lib/...` 引用 → `.a` 全部打不开；外加
+  pdf_oxide 被钉成 `v0.3.73` 而 `build.sh` 规范是 `v0.3.67`）。修复：每个 tarball 解压到具名子目录 +
+  pdf_oxide 对齐到 `v0.3.67`。已在本地验证（修正布局链接通过、全部 `TestNativeOCRDetect*` 对 golden 通过），
+  提交 `2ed53bec8` 推送后派发 run **https://github.com/xugangqiang/ragflow/actions/runs/31160394410**
+  确认 `go-native-det` 变绿，随后提交 `8db3f0c1f` **移除 `continue-on-error`** 使其成为阻断闸门。
+- 剩余：见 §3（P1/P2/P3；P0 仅剩 `go-dla-native-gocv` 的收尾，但 gocv job 仍有独立的 pkg-config 供给
+  bug，见 §3 P0 注）。**`python-drift` 也失败（独立供给 bug，见 §3 P0 注），与本轮回合代码改动无关。**
 
 ## 1. 本轮回合已落地（均本地验证通过）
 
@@ -45,14 +52,17 @@
 ## 3. 剩余待办（接力重点）
 
 ### P0 — 灰度收尾（依赖真实 CI 结果）
-- **验证 `go-native-det` 真实 CI 跑绿** → 移除 `deepdoc-drift.yml` `go-native-det` 的 `continue-on-error: true`
-  （约 `:262`），使其变成**阻断式**闸门。
-  - 验证方式：
-    - `gh run view 31157005421 -R xugangqiang/ragflow`（或在浏览器打开上面的 run 链接）查看 `go-native-det` job 结论。
-    - 该 run 派发在 `feat/deepdoc-go-port`，应已包含本次提交 `0a0688ff2` 的 workflow。
-  - 同样处理 `go-dla-native-gocv`（约 `:165`）。
-  - **前提**：native-lib 供给步骤（curl 三个 archive + 镜像 `build.sh setup_cgo_env` 的 CGO flags）必须真实跑通；
-    在此之前保持 `continue-on-error`，否则会误伤 main。
+- **`go-native-det` 已完成（阻断闸门）**：run `31160394410` 验证变绿，commit `8db3f0c1f` 已移除
+  `continue-on-error` → 现在 `go-native-det` 是阻断式闸门。修复内容见 §0（具名子目录解压 + pdf_oxide 0.3.67）。
+- **`go-dla-native-gocv` 收尾（未做）**：该 job 在 run `31157005421` 仍失败，但根因是**独立的 pkg-config
+  供给 bug**——OpenCV 4.10 从源码编译、`opencv4.pc` 已正确装到 `opencv-4.10/lib/pkgconfig/opencv4.pc`，
+  但 run 步骤 `pkg-config` 仍报找不到（`Package opencv4 was not found`）。本地 opencv 是 4.6.0 且在默认路径，
+  所以本地 gocv 一直 ok。需先修该 pkg-config 供给问题并验证变绿，**之后**才能移除其 `continue-on-error`
+  （约 `:165`）改为阻断。注意：生产路径已是 nogocv（见 P3 决策），gocv 仅作 cv2 1:1 parity 交叉校验。
+- **`python-drift`（python-oracle）失败（独立、疑似既存、超出本轮回合范围）**：run `31157005421` 中
+  `ref_det.py` 报 `ModuleNotFoundError: No module named 'deepdoc'`（`from deepdoc.vision.ocr import
+  TextDetector`），即该 job 没把仓库根加入 `sys.path`。本轮改动未触碰 python 侧/ref_det.py，属独立供给问题，
+  需单独确认是否修复（给 run 步骤加 `PYTHONPATH=$GITHUB_WORKSPACE` 之类）。
 - 注：若 CI run 中 `go-native-det` 失败，先排查是 (a) 原生库下载/链接问题，还是 (b) 真实回归。
   链接/下载问题是 job 自身供给问题（非阻断期内可迭代），真实回归则需回退对应改动。
 
@@ -114,5 +124,8 @@ gh run view 31157005421 -R xugangqiang/ragflow
 ## 6. 提交 / 分支状态
 - 分支：`feat/deepdoc-go-port`（与 `origin/feat/deepdoc-go-port` 同步）。
 - 本轮回合提交：`0a0688ff2` — “fix(deepdoc): bound DET session pool, stabilize gocv ordering, add CI jobs”。
+- P0 native_det 修复提交：`2ed53bec8` — “fix(ci): provision native_det libs into named subdirs + align pdf_oxide”，
+  以及 `8db3f0c1f` — “ci(deepdoc-drift): make go-native-det a blocking gate”。
 - 已排除根目录 `client.py`（LitServe 自动生成的本地测试脚本，与本工作无关，未纳入提交）。
-- CI run：`31157005421`（含 `go-native-det`，非阻断）。
+- CI run：`31157005421`（含 `go-native-det`，首次失败，根因供给路径 bug）；`31160394410`（修复后验证
+  `go-native-det` 变绿，并据此将其改为阻断闸门）。
