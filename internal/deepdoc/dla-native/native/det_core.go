@@ -15,6 +15,7 @@ package native
 // unambiguously.
 
 import (
+	"context"
 	"encoding/json"
 	"math"
 	"os"
@@ -52,7 +53,7 @@ type DetResult struct {
 // round32 size bounded by detLimitSideLen, so the pool is keyed by the resized
 // (height, width) and distinct page sizes get distinct sessions. Sessions are
 // pooled per instance, never shared across concurrent Run calls, because
-// Session.Run mutates the session's fixed-shape input/output tensors; the
+// session.Run mutates the session's fixed-shape input/output tensors; the
 // native det branch runs concurrently across the page worker pool, so a
 // naively shared single session would race.
 //
@@ -88,7 +89,7 @@ type detSessKey struct {
 type detShapePool struct {
 	mu   sync.Mutex
 	live bool
-	free []*Session
+	free []*session
 }
 
 func detGetPool(key detSessKey) *detShapePool {
@@ -144,11 +145,11 @@ func detEvictLRU() {
 // shape plus a release func. The caller must call release exactly once. On a
 // pool miss a fresh session is created; creation errors are propagated and
 // nothing is cached.
-func getDetSession(modelPath string, rh, rw int64) (*Session, func(), error) {
+func getDetSession(modelPath string, rh, rw int64) (*session, func(), error) {
 	key := detSessKey{modelPath, rh, rw}
 	p := detGetPool(key)
 	p.mu.Lock()
-	var s *Session
+	var s *session
 	if n := len(p.free); n > 0 {
 		s = p.free[n-1]
 		p.free = p.free[:n-1]
@@ -167,6 +168,10 @@ func getDetSession(modelPath string, rh, rw int64) (*Session, func(), error) {
 		}
 	}
 	release := func() {
+		if s.poisoned {
+			s.Destroy()
+			return
+		}
 		p.mu.Lock()
 		if p.live && len(p.free) < detShapePoolCap {
 			p.free = append(p.free, s)
@@ -183,7 +188,7 @@ func getDetSession(modelPath string, rh, rw int64) (*Session, func(), error) {
 // the detected text-box quads. Both the gocv build (OpenCV findContours) and
 // the pure-Go build (connected components) post-process inline; the only
 // difference is the contour-extraction backend selected by build tag.
-func RunDet(modelDir string, img *Image) (DetResult, error) {
+func RunDet(ctx context.Context, modelDir string, img *Image) (DetResult, error) {
 	blob, rh, rw, sh, sw := detPreprocess(img)
 	sess, release, e := getDetSession(filepath.Join(modelDir, "det.onnx"), int64(rh), int64(rw))
 	if e != nil {
@@ -191,7 +196,7 @@ func RunDet(modelDir string, img *Image) (DetResult, error) {
 	}
 	defer release()
 
-	out, e := sess.Run(blob)
+	out, e := sess.Run(ctx, blob)
 	if e != nil {
 		return DetResult{}, e
 	}

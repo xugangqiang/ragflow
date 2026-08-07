@@ -36,7 +36,7 @@ func detPreprocess(img *Image) (blob []float32, resizeH, resizeW, srcH, srcW int
 	resizeW = int(math.Max(float64(round32(resizeW)), 32))
 
 	bgr := img.ToBGR()
-	resized := BilinearResize(bgr, w, h, resizeW, resizeH)
+	resized := bilinearResize(bgr, w, h, resizeW, resizeH)
 	return normalizeCHW(resized, resizeH, resizeW, srcW, srcH), resizeH, resizeW, srcH, srcW
 }
 

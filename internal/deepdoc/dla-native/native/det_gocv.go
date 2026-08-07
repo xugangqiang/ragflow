@@ -65,7 +65,7 @@ func detPreprocess(img *Image) (blob []float32, resizeH, resizeW, srcH, srcW int
 		bgr := img.ToBGR()
 		m, err := gocv.NewMatFromBytes(h, w, gocv.MatTypeCV8UC3, bgr)
 		if err != nil {
-			resized := BilinearResize(bgr, w, h, resizeW, resizeH)
+			resized := bilinearResize(bgr, w, h, resizeW, resizeH)
 			return normalizeCHW(resized, resizeH, resizeW, srcW, srcH), resizeH, resizeW, srcH, srcW
 		}
 		srcMat = m

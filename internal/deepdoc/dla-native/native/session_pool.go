@@ -8,7 +8,7 @@ package native
 // shapes. This pool caches one session per model signature and hands it back to
 // a sync.Pool between calls.
 //
-// Sessions are pooled, not shared concurrently: Session.Run copies the caller's
+// Sessions are pooled, not shared concurrently: session.Run copies the caller's
 // input into the session's fixed-shape input tensor and then executes, so a
 // single session must never be touched by two goroutines at once. getModelSession
 // returns a session owned by the caller until release is called; release returns
@@ -56,18 +56,30 @@ func shapeKey(s []int64) string {
 // a release func. The caller must call release exactly once. On a pool miss a
 // fresh session is created; creation errors are propagated and nothing is
 // cached.
-func getModelSession(modelPath, inName string, inShape []int64, outName string, outShape []int64, intraOpThreads int) (*Session, func(), error) {
+func getModelSession(modelPath, inName string, inShape []int64, outName string, outShape []int64, intraOpThreads int) (*session, func(), error) {
 	key := modelSessKeyOf(modelPath, inName, inShape, outName, outShape, intraOpThreads)
 	v, _ := modelSessionPools.LoadOrStore(key, &sync.Pool{})
 	pool := v.(*sync.Pool)
 	if got := pool.Get(); got != nil {
-		if s, ok := got.(*Session); ok {
-			return s, func() { pool.Put(s) }, nil
+		if s, ok := got.(*session); ok {
+			return s, func() {
+				if s.poisoned {
+					s.Destroy()
+					return
+				}
+				pool.Put(s)
+			}, nil
 		}
 	}
 	s, err := NewSession(modelPath, inName, inShape, outName, outShape, intraOpThreads)
 	if err != nil {
 		return nil, nil, err
 	}
-	return s, func() { pool.Put(s) }, nil
+	return s, func() {
+		if s.poisoned {
+			s.Destroy()
+			return
+		}
+		pool.Put(s)
+	}, nil
 }

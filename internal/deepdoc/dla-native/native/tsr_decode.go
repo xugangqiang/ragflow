@@ -4,7 +4,7 @@ package native
 // builds.
 //
 // TSR always decodes through the shared Go image/jpeg decoder (image.go's
-// Decode) and resizes with the pure-Go BilinearResize. It does NOT use the
+// Decode) and resizes with the pure-Go bilinearResize. It does NOT use the
 // gocv/cv2 decode path even under the gocv build.
 //
 // Why: deepdoc's production TSR adapter (deepdoc/server/adapters/tsr_adapter.py)
@@ -22,7 +22,7 @@ package native
 
 func tsrPreprocess(img *Image) (blob []float32, scaleFactor [2]float32) {
 	bgr := img.ToBGR()
-	resized := BilinearResize(bgr, img.W, img.H, tsrInputSize, tsrInputSize)
+	resized := bilinearResize(bgr, img.W, img.H, tsrInputSize, tsrInputSize)
 	out := tsrBlob(resized)
 	return out, tsrScaleFactor(img)
 }

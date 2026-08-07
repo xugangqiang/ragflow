@@ -1,6 +1,6 @@
 package native
 
-// nms.go — generic axis-aligned bounding-box NMS.
+// nms.go — generic axis-aligned bounding-box nms.
 //
 // Shared by DLA (IoU 0.45, +1) and TSR (IoU 0.2, no +1). The +1 term matches
 // deepdoc/vision/operators.py's nms; some PP-Det paths omit it.
@@ -9,14 +9,14 @@ import (
 	"sort"
 )
 
-// Box is an xyxy rectangle with an associated score.
-type Box struct {
+// nmsBox is an xyxy rectangle with an associated score.
+type nmsBox struct {
 	X0, Y0, X1, Y1 float32
 	Score          float32
 }
 
-// NMS returns the indices (into the input slice) of the kept boxes.
-func NMS(boxes []Box, iouThr float32, plusOne bool) []int {
+// nms returns the indices (into the input slice) of the kept boxes.
+func nms(boxes []nmsBox, iouThr float32, plusOne bool) []int {
 	order := make([]int, len(boxes))
 	for i := range order {
 		order[i] = i

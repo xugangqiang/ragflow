@@ -13,6 +13,8 @@ package native
 // the shared environment.
 
 import (
+	"context"
+	"fmt"
 	"sync"
 
 	ort "github.com/yalue/onnxruntime_go"
@@ -34,14 +36,18 @@ func InitORT(libPath string) error {
 	return ortInitErr
 }
 
-// Session loads one ONNX model and runs single-input/single-output inference.
-type Session struct {
+// session loads one ONNX model and runs single-input/single-output inference.
+type session struct {
 	inName  string
 	outName string
 	outSize int64
 	sess    *ort.AdvancedSession
 	in      *ort.Tensor[float32]
 	out     *ort.Tensor[float32]
+	// poisoned is set when a Run is cancelled/terminated via context. ONNX
+	// Runtime does not guarantee a session is reusable after a forced
+	// termination, so the pool must Destroy rather than re-Put it.
+	poisoned bool
 }
 
 // NewSession opens modelPath. inShape/outShape describe the fixed tensor
@@ -56,7 +62,7 @@ type Session struct {
 // order must match Python's for bit-stable parity; a single-threaded run folds
 // reductions in a different order and drifts from the Python reference.
 // InitORT must have been called first.
-func NewSession(modelPath, inName string, inShape []int64, outName string, outShape []int64, intraOpThreads int) (*Session, error) {
+func NewSession(modelPath, inName string, inShape []int64, outName string, outShape []int64, intraOpThreads int) (*session, error) {
 	in := make([]float32, prod(inShape))
 	out := make([]float32, prod(outShape))
 	inT, err := ort.NewTensor(ort.NewShape(inShape...), in)
@@ -92,7 +98,7 @@ func NewSession(modelPath, inName string, inShape []int64, outName string, outSh
 		outT.Destroy()
 		return nil, err
 	}
-	return &Session{
+	return &session{
 		inName: inName, outName: outName,
 		outSize: prod(outShape),
 		sess:    sess, in: inT, out: outT,
@@ -100,10 +106,37 @@ func NewSession(modelPath, inName string, inShape []int64, outName string, outSh
 }
 
 // Run copies input into the input tensor, executes, and returns the output
-// tensor contents.
-func (s *Session) Run(input []float32) ([]float32, error) {
+// tensor contents. ctx bounds the inference: if it is cancelled while Run is
+// in flight, the underlying ONNX Runtime call is terminated via RunOptions.
+// A terminated session is left in an indeterminate state, so it is marked
+// poisoned and the pool destroys it instead of reusing it.
+func (s *session) Run(ctx context.Context, input []float32) ([]float32, error) {
+	if len(input) != len(s.in.GetData()) {
+		return nil, fmt.Errorf("session %s: input len %d != tensor len %d",
+			s.outName, len(input), len(s.in.GetData()))
+	}
+	opts, err := ort.NewRunOptions()
+	if err != nil {
+		return nil, err
+	}
+	defer opts.Destroy()
+	// Cancel an in-flight Run when the context is done. done closes once Run
+	// returns so the watcher exits even on the success path.
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = opts.Terminate()
+		case <-done:
+		}
+	}()
+
 	copy(s.in.GetData(), input)
-	if err := s.sess.Run(); err != nil {
+	if err := s.sess.RunWithOptions(opts); err != nil {
+		if ctx.Err() != nil {
+			s.poisoned = true
+		}
 		return nil, err
 	}
 	out := make([]float32, s.outSize)
@@ -113,7 +146,7 @@ func (s *Session) Run(input []float32) ([]float32, error) {
 
 // Destroy releases the tensors and advanced-session handle. It does NOT touch
 // the process-global environment.
-func (s *Session) Destroy() {
+func (s *session) Destroy() {
 	if s.sess != nil {
 		s.sess.Destroy()
 	}

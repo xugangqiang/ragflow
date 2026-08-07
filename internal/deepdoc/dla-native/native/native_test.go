@@ -12,12 +12,12 @@ import (
 )
 
 func TestNMS(t *testing.T) {
-	boxes := []Box{
+	boxes := []nmsBox{
 		{X0: 0, Y0: 0, X1: 10, Y1: 10, Score: 0.9},
 		{X0: 0, Y0: 0, X1: 10, Y1: 10, Score: 0.8},       // duplicate -> suppressed
 		{X0: 100, Y0: 100, X1: 110, Y1: 110, Score: 0.7}, // far away -> kept
 	}
-	keep := NMS(boxes, 0.45, true)
+	keep := nms(boxes, 0.45, true)
 	if len(keep) != 2 {
 		t.Fatalf("want 2 kept boxes, got %d (%v)", len(keep), keep)
 	}
@@ -28,9 +28,9 @@ func TestNMS(t *testing.T) {
 
 func TestNMSNoPlusOne(t *testing.T) {
 	// Two boxes that barely overlap; without the +1 term IoU < 0.2 -> both kept.
-	a := Box{X0: 0, Y0: 0, X1: 10, Y1: 10, Score: 0.9}
-	b := Box{X0: 9, Y0: 0, X1: 19, Y1: 10, Score: 0.8}
-	keep := NMS([]Box{a, b}, 0.2, false)
+	a := nmsBox{X0: 0, Y0: 0, X1: 10, Y1: 10, Score: 0.9}
+	b := nmsBox{X0: 9, Y0: 0, X1: 19, Y1: 10, Score: 0.8}
+	keep := nms([]nmsBox{a, b}, 0.2, false)
 	if len(keep) != 2 {
 		t.Fatalf("want 2 kept boxes (no +1), got %d (%v)", len(keep), keep)
 	}
@@ -70,7 +70,7 @@ func TestOCRRecCTCDecodeDedup(t *testing.T) {
 func TestBilinearResize1x1(t *testing.T) {
 	// 1x1 red pixel (BGR: 0,0,255) resized to NxN must stay uniform.
 	src := []byte{0, 0, 255}
-	dst := BilinearResize(src, 1, 1, 5, 5)
+	dst := bilinearResize(src, 1, 1, 5, 5)
 	if len(dst) != 5*5*3 {
 		t.Fatalf("wrong dst length %d", len(dst))
 	}

@@ -7,6 +7,7 @@ package native
 // preprocessing, inference, postprocessing, and wire encoding.
 
 import (
+	"context"
 	"encoding/json"
 	"math"
 	"path/filepath"
@@ -46,7 +47,7 @@ var (
 )
 
 // RunDLA runs layout detection on a page image.
-func RunDLA(modelDir string, img *Image) (DLAResult, error) {
+func RunDLA(ctx context.Context, modelDir string, img *Image) (DLAResult, error) {
 	blob, sf := dlaPreprocess(img)
 	// 0 → all cores, matching deepdoc's Python onnxruntime for bit-stable
 	// parity (no contour extraction in the DLA Run path).
@@ -58,7 +59,7 @@ func RunDLA(modelDir string, img *Image) (DLAResult, error) {
 	}
 	defer release()
 
-	out, err := sess.Run(blob)
+	out, err := sess.Run(ctx, blob)
 	if err != nil {
 		return DLAResult{}, err
 	}
@@ -82,7 +83,7 @@ func dlaGeom(img *Image) (newW, newH int, dw, dh float64) {
 // dlaLetterbox places the already-resized BGR raster (newH*newW*3, row-major)
 // into the dlaInputSize canvas with 114-filled borders and returns the CHW
 // float blob (/255) the YOLOv10 layout model consumes. Shared by both build
-// paths; only the resize source differs (Go BilinearResize vs cv2 via gocv).
+// paths; only the resize source differs (Go bilinearResize vs cv2 via gocv).
 func dlaLetterbox(resized []byte, newW, newH int, dw, dh float64) []float32 {
 	top := int(math.Round(dh - 0.1))
 	left := int(math.Round(dw - 0.1))
@@ -121,7 +122,7 @@ func dlaScaleFactor(img *Image, newW, newH int, dw, dh float64) [4]float32 {
 func dlaPostprocess(out []float32, sf [4]float32) DLAResult {
 	const scoreThr = 0.08
 	type cand struct {
-		Box
+		nmsBox
 		cls int
 	}
 	cands := make([]cand, 0, dlaMaxBoxes)
@@ -133,7 +134,7 @@ func dlaPostprocess(out []float32, sf [4]float32) DLAResult {
 		}
 		cls := int(out[base+5] + 0.5)
 		cands = append(cands, cand{
-			Box: Box{
+			nmsBox: nmsBox{
 				X0:    (out[base+0] - sf[2]) * sf[0],
 				Y0:    (out[base+1] - sf[3]) * sf[1],
 				X1:    (out[base+2] - sf[2]) * sf[0],
@@ -150,11 +151,11 @@ func dlaPostprocess(out []float32, sf [4]float32) DLAResult {
 	}
 	res := DLAResult{}
 	for cls, idxs := range byClass {
-		sub := make([]Box, len(idxs))
+		sub := make([]nmsBox, len(idxs))
 		for k, i := range idxs {
-			sub[k] = cands[i].Box
+			sub[k] = cands[i].nmsBox
 		}
-		for _, keep := range NMS(sub, 0.45, true) {
+		for _, keep := range nms(sub, 0.45, true) {
 			res.Boxes = append(res.Boxes, DLABox{
 				X0: round2(sub[keep].X0), Y0: round2(sub[keep].Y0),
 				X1: round2(sub[keep].X1), Y1: round2(sub[keep].Y1),

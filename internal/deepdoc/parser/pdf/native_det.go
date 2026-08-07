@@ -15,6 +15,7 @@ package pdf
 // startup when RAGFLOW_NATIVE_DET=1). See HANDOFF.md §8 C1.
 
 import (
+	"context"
 	"errors"
 	"image"
 	"os"
@@ -56,7 +57,7 @@ func nativeOCRDetect(img image.Image) ([]pdf.OCRBox, error) {
 	if err != nil {
 		return nil, err
 	}
-	res, err := native.RunDet(modelDir, nimg)
+	res, err := native.RunDet(context.Background(), modelDir, nimg)
 	if err != nil {
 		return nil, err
 	}

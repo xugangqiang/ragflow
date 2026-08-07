@@ -18,6 +18,7 @@ package main
 //   det     : {"output": [[ [ [x,y]*4, ... ] ]]}
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"os"
@@ -55,28 +56,28 @@ func main() {
 	var out string
 	switch *task {
 	case "dla":
-		res, err := native.RunDLA(*modelDir, img)
+		res, err := native.RunDLA(context.Background(), *modelDir, img)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "dla:", err)
 			os.Exit(1)
 		}
 		out = res.Wire()
 	case "tsr":
-		res, err := native.RunTSR(*modelDir, img)
+		res, err := native.RunTSR(context.Background(), *modelDir, img)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "tsr:", err)
 			os.Exit(1)
 		}
 		out = res.Wire()
 	case "ocr-rec":
-		res, err := native.RunOCRRec(*modelDir, img)
+		res, err := native.RunOCRRec(context.Background(), *modelDir, img)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "ocr-rec:", err)
 			os.Exit(1)
 		}
 		out = res.Wire()
 	case "det":
-		res, err := native.RunDet(*modelDir, img)
+		res, err := native.RunDet(context.Background(), *modelDir, img)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "det:", err)
 			os.Exit(1)

@@ -180,7 +180,7 @@ func TestDLAIntegration(t *testing.T) {
 			// preprocessing blob uses Go's jpeg decoder and the ~2.6px pure-Go
 			// floor is not actually exercised. The pure-Go build ignores Path.
 			img.Path = filepath.Join("..", "testdata", stem+".jpg")
-			res, err := RunDLA(os.Getenv("MODEL_DIR"), img)
+			res, err := RunDLA(t.Context(), os.Getenv("MODEL_DIR"), img)
 			if err != nil {
 				t.Fatalf("RunDLA: %v", err)
 			}
@@ -209,7 +209,7 @@ func TestTSRIntegration(t *testing.T) {
 			// matching deepdoc's PIL TSR decode. img.Path is intentionally not
 			// set here: it only steers the gocv DLA/DET cv2 re-decode, and TSR
 			// must stay on the PIL-style decode to match the production baseline.
-			res, err := RunTSR(os.Getenv("MODEL_DIR"), img)
+			res, err := RunTSR(t.Context(), os.Getenv("MODEL_DIR"), img)
 			if err != nil {
 				t.Fatalf("RunTSR: %v", err)
 			}
@@ -243,7 +243,7 @@ func TestTSRExtremeAspect(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	res, err := RunTSR(os.Getenv("MODEL_DIR"), img)
+	res, err := RunTSR(t.Context(), os.Getenv("MODEL_DIR"), img)
 	if err != nil {
 		t.Fatalf("RunTSR: %v", err)
 	}
@@ -295,7 +295,7 @@ func TestOCRRecIntegration(t *testing.T) {
 			if err != nil {
 				t.Fatalf("decode: %v", err)
 			}
-			res, err := RunOCRRec(os.Getenv("MODEL_DIR"), img)
+			res, err := RunOCRRec(t.Context(), os.Getenv("MODEL_DIR"), img)
 			if err != nil {
 				t.Fatalf("RunOCRRec: %v", err)
 			}
@@ -337,11 +337,11 @@ func TestDLASessionReuse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	r1, err := RunDLA(os.Getenv("MODEL_DIR"), img)
+	r1, err := RunDLA(t.Context(), os.Getenv("MODEL_DIR"), img)
 	if err != nil {
 		t.Fatalf("RunDLA #1: %v", err)
 	}
-	r2, err := RunDLA(os.Getenv("MODEL_DIR"), img)
+	r2, err := RunDLA(t.Context(), os.Getenv("MODEL_DIR"), img)
 	if err != nil {
 		t.Fatalf("RunDLA #2: %v", err)
 	}
@@ -356,11 +356,11 @@ func TestTSRSessionReuse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	r1, err := RunTSR(os.Getenv("MODEL_DIR"), img)
+	r1, err := RunTSR(t.Context(), os.Getenv("MODEL_DIR"), img)
 	if err != nil {
 		t.Fatalf("RunTSR #1: %v", err)
 	}
-	r2, err := RunTSR(os.Getenv("MODEL_DIR"), img)
+	r2, err := RunTSR(t.Context(), os.Getenv("MODEL_DIR"), img)
 	if err != nil {
 		t.Fatalf("RunTSR #2: %v", err)
 	}
@@ -375,11 +375,11 @@ func TestOCRRecSessionReuse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	r1, err := RunOCRRec(os.Getenv("MODEL_DIR"), img)
+	r1, err := RunOCRRec(t.Context(), os.Getenv("MODEL_DIR"), img)
 	if err != nil {
 		t.Fatalf("RunOCRRec #1: %v", err)
 	}
-	r2, err := RunOCRRec(os.Getenv("MODEL_DIR"), img)
+	r2, err := RunOCRRec(t.Context(), os.Getenv("MODEL_DIR"), img)
 	if err != nil {
 		t.Fatalf("RunOCRRec #2: %v", err)
 	}
@@ -401,7 +401,7 @@ func TestDetIntegration(t *testing.T) {
 	// actually exercised. The pure-Go build ignores Path, so this is safe for
 	// both build tags.
 	img.Path = imgPath
-	res, err := RunDet(os.Getenv("MODEL_DIR"), img)
+	res, err := RunDet(t.Context(), os.Getenv("MODEL_DIR"), img)
 	if err != nil {
 		t.Fatalf("RunDet: %v", err)
 	}
@@ -502,7 +502,7 @@ func TestDetSessionPoolBounded(t *testing.T) {
 		for j := 0; j < len(img.Pix); j += 3 {
 			img.Pix[j], img.Pix[j+1], img.Pix[j+2] = 200, 200, 200
 		}
-		if _, err := RunDet(modelDir, img); err != nil {
+		if _, err := RunDet(t.Context(), modelDir, img); err != nil {
 			t.Fatalf("RunDet #%d (%dx%d): %v", i, w, h, err)
 		}
 	}

@@ -7,6 +7,7 @@ package native
 // deepdoc/server/adapters/ocr_adapter.py (recognize mode).
 
 import (
+	"context"
 	"encoding/json"
 	"math"
 	"os"
@@ -29,7 +30,7 @@ type OCRRecResult struct {
 }
 
 // RunOCRRec recognizes a single cropped text-line image.
-func RunOCRRec(modelDir string, img *Image) (OCRRecResult, error) {
+func RunOCRRec(ctx context.Context, modelDir string, img *Image) (OCRRecResult, error) {
 	chars, err := loadCharDict(filepath.Join(modelDir, "ocr.res"))
 	if err != nil {
 		return OCRRecResult{}, err
@@ -45,7 +46,7 @@ func RunOCRRec(modelDir string, img *Image) (OCRRecResult, error) {
 	}
 	defer release()
 
-	out, err := sess.Run(blob)
+	out, err := sess.Run(ctx, blob)
 	if err != nil {
 		return OCRRecResult{}, err
 	}
@@ -60,7 +61,7 @@ func ocrRecPreprocess(img *Image) []float32 {
 	if resizedW > recW {
 		resizedW = recW
 	}
-	resized := BilinearResize(bgr, w, h, resizedW, recH)
+	resized := bilinearResize(bgr, w, h, resizedW, recH)
 	blob := make([]float32, 3*recH*recW) // zero-filled (padded right)
 	for y := 0; y < recH; y++ {
 		for x := 0; x < resizedW; x++ {

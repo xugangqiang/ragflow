@@ -8,6 +8,7 @@ package native
 // wire mapping in deepdoc/server/adapters/tsr_adapter.py.
 
 import (
+	"context"
 	"encoding/json"
 	"path/filepath"
 	"sort"
@@ -39,7 +40,7 @@ type TSRResult struct {
 }
 
 // RunTSR runs table-structure recognition on a cropped table image.
-func RunTSR(modelDir string, img *Image) (TSRResult, error) {
+func RunTSR(ctx context.Context, modelDir string, img *Image) (TSRResult, error) {
 	blob, sf := tsrPreprocess(img)
 	// 0 → all cores, matching deepdoc's Python onnxruntime for bit-stable
 	// parity (no contour extraction in the TSR Run path).
@@ -51,7 +52,7 @@ func RunTSR(modelDir string, img *Image) (TSRResult, error) {
 	}
 	defer release()
 
-	out, err := sess.Run(blob)
+	out, err := sess.Run(ctx, blob)
 	if err != nil {
 		return TSRResult{}, err
 	}
@@ -62,7 +63,7 @@ func RunTSR(modelDir string, img *Image) (TSRResult, error) {
 
 // tsrBlob assembles the CHW float blob (/255) the TSR model consumes from an
 // already-resized BGR raster (tsrInputSize*tsrInputSize*3, row-major). Shared
-// by both build paths; only the resize source differs (Go BilinearResize vs
+// by both build paths; only the resize source differs (Go bilinearResize vs
 // cv2 via gocv).
 func tsrBlob(resized []byte) []float32 {
 	blob := make([]float32, 3*tsrInputSize*tsrInputSize)
@@ -85,7 +86,7 @@ func tsrScaleFactor(img *Image) [2]float32 {
 func tsrPostprocess(out []float32, sf [2]float32) TSRResult {
 	const scoreThr = 0.2
 	type cand struct {
-		Box
+		nmsBox
 		cls int
 	}
 	cands := make([]cand, 0, tsrCandidates)
@@ -115,7 +116,7 @@ func tsrPostprocess(out []float32, sf [2]float32) TSRResult {
 		hw := out[2*tsrCandidates+a] * sf[0] * 0.5
 		hh := out[3*tsrCandidates+a] * sf[1] * 0.5
 		cands = append(cands, cand{
-			Box: Box{
+			nmsBox: nmsBox{
 				X0:    cx - hw,
 				Y0:    cy - hh,
 				X1:    cx + hw,
@@ -132,11 +133,11 @@ func tsrPostprocess(out []float32, sf [2]float32) TSRResult {
 	}
 	boxes := make([]TSRBox, 0, len(cands))
 	for cls, idxs := range byClass {
-		sub := make([]Box, len(idxs))
+		sub := make([]nmsBox, len(idxs))
 		for k, i := range idxs {
-			sub[k] = cands[i].Box
+			sub[k] = cands[i].nmsBox
 		}
-		for _, keep := range NMS(sub, 0.2, false) {
+		for _, keep := range nms(sub, 0.2, false) {
 			b := sub[keep]
 			boxes = append(boxes, TSRBox{
 				Label: tsrLabels[cls],

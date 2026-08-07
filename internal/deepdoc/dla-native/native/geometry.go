@@ -9,9 +9,9 @@ package native
 
 import "math"
 
-// BilinearResize resizes an HxWx3 (BGR) image to outW x outH using the same
+// bilinearResize resizes an HxWx3 (BGR) image to outW x outH using the same
 // coordinate mapping as cv2.INTER_LINEAR: dst = (src + 0.5) * scale - 0.5.
-func BilinearResize(src []byte, sw, sh, outW, outH int) []byte {
+func bilinearResize(src []byte, sw, sh, outW, outH int) []byte {
 	dst := make([]byte, outW*outH*3)
 	if sw == 0 || sh == 0 {
 		return dst

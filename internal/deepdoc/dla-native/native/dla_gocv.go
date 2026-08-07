@@ -40,7 +40,7 @@ func dlaPreprocess(img *Image) (blob []float32, scaleFactor [4]float32) {
 		bgr := img.ToBGR()
 		m, err := gocv.NewMatFromBytes(img.H, img.W, gocv.MatTypeCV8UC3, bgr)
 		if err != nil {
-			resized := BilinearResize(bgr, img.W, img.H, newW, newH)
+			resized := bilinearResize(bgr, img.W, img.H, newW, newH)
 			return dlaLetterbox(resized, newW, newH, dw, dh), dlaScaleFactor(img, newW, newH, dw, dh)
 		}
 		srcMat = m
