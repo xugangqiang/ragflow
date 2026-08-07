@@ -1,16 +1,24 @@
 package native
 
-// image.go — minimal JPEG decoding shared by all recognizers.
+// image.go — format-agnostic image decoding shared by all recognizers.
 //
 // DeepDoc's models all consume BGR-ordered pixels (DLA/TSR reach it via a
 // cv2.cvtColor(rgb, BGR2RGB) swap on a PIL RGB image; the OCR models are fed
 // cv2-decoded BGR directly). Decoding therefore yields RGB and callers ask for
 // BGR via ToBGR() — one consistent path, no per-task decode duplication.
+//
+// Decode uses image.Decode (format auto-detection) rather than a hard-coded
+// jpeg.Decode so the comparison tool mirrors the Python service, which
+// decodes whatever bytes it receives (PIL for DLA/TSR, cv2.imdecode for OCR)
+// and is format-agnostic. The comparison tool must be able to load the same
+// formats production sends — chiefly PNG, since the Go inference client
+// transport now encodes pages/crops as lossless PNG.
 
 import (
 	"image"
 	"image/draw"
-	"image/jpeg"
+	_ "image/jpeg"
+	_ "image/png"
 	"os"
 )
 
@@ -29,14 +37,16 @@ type Image struct {
 	Bytes []byte
 }
 
-// Decode reads a JPEG file and returns it as RGB pixels.
+// Decode reads an image file (any format Go's image package can decode,
+// e.g. PNG/JPEG) and returns it as RGB pixels. Format is auto-detected,
+// matching the Python service's format-agnostic decode.
 func Decode(path string) (*Image, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
-	img, err := jpeg.Decode(f)
+	img, _, err := image.Decode(f)
 	if err != nil {
 		return nil, err
 	}

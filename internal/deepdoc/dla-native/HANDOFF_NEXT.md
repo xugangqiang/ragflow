@@ -125,6 +125,17 @@
     （`TestDetIntegration` golden、`TestDetSessionPoolBounded`、`TestDetWireNesting`）+ `dla-native/main.go` demo，
     从不被 `parser/` 或 `ingestion/` 引用，不接生产。
 
+- **比对工具内部格式对齐（仅 dla-native 内部，不动生产 client）**：✅ 已动手。
+  - 背景：生产 `client.go` 早已 `EncodePNG` 发 PNG（commit `d065d14c2`，非回退、是修正——切之前是
+    `EncodeJPEG` 单格式，switch 是为消除 JPEG q90 的 ~2px 像素漂移；入参始终是 bitmap，不存在「之前支持多格式被切没」）。
+  - 真不对齐在**比对工具内部**：`native.Decode` 原本写死 `jpeg.Decode`，连 PNG 都读不了，而 Python 端
+    (PIL/cv2) 格式无关。已改 `native/image.go` 的 `Decode` 为 `image.Decode`（格式自动识别，注册
+    `image/jpeg`+`image/png`），与 Python 格式无关解码对齐；nogocv `go build`/`go vet`/默认单测通过。
+    生产 `client.go` 保持不变（比对工具不碰外部）。
+  - 后续内部步骤（仍仅 dla-native，未做，待用户批准）：
+    - gocv `NewImageForDet` 的 `jpeg.Encode` 重编码改 `png.Encode`（贴生产 PNG wire；需 gocv 构建才能验证，本地无 OpenCV）。
+    - 漂移夹具 + golden 迁到 PNG（`ref_det.py` 对 PNG 重生成），让漂移门真正反映生产 PNG wire。
+
 ## 4. 环境 / 命令速查
 
 ```bash
