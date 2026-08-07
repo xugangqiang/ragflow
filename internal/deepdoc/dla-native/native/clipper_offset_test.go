@@ -89,8 +89,14 @@ func TestClipperOffsetMatchesPyclipper(t *testing.T) {
 				Got  [][2]float64  `json:"got"`
 				Want [][]int64     `json:"want"`
 			}{
-				Box:  [4][2]float64{{box[0].X, box[0].Y}, {box[1].X, box[1].Y}, {box[2].X, box[2].Y}, {box[3].X, box[3].Y}},
-				Got:  func() [][2]float64 { p := make([][2]float64, len(got)); for i := range got { p[i] = [2]float64{got[i].X, got[i].Y} }; return p }(),
+				Box: [4][2]float64{{box[0].X, box[0].Y}, {box[1].X, box[1].Y}, {box[2].X, box[2].Y}, {box[3].X, box[3].Y}},
+				Got: func() [][2]float64 {
+					p := make([][2]float64, len(got))
+					for i := range got {
+						p[i] = [2]float64{got[i].X, got[i].Y}
+					}
+					return p
+				}(),
 				Want: q.Poly[0],
 			})
 		}
@@ -141,7 +147,8 @@ func TestClipperOffsetMatchesPyclipper(t *testing.T) {
 // TestTuneArcTol sweeps clipperDefArcTol to find the value whose Clipper1 port
 // best reproduces pyclipper's integer offset polygon (and therefore the
 // post-unclip rect) on the 15 real pre-unclip quads. Run:
-//   go test ./native/ -run TestTuneArcTol -v
+//
+//	go test ./native/ -run TestTuneArcTol -v
 func TestTuneArcTol(t *testing.T) {
 	raw, err := os.ReadFile("testdata/clipper_quads4.json")
 	if err != nil {
