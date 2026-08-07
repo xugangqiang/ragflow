@@ -1,5 +1,3 @@
-//go:build !gocv
-
 package native
 
 import (
@@ -8,10 +6,9 @@ import (
 )
 
 // NewImageForDet builds a native Image directly from an in-memory image.Image
-// for the pure-Go detection path. It fills the RGB pixel buffer without any
-// JPEG round-trip, preserving the source raster's fidelity — the pipeline
-// already holds a decoded image, so re-encoding it to a temp file would only
-// lose information. See HANDOFF.md §8 A2.
+// for the detection path. It fills the RGB pixel buffer without any re-encode,
+// preserving the source raster's fidelity — the pipeline already holds a
+// decoded image, so re-encoding it would only lose information.
 func NewImageForDet(src image.Image) (*Image, error) {
 	b := src.Bounds()
 	rgba := image.NewRGBA(b)

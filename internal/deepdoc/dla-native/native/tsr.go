@@ -62,9 +62,9 @@ func RunTSR(ctx context.Context, modelDir string, img *Image) (TSRResult, error)
 }
 
 // tsrBlob assembles the CHW float blob (/255) the TSR model consumes from an
-// already-resized BGR raster (tsrInputSize*tsrInputSize*3, row-major). Shared
-// by both build paths; only the resize source differs (Go bilinearResize vs
-// cv2 via gocv).
+// already-resized BGR raster (tsrInputSize*tsrInputSize*3, row-major). Only
+// the resize source differs (Go bilinearResize vs cv2 in the production
+// Python reference).
 func tsrBlob(resized []byte) []float32 {
 	blob := make([]float32, 3*tsrInputSize*tsrInputSize)
 	for y := 0; y < tsrInputSize; y++ {

@@ -20,11 +20,9 @@ import (
 )
 
 const (
-	// px tolerance on box coordinates. The gocv build (cv2 decode+resize)
-	// reaches 1:1 parity with the Python reference, so this is comfortably
-	// above it. The pure-Go build carries an inherent decode/resize fidelity
-	// floor (~2.6px on the expanded real-document fixtures, the same class of
-	// artifact as det's 3px floor) that this tolerance sits just above.
+	// px tolerance on box coordinates. The pure-Go build carries an inherent
+	// decode/resize fidelity floor (~3px on real-document fixtures, the same
+	// class of artifact as det's 3px floor) that this tolerance sits just above.
 	cmpTolCoord = 3.0
 	cmpTolScore = 0.05 // tolerance on detection scores
 )
@@ -154,6 +152,7 @@ func loadGoldenBoxes(t *testing.T, path string) [][]float64 {
 // tall rotated table. Both sit comfortably under the 3px tolerance.
 var dlaPages = []string{"page0", "mp_textbook_en_p0", "mp_whitepaper_cn_p0", "mp_paper_eq_p0", "mp_zhtw_ent_p0"}
 var tsrPages = []string{"table0", "tsr_table_normal", "tsr_table_rotation"}
+
 // ocrRecLines covers EN (regular text + bold/italic/serif font variants of the
 // same sentence to exercise font robustness), pure CJK, mixed EN+CJK, and a
 // digits/symbols/CJK line. All texts are confined to the model's vocab (basic
@@ -175,11 +174,6 @@ func TestDLAIntegration(t *testing.T) {
 			if err != nil {
 				t.Fatalf("decode: %v", err)
 			}
-			// Set Path so the gocv build re-decodes via cv2 (gocv.IMRead),
-			// matching deepdoc's cv2/PIL decode exactly; without it the gocv
-			// preprocessing blob uses Go's jpeg decoder and the ~2.6px pure-Go
-			// floor is not actually exercised. The pure-Go build ignores Path.
-			img.Path = filepath.Join("..", "testdata", stem+".jpg")
 			res, err := RunDLA(t.Context(), os.Getenv("MODEL_DIR"), img)
 			if err != nil {
 				t.Fatalf("RunDLA: %v", err)
@@ -205,10 +199,8 @@ func TestTSRIntegration(t *testing.T) {
 			if err != nil {
 				t.Fatalf("decode: %v", err)
 			}
-			// TSR decodes via the pure-Go path in BOTH builds (tsr_decode.go),
-			// matching deepdoc's PIL TSR decode. img.Path is intentionally not
-			// set here: it only steers the gocv DLA/DET cv2 re-decode, and TSR
-			// must stay on the PIL-style decode to match the production baseline.
+			// TSR decodes via the pure-Go path (tsr_decode.go), matching
+			// deepdoc's PIL TSR decode.
 			res, err := RunTSR(t.Context(), os.Getenv("MODEL_DIR"), img)
 			if err != nil {
 				t.Fatalf("RunTSR: %v", err)
@@ -395,12 +387,6 @@ func TestDetIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	// Set Path so the gocv build re-decodes via cv2 (gocv.IMRead), matching
-	// deepdoc's cv2/PIL decode exactly. Without it the gocv preprocessing blob
-	// uses Go's jpeg decoder and the 3px hard floor (HANDOFF §4.4) is not
-	// actually exercised. The pure-Go build ignores Path, so this is safe for
-	// both build tags.
-	img.Path = imgPath
 	res, err := RunDet(t.Context(), os.Getenv("MODEL_DIR"), img)
 	if err != nil {
 		t.Fatalf("RunDet: %v", err)
@@ -432,9 +418,9 @@ func TestDetIntegration(t *testing.T) {
 	}
 	refBoxes := gold.Output[0][0]
 
-	// Both builds reach the 3px hard floor (HANDOFF §4.4, box#8): gocv via the
-	// cv2 re-decode + convexify fix, pure-Go via the shared geometry. Tolerance
-	// is set just above that floor so a regression bumps it over the line.
+	// The pure-Go geometry reaches the 3px hard floor (HANDOFF §4.4, box#8).
+	// Tolerance is set just above that floor so a regression bumps it over the
+	// line.
 	detCoordTol := 3.5
 	used := make([]bool, len(goBoxes))
 	matched, maxd := 0, 0.0

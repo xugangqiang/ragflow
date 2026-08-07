@@ -437,37 +437,18 @@ run_go_tests() {
 # Run the unit tests of the standalone dla-native module (DeepDoc det/DLA/TSR/
 # OCR-rec Go ports). It is a NESTED Go module (own go.mod) so the root
 # `./...` in run_go_tests never descends into it — coverage has to be invoked
-# explicitly here (HANDOFF.md §8 D1). The default build is pure-Go geometry
-# (no external services, no OpenCV), so it belongs in the unit tier. The gocv
-# build needs OpenCV 4.10 + CGO; it runs only when that prefix is present
-# (HANDOFF.md §8 D2 covers wiring OpenCV into CI). Model-backed integration
-# tests are handled by run_dla_native_integration_tests.
+# explicitly here (HANDOFF.md §8 D1). The build is pure-Go geometry
+# (no external services, no OpenCV), so it belongs in the unit tier. Model-backed
+# integration tests are handled by run_dla_native_integration_tests.
 run_dla_native_tests() {
     local dla_dir="$PROJECT_ROOT/internal/deepdoc/dla-native"
     [ -f "$dla_dir/go.mod" ] || return 0
 
-    print_section "Running dla-native unit tests (default build)"
+    print_section "Running dla-native unit tests"
     ( cd "$dla_dir" && \
       GOPROXY=${GOPROXY:-https://goproxy.cn,https://proxy.golang.org,direct} \
       CGO_ENABLED=1 \
       go test -count=1 ./native/ )
-
-    # gocv-tagged geometry: requires the OpenCV 4.10 build prefix. Skip
-    # gracefully when it is absent so the unit tier stays green on runners
-    # that have not yet provisioned OpenCV (D2).
-    local ocv_pc="${PKG_CONFIG_PATH:-/home/shenyushi/opt/opencv-4.10/lib/pkgconfig}"
-    if [ -f "$ocv_pc/opencv4.pc" ]; then
-        print_section "Running dla-native unit tests (gocv build)"
-        ( cd "$dla_dir" && \
-          GOPROXY=${GOPROXY:-https://goproxy.cn,https://proxy.golang.org,direct} \
-          CGO_ENABLED=1 \
-          PKG_CONFIG_PATH="$ocv_pc" \
-          CGO_LDFLAGS="-Wl,-rpath,$(dirname "$ocv_pc")" \
-          LD_LIBRARY_PATH="$(dirname "$ocv_pc"):${LD_LIBRARY_PATH}" \
-          go test -tags gocv -count=1 ./native/ )
-    else
-        echo -e "${YELLOW}skipping dla-native gocv unit tests (OpenCV 4.10 not found at $ocv_pc; see HANDOFF.md §8 D2)${NC}"
-    fi
 }
 
 # Run the model-backed integration tests of the dla-native module. These
@@ -479,25 +460,11 @@ run_dla_native_integration_tests() {
     local dla_dir="$PROJECT_ROOT/internal/deepdoc/dla-native"
     [ -f "$dla_dir/go.mod" ] || return 0
 
-    print_section "Running dla-native integration tests (default build)"
+    print_section "Running dla-native integration tests"
     ( cd "$dla_dir" && \
       GOPROXY=${GOPROXY:-https://goproxy.cn,https://proxy.golang.org,direct} \
       CGO_ENABLED=1 \
       go test -tags integration -count=1 ./native/ )
-
-    local ocv_pc="${PKG_CONFIG_PATH:-/home/shenyushi/opt/opencv-4.10/lib/pkgconfig}"
-    if [ -f "$ocv_pc/opencv4.pc" ]; then
-        print_section "Running dla-native integration tests (gocv build)"
-        ( cd "$dla_dir" && \
-          GOPROXY=${GOPROXY:-https://goproxy.cn,https://proxy.golang.org,direct} \
-          CGO_ENABLED=1 \
-          PKG_CONFIG_PATH="$ocv_pc" \
-          CGO_LDFLAGS="-Wl,-rpath,$(dirname "$ocv_pc")" \
-          LD_LIBRARY_PATH="$(dirname "$ocv_pc"):${LD_LIBRARY_PATH}" \
-          go test -tags "integration gocv" -count=1 ./native/ )
-    else
-        echo -e "${YELLOW}skipping dla-native gocv integration tests (OpenCV 4.10 not found at $ocv_pc; see HANDOFF.md §8 D2)${NC}"
-    fi
 }
 
 # Run Go tests gated behind a build tag (or space-separated tag list), e.g.

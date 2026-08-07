@@ -1,20 +1,17 @@
-//go:build !gocv
-
 package native
 
-// det.go — OCR text detection (DB) PURE-GO geometry path.
+// det.go — OCR text detection (DB) geometry path.
 //
 // Ports deepdoc/vision/ocr.py TextDetector and deepdoc/vision/postprocess.py
 // DBPostProcess (box_type="quad"). The shared entry point, types, the
 // true round-offset unclip, and the wire format live in det_core.go.
 //
-// This is the pure-Go path. Inference is bit-exact with the Python service
-// (same ONNX Runtime build). The DB geometry — connected-components in place
-// of findContours, rotating-calipers minAreaRect, and a scanline fillPoly for
-// box_score_fast — is reimplemented in Go. It is geometrically faithful but
-// NOT bit-exact to OpenCV/Clipper; box locations match to within a couple of
-// pixels. The gocv build (det_gocv.go) swaps the resize and geometry for
-// OpenCV C++ calls and reaches 1:1 with Python.
+// Inference is bit-exact with the Python service (same ONNX Runtime build).
+// The DB geometry — connected-components in place of findContours,
+// rotating-calipers minAreaRect, and a scanline fillPoly for box_score_fast —
+// is reimplemented in Go. It is geometrically faithful but NOT bit-exact to
+// OpenCV/Clipper; box locations match to within a couple of pixels. The gocv
+// OpenCV path was removed; this is the only det build.
 
 import "math"
 
@@ -177,4 +174,3 @@ func connectedComponents(seg []bool, w, h, maxComps int) [][]pt {
 
 // minAreaRect is defined in det_core.go (shared by both builds): the pure-Go
 // float-precision rotating-calipers port of cv2.minAreaRect.
-

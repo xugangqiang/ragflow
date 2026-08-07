@@ -26,15 +26,6 @@ import (
 type Image struct {
 	W, H int
 	Pix  []byte
-	// Path is the source file, used by the gocv build to re-decode via
-	// cv2 (gocv.IMRead) so the preprocessing blob matches deepdoc's
-	// cv2/PIL decode exactly. Empty for in-memory images (tests).
-	Path string
-	// Bytes is an in-memory encoded source (JPEG), used by the gocv build to
-	// re-decode via cv2 (gocv.IMDecode) without a temp file. Set by
-	// NewImageForDet; empty otherwise. Exactly one of Path/Bytes is used by
-	// the gocv preprocessor (Bytes preferred when present).
-	Bytes []byte
 }
 
 // Decode reads an image file (any format Go's image package can decode,

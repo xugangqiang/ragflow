@@ -1,15 +1,13 @@
-//go:build !gocv
-
 package native
 
-// dla_nogocv.go — DLA preprocessing for the pure-Go build.
+// dla_preprocess.go — DLA preprocessing.
 //
-// Decodes via the shared Go image/jpeg decoder and resizes with the pure-Go
+// Decodes via the shared Go image decoder and resizes with the pure-Go
 // bilinearResize. This is geometrically faithful to deepdoc's cv2 pipeline but
-// NOT bit-exact: the Go JPEG decoder and bilinear sampler yield slightly
-// different pixels, which propagate into box coordinates (the "pure-Go floor",
-// ~2.6px on the expanded fixtures). The gocv build (dla_gocv.go) swaps the
-// decode+resize for cv2 and reaches 1:1 parity with the Python reference.
+// NOT bit-exact: the Go decoder and bilinear sampler yield slightly different
+// pixels, which propagate into box coordinates (the "pure-Go floor", ~3px on
+// the expanded fixtures). The gocv OpenCV path was removed; this is the only
+// DLA build.
 
 // dlaPreprocess letterboxes the image into the 1024 canvas and returns the CHW
 // blob plus the scale factor. See dlaLetterbox / dlaScaleFactor for details.

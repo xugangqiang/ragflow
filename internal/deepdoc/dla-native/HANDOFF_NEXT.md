@@ -10,7 +10,7 @@
 ## 0. TL;DR（新会话从这里开始）
 
 - 本轮回合已完成：DET 会话池内存泄漏修复（无界 → 有界 LRU）、gocv 复用抖动根因（确定性 box 排序）、
-  P5 清理 `TSR_RAW_DUMP`、P4 gocv CI 覆盖、native_det 生产路径 CI 入口。
+  P5 清理 `TSR_RAW_DUMP`、P4 gocv CI 覆盖（job 已随 gocv 收敛移除）、native_det 生产路径 CI 入口（已回退）。
 - 已提交并推送到 `feat/deepdoc-go-port`：**commit `0a0688ff2`**。
 - 已派发 `deepdoc-drift`：**https://github.com/xugangqiang/ragflow/actions/runs/31157005421**
   （含 `go-native-det`，非阻断；还含 `python-drift` / `go-dla-native` / `go-dla-native-gocv`）。
@@ -20,8 +20,8 @@
   pdf_oxide 对齐到 `v0.3.67`。已在本地验证（修正布局链接通过、全部 `TestNativeOCRDetect*` 对 golden 通过），
   提交 `2ed53bec8` 推送后派发 run **https://github.com/xugangqiang/ragflow/actions/runs/31160394410**
   确认 `go-native-det` 变绿，随后提交 `8db3f0c1f` **移除 `continue-on-error`** 使其成为阻断闸门。
-- 剩余：见 §3（仅 **P3 决策** 待拍板）。P2 收口、P1 合并双池、P0 三项 CI 收尾（native_det / gocv /
-  python-drift 的供给 bug 修复）均已在本会话完成，分别见 §3 P2/P1 与 §3 P0，commit
+- 剩余：见 §3（**P3 gocv 收敛** 现已拍板并落地；其余 P0/P1/P2 均已完成）。P0 三项 CI 收尾
+  （native_det / gocv / python-drift 的供给 bug 修复）均已在本会话完成，commit
   `b8437c732` / `c5f9ff0d4` / `e76128f58` / `9ee9b6363`。python-drift 修复的 CI 验证见最新 run。
 
 > **更新（本会话末尾，用户最新指令 "det 回退 - 不接生产路径"）**：上面提到的 `native_det`
@@ -35,10 +35,10 @@
 
 | 项 | 内容 | 位置 | 验证 |
 |----|------|------|------|
-| DET 会话池泄漏修复（P0） | 无界 `var detSessionPools sync.Map` → 有界 LRU（`detMaxShapePools=24` 池 × `detShapePoolCap=4` 空闲），带 LRU 淘汰 + `Destroy()` 空闲 session | `native/det_core.go` | `TestDetSessionPoolBounded`（`integration`）：80 个不同合成页尺寸喂 `RunDet`，断言 `len(detPools) <= 24`；两构建均得 24 池。det 漂移不变（15/15 @3px） |
-| gocv 复用抖动根因（P0） | Go `map` 迭代非确定性 → `Wire()` 顺序抖动；对 `res.Boxes` 按 class→X0→Y0→X1→Score 确定性排序 | `native/dla.go`（`dlaPostprocess` 末尾）、`native/tsr.go`（按 `tsrClassMap`→X0→Top→X1→Bottom→Score） | 20× gocv + 10× nogocv 复用运行全过；full gocv integration `ok` |
-| P5 清理 `TSR_RAW_DUMP` | 删除 `os.Getenv("TSR_RAW_DUMP")` 调试块及连带无用的 `os`/`math` import | `native/tsr.go` | 两构建编译通过；gocv integration `ok` |
-| P4 gocv CI 覆盖 | 新增 `go-dla-native-gocv` job：CI 内从源码构建 OpenCV 4.10 到缓存前缀并跑 `go test -tags "integration gocv"`，`continue-on-error` 非阻断 | `deepdoc-drift.yml`（job `go-dla-native-gocv`，约 :162） | YAML 校验通过；本地 gocv 集成 `ok` |
+| DET 会话池泄漏修复（P0） | 无界 `var detSessionPools sync.Map` → 有界 LRU（`detMaxShapePools=24` 池 × `detShapePoolCap=4` 空闲），带 LRU 淘汰 + `Destroy()` 空闲 session | `native/det_core.go` | `TestDetSessionPoolBounded`（`integration`）：80 个不同合成页尺寸喂 `RunDet`，断言 `len(detPools) <= 24`；得 24 池。det 漂移不变（15/15 @3px） |
+| gocv 复用抖动根因（P0，gocv 构建已移除） | Go `map` 迭代非确定性 → `Wire()` 顺序抖动；对 `res.Boxes` 按 class→X0→Y0→X1→Score 确定性排序 | `native/dla.go`（`dlaPostprocess` 末尾）、`native/tsr.go`（按 `tsrClassMap`→X0→Top→X1→Bottom→Score） | 原验证：20× gocv + 10× nogocv 复用运行全过（gocv 构建现已删） |
+| P5 清理 `TSR_RAW_DUMP` | 删除 `os.Getenv("TSR_RAW_DUMP")` 调试块及连带无用的 `os`/`math` import | `native/tsr.go` | 编译通过；集成 `ok` |
+| P4 gocv CI 覆盖（已移除） | 曾新增 `go-dla-native-gocv` job：CI 内从源码构建 OpenCV 4.10 到缓存前缀并跑 `go test -tags "integration gocv"`，`continue-on-error` 非阻断 | `deepdoc-drift.yml`（job 已删，见 P3） | YAML 校验通过；本地 gocv 集成 `ok`（job 现已随收敛删除） |
 | native_det 生产路径 CI 入口（P0，**已回退**） | 曾新增 `go-native-det` job（自包含拉取并链接 3 个 PDF 原生静态库 office_oxide/pdfium/pdf_oxide，跑 `TestNativeOCRDetect*`）。**本会话末尾已随 det 生产接线整体回退而删除**——det 现仅作比对工具（见 §3 与 §2 第 4 条）。 | `deepdoc-drift.yml`（job `go-native-det`，已删） | 历史：曾 `go vet -tags "native_det integration"` 通过；现已无此 job/文件 |
 | P2 收口暴露面与健壮性 | (1) 降为未导出 `Session→session`/`Box→nmsBox`/`NMS→nms`/`BilinearResize→bilinearResize`；(2) `session.Run` 补 `len` 守卫拒绝长度不符的输入；(3) `Run*` 系列加 `context.Context` 首参，`session.Run` 改用 `RunWithOptions` + `RunOptions.Terminate()` 实现真取消，终止的 session 标记 `poisoned` 并由池 `Destroy()`（不回池）。测试 json 字段 `Box` 保留导出以恢复被 blanket rename 引入的序列化回归 | `native/session.go`/`session_pool.go`/`det_core.go`/`dla.go`/`tsr.go`/`ocr_rec.go`，`native/clipper_offset_test.go`，`dla-native/main.go`，`native/native_integration_test.go` | dla-native `./native/` 构建+vet（`integration`）通过，default 单测 `ok`（含 `TestClipperOffsetMatchesPyclipper` 0px）。（`parser/pdf/native_det.go` 等四个原生 seam 文件已于本会话末尾随 det 回退而删除） |
 
@@ -46,9 +46,9 @@
 
 1. **DET 输入尺寸可变**（`detLimitSideLen=960`，round32 保持长宽比）→ 不同页 = 不同 ONNX session 形状
    → 这是无界池泄漏的驱动因素。固定 shape 的 DLA(1024)/TSR(640)/OCR-rec(48×320) 键实质塌缩为 modelDir，不会泄漏。
-2. **gocv 复用抖动根因**是 Go `map` 迭代非确定性，不是数值问题。修复是确定性排序，不是改几何核心。
-3. **gocv / nogocv 语义一致**：最终推理结果无差异，仅 decode/resize 精度有 ~2.6px 地板
-   （gocv 走 cv2 实现 1:1 parity；纯 Go 有浮点 floor）。发行不必二选一。
+2. **（历史）gocv 复用抖动根因**曾是 Go `map` 迭代非确定性，不是数值问题；修复是确定性排序。该 gocv 构建现已移除（见 P3）。
+3. **纯 Go 构建的 decode/resize 地板 ~3px**（来自 `bilinearResize` + `box#8` 后处理，与格式无关）。
+   gocv 的 cv2 1:1 parity 路径已随双轨收敛一并删除，仅保留纯 Go 单一路径。
 4. **det 现在仅作比对工具**（与 DLA/TSR/OCR-rec 一致）：比对能力在 `dla-native/native` 的
    `TestDetIntegration`（golden）/ `TestDetSessionPoolBounded` / `TestDetWireNesting` 与 `dla-native/main.go`
    demo，从不被 `parser/` 或 `ingestion/` 引用。**曾短暂接生产**（`internal/deepdoc/parser/pdf/nativeOCRDetect`
@@ -56,23 +56,18 @@
    （删除 `parser/pdf` 的 `native_det*.go` 四文件 + 移除 `NewParser` opt-in 与 `inferOCRDetect` seam +
    删除 CI `go-native-det` job）。不再有生产接线，不再需要链接 PDF 原生静态库。
 5. **dla-native 是嵌套 module**（module path `dla-native`，`internal/deepdoc/dla-native/go.mod`）。
-   编译需 `cd internal/deepdoc/dla-native` 后用 `go build -tags integration ./native/`（nogocv）
-   或 `-tags "integration gocv"`（gocv）。主模块 `go build ./internal/deepdoc/dla-native/native/` 会报
-   “main module does not contain package”。
+   编译需 `cd internal/deepdoc/dla-native` 后用 `go build -tags integration ./native/`（纯 Go，无 OpenCV）。
+   主模块 `go build ./internal/deepdoc/dla-native/native/` 会报 “main module does not contain package”。
 
 ## 3. 剩余待办（接力重点）
 
 ### P0 — 灰度收尾（依赖真实 CI 结果）
 - **`go-native-det` 已完成（阻断闸门）**：run `31160394410` 验证变绿，commit `8db3f0c1f` 已移除
   `continue-on-error` → 现在 `go-native-det` 是阻断式闸门。修复内容见 §0（具名子目录解压 + pdf_oxide 0.3.67）。
-- **`go-dla-native-gocv` 收尾 ✅ 已完成（commit `e76128f58`）**：真实根因是 **Build OpenCV 4.10 步骤
-  末尾的验证 `pkg-config --modversion opencv4` 没有设置 `PKG_CONFIG_PATH`**（`make install` 已把
-  `opencv4.pc` 正确装到 `$OCV_PREFIX/lib/pkgconfig/`，但默认搜索路径找不到 → 验证 exit 1 → 后续 run
-  步骤被跳过）。修复：在验证行前 `export PKG_CONFIG_PATH="$OCV_PREFIX/lib/pkgconfig"`。run 步骤本身
-  早已正确设置 `PKG_CONFIG_PATH` 与 `LD_LIBRARY_PATH`。
-  **并移除了 `continue-on-error`**，现已成为阻断闸门（生产路径已是 nogocv，见 P3；gocv 仅作 cv2 1:1
-  parity 交叉校验，理应稳定）。验证见 CI run（gocv job 变绿）。注意：本地 opencv 是 4.6.0 且在默认路径，
-  所以本地 gocv 一直 ok——此 bug 只在 CI 从源码构建 4.10 时暴露。
+- **`go-dla-native-gocv` job ✅ 已移除（本轮回合 "移除gocv路径"）**：原本是 OpenCV 4.10 从源码构建 +
+  `go test -tags "integration gocv"` 的交叉校验 job（commit `e76128f58` 曾修复其 pkg-config 供给 bug）。
+  收敛到纯 Go 单一路径后，该 job 与其依赖的 OpenCV 构建全部删除——`deepdoc-drift.yml` 现仅含
+  `python-drift` + `go-dla-native`。其 cv2 1:1 parity 校验价值不再保留（见 P3 决策）。
 - **`python-drift`（python-oracle）✅ 已修复并验证（commit `9ee9b6363`，run `31171551259` 全绿）**：原失败根因是 run 步骤的
   `ref_det.py` 做 `from deepdoc.vision.ocr import TextDetector`，但 `uv sync` 不会把仓库根的 `deepdoc`
   包装进 venv（该包位于仓库根 `deepdoc/`）。修复：给 run 步骤加 `PYTHONPATH=${{ github.workspace }}`
@@ -93,8 +88,7 @@
     的 24×4 有界 LRU 语义）。`getModelSession` / `getDetSession` 变为薄封装，传入各自的构造闭包。
   - 删除原 `detPoolsMu` / `detPools` / `detPoolsLRU` / `detShapePool` / `detGetPool` / `detTouchLRU` /
     `detEvictLRU` 等专属代码；`TestDetSessionPoolBounded` 改用 `detSessions.KeyCount()` 断言有界。
-- 验收：dla-native `./native/` 默认 + `-tags "integration gocv"` 构建/vet 均通过；默认单测 `ok`。
-  CI：`go test -tags integration ./native/`（nogocv）与 gocv 集成均已验证（run 见 P0 gocv 节）。
+- 验收：dla-native `./native/` 构建/vet（纯 Go）均通过；默认单测 `ok`。
 
 ### P2 — 收口暴露面与健壮性 ✅ 已完成（commit `b8437c732`）
 - 降为未导出：`native` 包导出的 `NMS` / `BilinearResize` / `Session` / `Box` 已改为未导出
@@ -110,11 +104,16 @@
   dla-native `./native/` 构建+vet 通过；集成测试调用点改用 `t.Context()`，DLA/TSR/OCR-rec/det 比对均走 `dla-native` 而非生产路径。
 
 ### P3 — 需用户拍板的决策
-- **gocv / nogocv 双轨收敛**：两条构建语义一致，发行不必二选一，但双轨是长期维护债务。选项：
-  - (a) 保留双轨（现状，最低风险）；
-  - (b) 收敛到 gocv 单一路径（所有构建引入 OpenCV 依赖，换取 cv2 1:1 parity）；
-  - (c) 收敛到纯 Go 单一路径（放弃 cv2 1:1，接受 ~2.6px decode/resize 地板，去掉 OpenCV 依赖）。
-  - 建议先问用户倾向，再动手。
+- **gocv / nogocv 双轨收敛** ✅ 已拍板（用户指令："移除gocv路径"）：收敛到纯 Go 单一路径（选项 c）。
+  - 已删除 `image_gocv.go`/`det_gocv.go`/`dla_gocv.go` 三文件；`image_nogocv.go`→`image_det.go`、
+    `dla_nogocv.go`→`dla_preprocess.go` 去掉 `//go:build !gocv` 成为唯一变体；`det.go`/`det_core.go`/
+    `tsr_decode.go`/`dla.go`/`tsr.go` 的 "both builds"/cv2 注释已清理。
+  - `go.mod`/`go.sum` 已 `go mod tidy` 移除 `gocv.io/x/gocv` 依赖。
+  - CI `go-dla-native-gocv` job 已删除；`build.sh` 的 dla-native `gocv` 分支已删除；`run.sh` 的
+    `GOCV_TAGS` 机制已移除。`deepdoc-drift.yml` 现仅含 `python-drift` + `go-dla-native`。
+  - 接受 ~3px decode/resize 地板（来自 `bilinearResize` + `box#8` 后处理，与格式无关）。dla-native
+    现无任何 OpenCV 依赖，纯 Go。
+  - 详见 §4 命令速查（已去掉所有 `gocv` 标签变体）。
 - **生产接线状态（det + DLA/TSR/OCR-rec）**：✅ 已拍板（用户指令："det 回退 - 不接生产路径；DLA/TSR/OCR-rec 只作比对工具"）。
   - **det 已从生产路径回退**：删除 `parser/pdf` 原生 seam 全部四个文件 —— `native_det.go`(`//go:build native_det`)、
     `native_det_stub.go`(默认 stub)、`native_det_test.go`、`native_det_seam_test.go`；并移除 `parser.go`
@@ -130,10 +129,9 @@
     `EncodeJPEG` 单格式，switch 是为消除 JPEG q90 的 ~2px 像素漂移；入参始终是 bitmap，不存在「之前支持多格式被切没」）。
   - 真不对齐在**比对工具内部**：`native.Decode` 原本写死 `jpeg.Decode`，连 PNG 都读不了，而 Python 端
     (PIL/cv2) 格式无关。已改 `native/image.go` 的 `Decode` 为 `image.Decode`（格式自动识别，注册
-    `image/jpeg`+`image/png`），与 Python 格式无关解码对齐；nogocv `go build`/`go vet`/默认单测通过。
+    `image/jpeg`+`image/png`），与 Python 格式无关解码对齐；纯 Go `go build`/`go vet`/默认单测通过。
     生产 `client.go` 保持不变（比对工具不碰外部）。
-  - 后续内部步骤（仍仅 dla-native，未做，待用户批准）：
-    - gocv `NewImageForDet` 的 `jpeg.Encode` 重编码改 `png.Encode`（贴生产 PNG wire；需 gocv 构建才能验证，本地无 OpenCV）。
+  - 后续可选内部步骤（仅 dla-native，未做，待用户批准）：
     - 漂移夹具 + golden 迁到 PNG（`ref_det.py` 对 PNG 重生成），让漂移门真正反映生产 PNG wire。
 
 ## 4. 环境 / 命令速查
@@ -141,10 +139,8 @@
 ```bash
 # 嵌套 module：必须 cd 进去再 build
 cd internal/deepdoc/dla-native
-go build -tags integration ./native/            # nogocv
-go build -tags "integration gocv" ./native/     # gocv（需 OpenCV 4.10 前缀）
-go test  -tags integration ./native/            # nogocv 集成
-go test  -tags "integration gocv" ./native/     # gocv 集成
+go build -tags integration ./native/            # 单一纯 Go 构建
+go test  -tags integration ./native/            # 集成
 
 # 漂移门
 cat .github/workflows/deepdoc-drift.yml

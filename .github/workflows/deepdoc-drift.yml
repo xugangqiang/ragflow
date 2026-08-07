@@ -16,9 +16,9 @@
 #                          (Go vs the same golden) for DLA/TSR/OCR-rec/det on a
 #                          portable runner (ORT only, no CGO PDF static libs).
 #
-# det is exercised in go-dla-native (and go-dla-native-gocv) purely as a
-# Golden-comparison tool (RunDet vs the Python reference), NOT as a
-# production-wired path — there is no parser/pdf native_det seam.
+# det is exercised in go-dla-native purely as a Golden-comparison tool
+# (RunDet vs the Python reference), NOT as a production-wired path — there is
+# no parser/pdf native_det seam.
 name: deepdoc-drift
 permissions:
   contents: read
@@ -156,100 +156,3 @@ jobs:
           MODEL_DIR: ${{ github.workspace }}/models/deepdoc
           CGO_ENABLED: '1'
         run: go test -tags integration -count=1 ./native/
-
-  # gocv build: the cv2 decode/resize path that reaches 1:1 parity with the
-  # Python reference (the pure-Go build in go-dla-native carries a ~2.6px
-  # decode/resize floor). This is D2·gocv from HANDOFF.md. OpenCV 4.10 is built
-  # once into a cached prefix keyed on the version. Now a blocking gate: the
-  # pkg-config provisioning bug is fixed, so a gocv regression must block.
-  go-dla-native-gocv:
-    name: go DLA/TSR/OCR-rec/det integration (gocv / OpenCV 4.10)
-    runs-on: ubuntu-latest
-    timeout-minutes: 120
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: ${{ env.GO_VERSION }}
-
-      - name: Install ORT shared lib (CPU)
-        id: ort
-        run: |
-          python3 -m pip install --quiet "onnxruntime==1.23.2"
-          echo "ORT_LIB=$(python3 -c 'import glob,onnxruntime,os;d=os.path.join(os.path.dirname(onnxruntime.__file__),"capi");c=[f for f in glob.glob(os.path.join(d,"libonnxruntime.so*")) if "providers" not in f][0];print(c)')" >> "$GITHUB_OUTPUT"
-
-      - name: Cache OpenCV 4.10 build
-        id: ocv-cache
-        uses: actions/cache@v5
-        with:
-          path: ${{ runner.workspace }}/opencv-4.10
-          key: opencv-4.10.0-${{ runner.os }}
-
-      - name: Build OpenCV 4.10 (skip on cache hit)
-        env:
-          OPENCV_VERSION: '4.10.0'
-          OCV_PREFIX: ${{ runner.workspace }}/opencv-4.10
-        run: |
-          set -e
-          PC="$OCV_PREFIX/lib/pkgconfig/opencv4.pc"
-          if [ -f "$PC" ]; then
-            echo "OpenCV cache hit at $OCV_PREFIX"
-            exit 0
-          fi
-          sudo apt-get update
-          sudo apt-get install -y build-essential cmake pkg-config unzip curl git wget
-          TMP="$(mktemp -d)"
-          curl -Lo "$TMP/opencv.zip" "https://github.com/opencv/opencv/archive/refs/tags/${OPENCV_VERSION}.zip"
-          unzip -q "$TMP/opencv.zip" -d "$TMP"
-          mkdir -p "$TMP/opencv-${OPENCV_VERSION}/build"
-          cd "$TMP/opencv-${OPENCV_VERSION}/build"
-          cmake -D CMAKE_BUILD_TYPE=RELEASE \
-                -D CMAKE_INSTALL_PREFIX="$OCV_PREFIX" \
-                -D BUILD_SHARED_LIBS=ON \
-                -D BUILD_DOCS=OFF -D BUILD_EXAMPLES=OFF \
-                -D BUILD_TESTS=OFF -D BUILD_PERF_TESTS=OFF \
-                -D BUILD_opencv_java=NO -D BUILD_opencv_python=NO \
-                -D BUILD_opencv_python2=NO -D BUILD_opencv_python3=NO \
-                -D WITH_JASPER=OFF -D OPENCV_GENERATE_PKGCONFIG=ON ..
-          make -j "$(nproc)"
-          make install
-          # Verify opencv4.pc is resolvable where the run step expects it. The
-          # run step exports PKG_CONFIG_PATH, but this verification must point
-          # pkg-config at the install prefix itself or it searches the default
-          # path and reports "Package opencv4 was not found", failing the build
-          # step and skipping the test step.
-          export PKG_CONFIG_PATH="$OCV_PREFIX/lib/pkgconfig"
-          pkg-config --modversion opencv4
-
-      - name: Cache DeepDoc models
-        uses: actions/cache@v5
-        with:
-          path: ${{ github.workspace }}/models/deepdoc
-          key: deepdoc-models-${{ env.MODEL_REPO }}-v1
-
-      - name: Provision models
-        env:
-          MODEL_DIR: ${{ github.workspace }}/models/deepdoc
-        run: |
-          python3 -m pip install --quiet huggingface_hub
-          mkdir -p "$MODEL_DIR"
-          python3 - <<'PY'
-          import os
-          from huggingface_hub import hf_hub_download
-          repo = os.environ["MODEL_REPO"]
-          out = os.environ["MODEL_DIR"]
-          for f in os.environ["MODEL_FILES"].split():
-              hf_hub_download(repo_id=repo, filename=f, local_dir=out)
-          PY
-
-      - name: Run dla-native integration tests (gocv build)
-        working-directory: internal/deepdoc/dla-native
-        env:
-          ORT_LIB: ${{ steps.ort.outputs.ORT_LIB }}
-          MODEL_DIR: ${{ github.workspace }}/models/deepdoc
-          CGO_ENABLED: '1'
-          PKG_CONFIG_PATH: ${{ runner.workspace }}/opencv-4.10/lib/pkgconfig
-          LD_LIBRARY_PATH: ${{ runner.workspace }}/opencv-4.10/lib
-        run: go test -tags "integration gocv" -count=1 ./native/

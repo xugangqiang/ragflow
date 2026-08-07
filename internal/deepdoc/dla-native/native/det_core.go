@@ -2,17 +2,14 @@ package native
 
 // det_core.go — OCR text detection (DB) shared core.
 //
-// Build-tag split:
-//   - det.go        (!gocv) : pure-Go geometry (connected components,
-//                   rotating-calipers minAreaRect, scanline fillPoly).
-//   - det_gocv.go   (gocv)  : OpenCV geometry (gocv.FindContours /
-//                   MinAreaRect / BoxPoints), preprocessing via gocv.Resize.
+// det.go holds the geometry path: pure-Go connected components,
+// rotating-calipers minAreaRect, and scanline fillPoly.
 //
-// This file holds everything both paths need: the entry point, types, the
+// This file holds everything that path needs: the entry point, types, the
 // true round-offset unclip (Clipper JT_ROUND equivalent), and the wire format.
-// Under either build exactly one of det.go / det_gocv.go is compiled, so the
-// package-level detPreprocess / dbPostProcess that RunDet calls are resolved
-// unambiguously.
+// The package-level detPreprocess / dbPostProcess that RunDet calls are
+// defined in det.go. (The gocv OpenCV build was removed; this is the only
+// det build.)
 
 import (
 	"context"
@@ -97,9 +94,8 @@ func getDetSession(modelPath string, rh, rw int64) (*session, func(), error) {
 }
 
 // RunDet runs preprocessing + ONNX inference + DB post-processing and returns
-// the detected text-box quads. Both the gocv build (OpenCV findContours) and
-// the pure-Go build (connected components) post-process inline; the only
-// difference is the contour-extraction backend selected by build tag.
+// the detected text-box quads. Post-processing runs inline; the contour
+// extraction uses the pure-Go connected-components backend.
 func RunDet(ctx context.Context, modelDir string, img *Image) (DetResult, error) {
 	blob, rh, rw, sh, sw := detPreprocess(img)
 	sess, release, e := getDetSession(filepath.Join(modelDir, "det.onnx"), int64(rh), int64(rw))
@@ -282,7 +278,7 @@ func convexHull(pts []pt) []pt {
 
 // getMiniBoxes replicates DBPostProcess.get_mini_boxes exactly: sort the 4
 // corners by x, then emit a canonical clockwise quad from top-left. It is used
-// by both builds (the pure-Go minAreaRect and gocv.MinAreaRect both feed it).
+// by the pure-Go detection path (minAreaRect feeds it).
 func getMiniBoxes(box [4]pt) [4]pt {
 	s := []pt{box[0], box[1], box[2], box[3]}
 	sortPtsByX(s)
@@ -305,8 +301,7 @@ func getMiniBoxes(box [4]pt) [4]pt {
 // then reorders the 4 corners the way DBPostProcess.get_mini_boxes does
 // (sorted by x, canonical clockwise from top-left). Returns the 4 corners and
 // the smaller side length (min(w,h)). It is float-precision (no integer
-// rounding) so both builds match Python's cv2.minAreaRect exactly — gocv's
-// own MinAreaRect rounds center/size to int and would lose sub-pixel accuracy.
+// rounding) so it matches Python's cv2.minAreaRect exactly.
 func minAreaRect(poly []pt) ([4]pt, float64) {
 	var corners [4]pt
 	n := len(poly)

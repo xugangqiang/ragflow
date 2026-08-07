@@ -51,7 +51,6 @@ func main() {
 		fmt.Fprintln(os.Stderr, "load image:", err)
 		os.Exit(1)
 	}
-	img.Path = *imagePath // lets the gocv build re-decode via cv2 (see det_gocv.go)
 
 	var out string
 	switch *task {

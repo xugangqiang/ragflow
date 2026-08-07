@@ -8,7 +8,12 @@
 > → 有界 LRU，见 §8 A2·session 复用的旧描述已失效）、gocv 复用抖动根因（确定性 box 排序）、P5 清理 `TSR_RAW_DUMP`、
 > P4 gocv CI、native_det 生产路径 CI 入口，并已提交推送（commit `0a0688ff2`）+ 派发 `deepdoc-drift` run `31157005421`。
 > 架构评审后续待办（P0 灰度收尾 / P1 双池合一 / P2 收口暴露面 / P3 决策）在 `HANDOFF_NEXT.md` §3。
-> 在便携 runner 上跑 Python oracle↔golden 漂移门 + dla-native Go 集成（ORT only）。gocv build 的 opencv-4.10 CI 预置为可选覆盖项，不阻塞交付。
+> 在便携 runner 上跑 Python oracle↔golden 漂移门 + dla-native Go 集成（ORT only）。
+>
+> ⚠️ **gocv 路径已移除（收敛到纯 Go 单一路径）**：`image_gocv.go`/`det_gocv.go`/`dla_gocv.go` 已删，
+> `image_nogocv.go`→`image_det.go`、`dla_nogocv.go`→`dla_preprocess.go` 去 build tag，`go.mod` 已去掉
+> `gocv.io/x/gocv`，CI `go-dla-native-gocv` job 已删。本文件下文残留的 gocv / `det_gocv.go` / `img.Path`
+> 描述均已失效，以 `HANDOFF_NEXT.md` §3 P3 与当前代码为准。
 
 ## 1. 目标
 
@@ -139,8 +144,9 @@ PYTHONPATH=/home/shenyushi/workspace/ragflow /home/shenyushi/workspace/ragflow/.
 |------|------|
 | `main.go` | 入口，flag → `native` 派发（无子进程逻辑） |
 | `native/det_core.go` | **共享**：`RunDet` 内联、`dbPostProcess`、几何原语（`minAreaRect`/`getMiniBoxes`/`unclip`/`filterTagDetRes`/`convexHull`/`polygonArea`/`polygonPerimeter`）、`DLA_DUMP_QUADS` 诊断 dump |
-| `native/det.go` | `//go:build !gocv` 纯 Go 路径（连通域 + convexHull） |
-| `native/det_gocv.go` | `//go:build gocv`：gocv `FindContours` + `minAreaRect(convexHull(...))` |
+| `native/det.go` | 纯 Go 路径（连通域 + convexHull）；gocv 的 cv2 路径已移除，此为唯一 det 构建 |
+| `native/dla_preprocess.go` | DLA 预处理（`dlaPreprocess`：Go decode + `bilinearResize` + letterbox）；原 `dla_nogocv.go`，已去 build tag |
+| `native/image_det.go` | `NewImageForDet`（内存 `image.Image` → `Image`，无重编码）；原 `image_nogocv.go`，已去 build tag |
 | `native/clipper_offset.go` | pyclipper/Clipper1 忠实移植（`clipperOffset`，`clipperDefArcTol=0.25`） |
 | `native/clipper_offset_test.go` | `TestClipperOffsetMatchesPyclipper`（夹具 0.000px）、`TestTuneArcTol`、`TestDebugRotatedSquare` |
 | `native/minarearect_test.go` | `minAreaRect`+`getMiniBoxes` raw/hull/deepdoc 对比（用 `testdata/contours.json`） |

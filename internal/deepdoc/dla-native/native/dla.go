@@ -82,8 +82,8 @@ func dlaGeom(img *Image) (newW, newH int, dw, dh float64) {
 
 // dlaLetterbox places the already-resized BGR raster (newH*newW*3, row-major)
 // into the dlaInputSize canvas with 114-filled borders and returns the CHW
-// float blob (/255) the YOLOv10 layout model consumes. Shared by both build
-// paths; only the resize source differs (Go bilinearResize vs cv2 via gocv).
+// float blob (/255) the YOLOv10 layout model consumes. Only the resize source
+// differs from the production Python reference (Go bilinearResize vs cv2).
 func dlaLetterbox(resized []byte, newW, newH int, dw, dh float64) []float32 {
 	top := int(math.Round(dh - 0.1))
 	left := int(math.Round(dw - 0.1))

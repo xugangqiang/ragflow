@@ -12,17 +12,7 @@ ORT_LIB="${ORT_LIB:-/home/shenyushi/workspace/ragflow/.venv/lib/python3.12/site-
 MODEL_DIR="${MODEL_DIR:-/home/shenyushi/workspace/ragflow/rag/res/deepdoc}"
 PY="${PY:-/home/shenyushi/workspace/ragflow/.venv/bin/python}"
 PYTHONPATH="${PYTHONPATH:-/home/shenyushi/workspace/ragflow}"
-# Set GOCV_TAGS=gocv to build the OpenCV-backed detection path (needs OpenCV
-# 4.10 + gocv 0.37.0 and CGO_ENABLED=1); empty by default (pure-Go build).
-# OpenCV 4.10 is built from source into a user-local prefix (see plan); the
-# system OpenCV 4.6 in /usr/lib is left untouched and used by nothing here.
-GOCV_TAGS="${GOCV_TAGS:-}"
-if [ -n "$GOCV_TAGS" ]; then
-  export CGO_ENABLED=1
-  export PKG_CONFIG_PATH="${PKG_CONFIG_PATH:-/home/shenyushi/opt/opencv-4.10/lib/pkgconfig}"
-  export CGO_LDFLAGS="${CGO_LDFLAGS:-} -Wl,-rpath,/home/shenyushi/opt/opencv-4.10/lib"
-fi
-export ORT_LIB MODEL_DIR PYTHONPATH GOCV_TAGS
+export ORT_LIB MODEL_DIR PYTHONPATH
 
 compare_boxes() {
   # $1 = go json file, $2 = ref json file. Both are a list of
@@ -51,7 +41,7 @@ PY
 }
 
 echo "================ DLA (layout detection, page0.jpg) ================"
-go run -tags "$GOCV_TAGS" . -task dla -image testdata/page0.jpg | tee /tmp/go_dla.json >/dev/null
+go run . -task dla -image testdata/page0.jpg | tee /tmp/go_dla.json >/dev/null
 "$PY" ref_dla.py testdata/page0.jpg | tee /tmp/ref_dla.json >/dev/null
 echo "Go:"; cat /tmp/go_dla.json
 echo "Ref:"; cat /tmp/ref_dla.json
@@ -61,7 +51,7 @@ echo '{"bboxes":'"$(cat /tmp/ref_dla.json)"'}' > /tmp/ref_dla_w.json
 echo "diff:"; compare_boxes /tmp/go_dla_w.json /tmp/ref_dla_w.json
 
 echo "================ TSR (table structure, table0.jpg) ================"
-go run -tags "$GOCV_TAGS" . -task tsr -image testdata/table0.jpg | tee /tmp/go_tsr.json >/dev/null
+go run . -task tsr -image testdata/table0.jpg | tee /tmp/go_tsr.json >/dev/null
 "$PY" ref_tsr.py testdata/table0.jpg | tee /tmp/ref_tsr.json >/dev/null
 echo "Go:"; cat /tmp/go_tsr.json
 echo "Ref:"; cat /tmp/ref_tsr.json
@@ -70,7 +60,7 @@ echo '{"bboxes":'"$(cat /tmp/ref_tsr.json)"'}' > /tmp/ref_tsr_w.json
 echo "diff:"; compare_boxes /tmp/go_tsr_w.json /tmp/ref_tsr_w.json
 
 echo "================ OCR-rec (text recognition, line0.jpg) ================"
-go run -tags "$GOCV_TAGS" . -task ocr-rec -image testdata/line0.jpg | tee /tmp/go_ocr.json >/dev/null
+go run . -task ocr-rec -image testdata/line0.jpg | tee /tmp/go_ocr.json >/dev/null
 "$PY" ref_ocr_rec.py testdata/line0.jpg | tee /tmp/ref_ocr.json >/dev/null
 echo "Go:"; cat /tmp/go_ocr.json
 echo "Ref:"; cat /tmp/ref_ocr.json
@@ -86,7 +76,7 @@ PY
 echo "================ DET (text detection, DB, page0.jpg) ================"
 # Pure-Go DBPostProcess: expect box COUNT to match and coords within a few px
 # (miter offset vs Clipper round offset, convex hull vs exact contours).
-go run -tags "$GOCV_TAGS" . -task det -image testdata/page0.jpg | tee /tmp/go_det.json >/dev/null
+go run . -task det -image testdata/page0.jpg | tee /tmp/go_det.json >/dev/null
 "$PY" ref_det.py testdata/page0.jpg | tee /tmp/ref_det.json >/dev/null
 echo "Go:"; cat /tmp/go_det.json
 echo "Ref:"; cat /tmp/ref_det.json
