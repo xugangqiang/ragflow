@@ -147,4 +147,6 @@ gh run view 31157005421 -R xugangqiang/ragflow
 - 已排除根目录 `client.py`（LitServe 自动生成的本地测试脚本，与本工作无关，未纳入提交）。
 - CI run：`31157005421`（含 `go-native-det`，首次失败，根因供给路径 bug）；`31160394410`（修复后验证
   `go-native-det` 变绿，并据此将其改为阻断闸门）；`31164445982`（P2 后验证 native_det/nogocv 仍绿，
-  gocv 与 python-drift 仍因独立供给 bug 红——gocv 已在 `e76128f58` 修复）。
+  gocv 与 python-drift 仍因独立供给 bug 红——gocv 已在 `e76128f58` 修复）；`31167591590`（验证 gocv
+  修复：gocv job 变绿且作为阻断闸门通过，OpenCV 4.10 从源码构建 + gocv 集成全跑通；仅 `python-drift`
+  仍因独立 PYTHONPATH 供给 bug 红）。
