@@ -259,7 +259,9 @@ jobs:
   go-native-det:
     name: go native_det (production DB detector) integration
     runs-on: ubuntu-latest
-    continue-on-error: true
+    # Blocking gate: native-lib provisioning (named-subdir extraction + version
+    # pins tracking build.sh) is now verified green in CI. A native_det
+    # regression must block the drift gate / main.
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v6
