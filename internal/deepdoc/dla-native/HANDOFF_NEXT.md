@@ -106,10 +106,12 @@
   - (b) 收敛到 gocv 单一路径（所有构建引入 OpenCV 依赖，换取 cv2 1:1 parity）；
   - (c) 收敛到纯 Go 单一路径（放弃 cv2 1:1，接受 ~2.6px decode/resize 地板，去掉 OpenCV 依赖）。
   - 建议先问用户倾向，再动手。
-- **明确 DLA/TSR/OCR-rec 生产接线状态**：漂移门只证明「与 golden 一致」。需确认这些端口是否已接进生产路径。
-  - det 已接 `internal/deepdoc/parser/pdf` 原生路径（`nativeOCRDetect`）。
-  - DLA/TSR/OCR-rec 是否也被生产消费？查 `internal/deepdoc/parser/...` 或 `internal/ingestion/...`
-    是否引用 dla-native 的 `RunDLA`/`RunTSR`/`RunOCRRec`。若未接，需决定是否接线或仅保留为比对工具。
+- **明确 DLA/TSR/OCR-rec 生产接线状态**：✅ 已拍板（用户指令："det 已接 parser/pdf，先接生产；DLA/TSR/OCR-rec 只作比对工具"）。
+  - det = 生产路径：已接 `internal/deepdoc/parser/pdf` 原生路径（`nativeOCRDetect` / `EnableNativeDet(true)`，
+    位于 `parser/pdf/native_det.go` + `parser.go:74`，受 `native_det` tag + 开关门控）。
+  - DLA/TSR/OCR-rec = 仅比对工具：全仓 grep 确认 `RunDLA`/`RunTSR`/`RunOCRRec` **只**出现在
+    `dla-native/main.go`（demo）与 `native_integration_test.go`（漂移门），从不被 `parser/` 或 `ingestion/` 引用。
+    因此这三者**本就没接生产**，用户决策与现状一致 → **无需回退任何代码**，仅作为 cv2 parity / 漂移比对工具保留。
 
 ## 4. 环境 / 命令速查
 
