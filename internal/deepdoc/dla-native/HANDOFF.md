@@ -3,6 +3,11 @@
 > 本文档用于在新会话中接力。det（DB 文本检测）管线已与 Python deepdoc 对齐到理论下限；
 > DLA / TSR / OCR-rec 也已完成验证与 session 复用。当前**唯一剩余阻塞项为 A3**（box#8 3px 残差，硬下限）。
 > **D2（CI 漂移自动告警）已完成接线**（见 §8 D2 / §10）：新增 `.github/workflows/deepdoc-drift.yml`，
+>
+> ⚠️ **接力重点看 `HANDOFF_NEXT.md`**：2026-08-07 回合已完成 DET 会话池泄漏修复（无界 `detSessionPools sync.Map`
+> → 有界 LRU，见 §8 A2·session 复用的旧描述已失效）、gocv 复用抖动根因（确定性 box 排序）、P5 清理 `TSR_RAW_DUMP`、
+> P4 gocv CI、native_det 生产路径 CI 入口，并已提交推送（commit `0a0688ff2`）+ 派发 `deepdoc-drift` run `31157005421`。
+> 架构评审后续待办（P0 灰度收尾 / P1 双池合一 / P2 收口暴露面 / P3 决策）在 `HANDOFF_NEXT.md` §3。
 > 在便携 runner 上跑 Python oracle↔golden 漂移门 + dla-native Go 集成（ORT only）。gocv build 的 opencv-4.10 CI 预置为可选覆盖项，不阻塞交付。
 
 ## 1. 目标
