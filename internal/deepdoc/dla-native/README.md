@@ -68,3 +68,42 @@ OpenCV），否则不动几何核心。
 因容差由 `coordFloor` 派生，将来调整地板时容差**自动跟随**，无需手动同步。门只能捕获
 **>3px（地板）** 的回归，对「防大破坏」足够；细微回归（<地板）本身不可分，属工具设计
 的灵敏度下限，非缺陷。
+
+## 7. 如何重新生成 golden
+
+golden 是 `ref_*.py`（Python oracle）在固定夹具上的输出，冻结为
+`testdata/<stem>.<task>.golden.json`。deepdoc 的 Python 逻辑变更后，需重跑 oracle 并把
+输出写回 golden 再提交，否则 `python-drift` job 会报警（`check_drift.py` 只比对、不写）。
+
+前置（某 venv，含 `deepdoc` + `onnxruntime` + `opencv-python`）：
+
+```bash
+export MODEL_DIR=<deepdoc 模型目录>
+export PYTHONPATH=<ragflow 仓库根>   # 让 ref_det.py 能 import deepdoc
+```
+
+各 `ref_*.py` 直接把 wire JSON 打印到 stdout，重定向即可落盘（格式与现有 golden 完全一致）：
+
+```bash
+cd internal/deepdoc/dla-native
+# 单个夹具 + 单个任务
+python ref_det.py     testdata/page0.png    "$MODEL_DIR" > testdata/page0.det.golden.json
+python ref_dla.py     testdata/page0.png    "$MODEL_DIR" > testdata/page0.dla.golden.json
+python ref_tsr.py     testdata/table0.png   "$MODEL_DIR" > testdata/table0.tsr.golden.json
+python ref_ocr_rec.py testdata/line0.png    "$MODEL_DIR" > testdata/line0.ocr_rec.golden.json
+
+# 全部夹具：按 testdata 现有 golden 枚举，自动匹配 task 与图 stem
+for f in testdata/*.golden.json; do
+  bn=$(basename "$f" .golden.json)   # e.g. page0.dla
+  task=${bn##*.}                     # dla / det / tsr / ocr_rec
+  imgstem=${bn%.*}                   # page0
+  case "$task" in
+    det)     python ref_det.py     "testdata/$imgstem.png" "$MODEL_DIR" > "$f" ;;
+    dla)     python ref_dla.py     "testdata/$imgstem.png" "$MODEL_DIR" > "$f" ;;
+    tsr)     python ref_tsr.py     "testdata/$imgstem.png" "$MODEL_DIR" > "$f" ;;
+    ocr_rec) python ref_ocr_rec.py "testdata/$imgstem.png" "$MODEL_DIR" > "$f" ;;
+  esac
+done
+```
+
+重生成后跑 `check_drift.py` 确认无其它漂移，再把变更的 golden 一并提交。

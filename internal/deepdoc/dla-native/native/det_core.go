@@ -8,8 +8,7 @@ package native
 // This file holds everything that path needs: the entry point, types, the
 // true round-offset unclip (Clipper JT_ROUND equivalent), and the wire format.
 // The package-level detPreprocess / dbPostProcess that RunDet calls are
-// defined in det.go. (The gocv OpenCV build was removed; this is the only
-// det build.)
+// defined in det.go. (This is the only det build.)
 
 import (
 	"context"

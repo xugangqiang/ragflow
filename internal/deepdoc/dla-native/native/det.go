@@ -10,8 +10,8 @@ package native
 // The DB geometry — connected-components in place of findContours,
 // rotating-calipers minAreaRect, and a scanline fillPoly for box_score_fast —
 // is reimplemented in Go. It is geometrically faithful but NOT bit-exact to
-// OpenCV/Clipper; box locations match to within a couple of pixels. The gocv
-// OpenCV path was removed; this is the only det build.
+// OpenCV/Clipper; box locations match to within a couple of pixels. This is
+// the only det build.
 
 import "math"
 
