@@ -531,9 +531,13 @@ func TestMarkdownParser_MultipleTablesOrdering(t *testing.T) {
 // stripped; whitespace collapsed) and ignores "table"/"image" items, which are
 // accepted representation differences (PARSER_ALIGNMENT_HANDOFF.md §3.1).
 //
-// Regenerate the baseline with:
-//
-//	.venv/bin/python internal/parser/parser/testdata/gen_markdown_golden.py
+// The baseline (testdata/markdown.python.golden.json) is a {meta, items}
+// document whose "meta" block records how it was produced (generator
+// rag/flow/parser/parser.py:_markdown, sample, delimiter, accepted
+// divergences). No generator script is committed — to regenerate, call
+// _markdown on the sample and dump {meta, items}. The baseline is
+// reproducible from the metadata alone (an AI or human can recreate the thin
+// wrapper on demand).
 func TestMarkdownParser_AlignmentGolden(t *testing.T) {
 	ctx := t.Context()
 	p, _ := NewMarkdownParser(GoMarkdown)

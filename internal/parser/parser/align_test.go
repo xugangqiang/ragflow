@@ -188,19 +188,28 @@ func diffReport(g, p string) string {
 	return "alignment mismatch after normalization:\n--- GO ---\n" + g + "\n--- PY ---\n" + p
 }
 
-// LoadGolden reads a Python golden JSON file (a JSON list of item objects)
-// produced by the Python flow parser for the same input.
+// LoadGolden reads a Python golden JSON file produced by the Python flow
+// parser for the same input. The file is a {meta, items} document; meta
+// records how the baseline was produced (generator, sample, delimiter,
+// accepted divergences) so the golden stays reproducible without a committed
+// generator script. Only the items array is returned for comparison.
 func LoadGolden(t *testing.T, path string) []map[string]any {
 	t.Helper()
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("load golden %s: %v", path, err)
 	}
-	var items []map[string]any
-	if err := json.Unmarshal(data, &items); err != nil {
+	var doc struct {
+		Meta  map[string]any   `json:"meta"`
+		Items []map[string]any `json:"items"`
+	}
+	if err := json.Unmarshal(data, &doc); err != nil {
 		t.Fatalf("parse golden %s: %v", path, err)
 	}
-	return items
+	if len(doc.Items) == 0 {
+		t.Fatalf("golden %s has no items", path)
+	}
+	return doc.Items
 }
 
 // MarkdownAlignOptions returns the normalizer preset for markdown. The order
