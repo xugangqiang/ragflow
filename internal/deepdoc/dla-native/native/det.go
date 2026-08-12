@@ -13,18 +13,13 @@ package native
 // bug). Verified stage-by-stage via TestDumpStages + cmp_stages.py +
 // diff_stages.py.
 //
-// The DB geometry — a findContours-equivalent (Suzuki-Abe / Moore-neighbour
-// border following, RETR_LIST) contour grouping, rotating-calipers minAreaRect,
-// and a scanline fillPoly for box_score_fast — is reimplemented in Go. The
-// contour grouping mirrors cv2.findContours(RETR_LIST) so the component SET
-// (and the final boxes) aligns with the live Python TextDetector: on
-// mp_physics_p5 Go yields 21 == 21 final boxes, and across all fixtures the
-// IoU box-membership gap versus the regenerated goldens is 3/5. The Go det
-// pred map now matches the live TextDetector to mean|Δ|≈4e-5 (the earlier
+// The DB geometry — Moore-neighbour (Suzuki-Abe style) contour following,
+// rotating-calipers minAreaRect, and a scanline fillPoly for box_score_fast —
+// is reimplemented in Go. On mp_physics_p5 Go yields 21 == 21 final boxes. The
+// Go det pred map matches the live TextDetector to mean|Δ|≈4e-5 (the earlier
 // ~3e-3 gap was a swapped R/B channel order in normalizeCHW, since fixed:
-// detPreprocess feeds RGB bytes with RGB-order stats, matching deepdoc,
-// which normalizes the RGB image directly). The remaining 3/5 orphans are
-// contour-tracer geometry (not pred/score/grouping). fillPoly is bit-exact
+// detPreprocess feeds RGB bytes with RGB-order stats, matching deepdoc, which
+// normalizes the RGB image directly). fillPoly is bit-exact
 // (TestFillPolyAlignsCV2). This is the only det build.
 
 import (
@@ -79,11 +74,12 @@ func dbPostProcess(pred []float32, h, w, srcH, srcW int) ([]DetBox, []float32) {
 		}
 	}
 
-	// Contour extraction via Moore-neighbour (Suzuki-Abe style) border
-	// following, mirroring cv2.findContours(RETR_LIST): one boundary point
-	// set per 8-connected foreground component, in integer coords (no +0.5
-	// centre offset), so the shared convexHull/minAreaRect/boxScoreFast
-	// downstream matches the Python oracle.
+	// Contour extraction via findContours: Moore-neighbour (Suzuki-Abe style)
+	// border following. It returns one boundary point set per 8-connected
+	// foreground component, in integer coords (no +0.5 centre offset), so the
+	// shared convexHull/minAreaRect/boxScoreFast downstream aligns with the
+	// Python oracle. The remaining ~3/5 IoU box-membership orphans versus the
+	// goldens are contour-boundary geometry, not pred/score/grouping.
 	comps := findContours(seg, w, h, detMaxCandidates)
 
 	if os.Getenv("DLA_DUMP_STAGES") != "" {
