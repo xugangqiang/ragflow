@@ -13,6 +13,7 @@ package native
 
 import (
 	"encoding/json"
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
@@ -1262,4 +1263,177 @@ func TestDumpStages(t *testing.T) {
 		_ = os.WriteFile("/tmp/go_final.json", b, 0o644)
 	}
 	t.Logf("wrote /tmp/go_pred.json, /tmp/go_quads_pre.json, /tmp/go_candidates.json, /tmp/go_final.json for %s", fixture)
+}
+
+// TestEquivalenceReport runs every dla-native recognizer against the Python
+// reference goldens and prints one consolidated equivalence summary to the test
+// log (visible in CI). It is the human-readable counterpart to the per-task
+// integration tests: with a single command it shows that Go's det / DLA / TSR /
+// OCR outputs match the Python deepdoc inference service to within the
+// documented, bounded floors. It also acts as a light regression guard (DLA /
+// TSR boxes and OCR text must match exactly; the full-fixture det floor is
+// guarded separately by TestDetMembershipAllFixtures).
+//
+// Requires ORT_LIB + MODEL_DIR (//go:build integration).
+func TestEquivalenceReport(t *testing.T) {
+	skipIfNoModels(t)
+	md := os.Getenv("MODEL_DIR")
+	dir := "../testdata"
+
+	type row struct {
+		task  string
+		fix   int
+		match int
+		total int
+		maxD  float64
+		note  string
+	}
+	var rows []row
+
+	// DLA — layout detection: every golden box matched within 2px.
+	{
+		m, tot, mx := 0, 0, 0.0
+		for _, stem := range dlaPages {
+			img, err := Decode(filepath.Join(dir, stem+".png"))
+			if err != nil {
+				t.Fatalf("decode %s: %v", stem, err)
+			}
+			res, err := RunDLA(t.Context(), md, img)
+			if err != nil {
+				t.Fatalf("RunDLA %s: %v", stem, err)
+			}
+			var got struct {
+				Boxes [][]float64 `json:"bboxes"`
+			}
+			if err := json.Unmarshal([]byte(res.Wire()), &got); err != nil {
+				t.Fatalf("wire %s: %v", stem, err)
+			}
+			gold := loadGoldenBoxes(t, filepath.Join(dir, stem+".dla.golden.json"))
+			mm, mx2, _ := matchBoxesRelaxed(t, gold, got.Boxes, 2.0, 0.05)
+			m += mm
+			tot += len(gold)
+			mx = math.Max(mx, mx2)
+		}
+		rows = append(rows, row{"DLA (layout)", len(dlaPages), m, tot, mx, "sub-pixel"})
+	}
+
+	// TSR — table structure: every golden box matched within 2px.
+	{
+		m, tot, mx := 0, 0, 0.0
+		for _, stem := range tsrPages {
+			img, err := Decode(filepath.Join(dir, stem+".png"))
+			if err != nil {
+				t.Fatalf("decode %s: %v", stem, err)
+			}
+			res, err := RunTSR(t.Context(), md, img)
+			if err != nil {
+				t.Fatalf("RunTSR %s: %v", stem, err)
+			}
+			var got struct {
+				Boxes [][]float64 `json:"bboxes"`
+			}
+			if err := json.Unmarshal([]byte(res.Wire()), &got); err != nil {
+				t.Fatalf("wire %s: %v", stem, err)
+			}
+			gold := loadGoldenBoxes(t, filepath.Join(dir, stem+".tsr.golden.json"))
+			mm, mx2, _ := matchBoxesRelaxed(t, gold, got.Boxes, 2.0, 0.05)
+			m += mm
+			tot += len(gold)
+			mx = math.Max(mx, mx2)
+		}
+		rows = append(rows, row{"TSR (table)", len(tsrPages), m, tot, mx, "<1px (<=10px @4:1 aspect)"})
+	}
+
+	// OCR — text recognition: exact text match.
+	{
+		m, tot := 0, 0
+		for _, stem := range ocrRecLines {
+			img, err := Decode(filepath.Join(dir, stem+".png"))
+			if err != nil {
+				t.Fatalf("decode %s: %v", stem, err)
+			}
+			res, err := RunOCRRec(t.Context(), md, img)
+			if err != nil {
+				t.Fatalf("RunOCRRec %s: %v", stem, err)
+			}
+			raw, err := os.ReadFile(filepath.Join(dir, stem+".ocr_rec.golden.json"))
+			if err != nil {
+				t.Fatalf("read golden %s: %v", stem, err)
+			}
+			var gold struct {
+				Output [][][][]any `json:"output"`
+			}
+			if err := json.Unmarshal(raw, &gold); err != nil {
+				t.Fatalf("parse golden %s: %v", stem, err)
+			}
+			gotText := res.Text
+			goldText := gold.Output[0][0][0][0].(string)
+			tot++
+			if gotText == goldText {
+				m++
+			} else {
+				t.Logf("OCR mismatch %s: got %q gold %q", stem, gotText, goldText)
+			}
+		}
+		rows = append(rows, row{"OCR (text)", len(ocrRecLines), m, tot, 0, "exact text"})
+	}
+
+	// Det — text detection IoU box-membership floor (curated dense subset).
+	{
+		const iouThr = 0.5
+		detStems := []string{"mp_arxiv_p0", "mp_cn_sm_p0", "mp_en_dense_p0", "mp_sec_p0", "mp_physics_p5"}
+		orphanG, orphanGo, tot := 0, 0, 0
+		for _, stem := range detStems {
+			img, err := Decode(filepath.Join(dir, stem+".png"))
+			if err != nil {
+				t.Fatalf("decode %s: %v", stem, err)
+			}
+			res, err := RunDet(t.Context(), md, img)
+			if err != nil {
+				t.Fatalf("RunDet %s: %v", stem, err)
+			}
+			var got struct {
+				Output [][][][][2]float64 `json:"output"`
+			}
+			if err := json.Unmarshal([]byte(res.Wire()), &got); err != nil {
+				t.Fatalf("wire %s: %v", stem, err)
+			}
+			goBoxes := flattenQuads(got.Output)
+			raw, err := os.ReadFile(filepath.Join(dir, stem+".det.golden.json"))
+			if err != nil {
+				t.Fatalf("read golden %s: %v", stem, err)
+			}
+			var gold struct {
+				Output [][][][][2]float64 `json:"output"`
+			}
+			if err := json.Unmarshal(raw, &gold); err != nil {
+				t.Fatalf("parse golden %s: %v", stem, err)
+			}
+			goldBoxes := flattenQuads(gold.Output)
+			imG, imGo := matchIoUBothDirections(goldBoxes, goBoxes, iouThr)
+			orphanG += len(goldBoxes) - imG
+			orphanGo += len(goBoxes) - imGo
+			tot += len(goldBoxes)
+		}
+		rows = append(rows, row{"Det (text boxes)", len(detStems), tot - orphanG, tot, 0,
+			fmt.Sprintf("IoU orphan(gold/go)=%d/%d (accepted floor 3/5)", orphanG, orphanGo)})
+	}
+
+	// Consolidated summary — visible in CI logs.
+	t.Logf("===== DLA-NATIVE vs PYTHON DEEP DOC: EQUIVALENCE SUMMARY =====")
+	t.Logf("%-18s %4s %9s %10s  %s", "TASK", "FIX", "MATCH/TOT", "MAXΔ(px)", "NOTE")
+	for _, r := range rows {
+		t.Logf("%-18s %4d %4d/%-4d %10.3f  %s", r.task, r.fix, r.match, r.total, r.maxD, r.note)
+	}
+	t.Logf("==================================================================")
+
+	// Light regression guard: DLA/TSR boxes and OCR text must match exactly.
+	// The full-fixture det floor is guarded by TestDetMembershipAllFixtures.
+	for _, r := range rows {
+		if r.task == "DLA (layout)" || r.task == "TSR (table)" || r.task == "OCR (text)" {
+			if r.match != r.total {
+				t.Errorf("%s: %d/%d matched — equivalence REGRESSION", r.task, r.match, r.total)
+			}
+		}
+	}
 }

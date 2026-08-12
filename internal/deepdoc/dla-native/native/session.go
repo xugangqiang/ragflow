@@ -23,6 +23,11 @@ import (
 var (
 	ortOnce    sync.Once
 	ortInitErr error
+	// ortReady is true once InitializeEnvironment has succeeded. It lets
+	// callers decide whether the in-process backend can serve without
+	// triggering a panic from a session Run against an uninitialized
+	// environment.
+	ortReady bool
 )
 
 // InitORT points ONNX Runtime at its shared library and initializes the
@@ -32,9 +37,17 @@ func InitORT(libPath string) error {
 	ortOnce.Do(func() {
 		ort.SetSharedLibraryPath(libPath)
 		ortInitErr = ort.InitializeEnvironment()
+		if ortInitErr == nil {
+			ortReady = true
+		}
 	})
 	return ortInitErr
 }
+
+// Initialized reports whether ONNX Runtime's process-global environment has
+// been successfully initialized. The in-process DeepDoc backend uses this to
+// decide whether it can serve, degrading to an empty analyzer otherwise.
+func Initialized() bool { return ortReady }
 
 // session loads one ONNX model and runs single-input/single-output inference.
 type session struct {

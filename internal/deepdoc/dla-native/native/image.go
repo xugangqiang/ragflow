@@ -86,6 +86,31 @@ func Decode(path string) (*Image, error) {
 	return &Image{W: w, H: h, Pix: pix}, nil
 }
 
+// FromImage converts a standard library image.Image into the RGB row-major
+// raster the recognizers consume. It is the in-process analogue of Decode
+// (which reads from a file): the Go DeepDoc client and the PDF parser already
+// hold an image.Image, so decoding to disk and back is unnecessary.
+func FromImage(img image.Image) (*Image, error) {
+	b := img.Bounds()
+	if err := checkImageBounds(b); err != nil {
+		return nil, err
+	}
+	rgba := image.NewRGBA(b)
+	draw.Draw(rgba, b, img, b.Min, draw.Src)
+	w, h := b.Dx(), b.Dy()
+	pix := make([]byte, w*h*3)
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			o := rgba.PixOffset(x, y)
+			d := (y*w + x) * 3
+			pix[d] = rgba.Pix[o]     // R
+			pix[d+1] = rgba.Pix[o+1] // G
+			pix[d+2] = rgba.Pix[o+2] // B
+		}
+	}
+	return &Image{W: w, H: h, Pix: pix}, nil
+}
+
 // ToBGR returns a copy of the pixels with R and B channels swapped (B,G,R
 // order), which is the channel order every DeepDoc ONNX expects.
 func (im *Image) ToBGR() []byte {

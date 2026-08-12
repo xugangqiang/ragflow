@@ -127,6 +127,15 @@ const (
 	EnvBatchCompareCSV                   = "BATCH_COMPARE_CSV"
 	EnvPYOCRSuffix                       = "PY_OCR_SUFFIX"
 	EnvOSSDeepDocURL                     = "OSSDEEPDOC_URL"
+	// EnvDeepDocModelDir points the in-process (Go) DeepDoc backend at the
+	// model snapshot (layout.onnx/tsr.onnx/det.onnx/rec.onnx/ocr.res). Used
+	// only when no external DeepDoc HTTP service is configured (DEEPDOC_URL
+	// unset); mirrors deepdoc_server.py's --model-dir (default rag/res/deepdoc).
+	EnvDeepDocModelDir = "DEEPDOC_MODEL_DIR"
+	// EnvDeepDocORTLib points the in-process backend at libonnxruntime.so.
+	// Optional: if empty but ORT was initialized elsewhere, the backend still
+	// serves; if unset and uninitialized, it degrades to the empty analyzer.
+	EnvDeepDocORTLib = "DEEPDOC_ORT_LIB"
 	EnvUpdateGolden                      = "UPDATE_GOLDEN"
 	EnvBatchParityFilter                 = "BATCH_PARITY_FILTER"
 	EnvDumpCount                         = "DUMP_COUNT"

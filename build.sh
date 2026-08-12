@@ -322,7 +322,8 @@ build_go() {
 
     GOPROXY=${GOPROXY:-https://goproxy.cn,https://proxy.golang.org,direct} CGO_ENABLED=1 \
         CGO_CFLAGS="$CGO_CFLAGS" CGO_LDFLAGS="$CGO_LDFLAGS" \
-        go build "${strip_flags[@]}" -o "$RAGFLOW_SERVER_BINARY" cmd/ragflow_server.go
+        go build -tags native_det "${strip_flags[@]}" -o "$RAGFLOW_SERVER_BINARY" \
+        cmd/ragflow_server.go cmd/ragflow_server_native.go
 
 
     if [ ! -f "$RAGFLOW_SERVER_BINARY" ]; then
@@ -552,6 +553,10 @@ OPTIONS:
     --test-manual        Run Go tests tagged 'manual' (very slow; local opt-in
                     ONLY, never run in CI).
     --test-all           Run 'integration' + 'e2e' tests (excludes 'manual').
+    --test-native        Run the in-process (Go) DeepDoc backend tests tagged
+                    'native_det integration' (needs libonnxruntime + the
+                    InfiniFlow/deepdoc model snapshot; self-skip otherwise).
+                    e.g. `$0 --test-native`
     --clean, -C     Clean all build artifacts
     --run, -r       Build and run the server
     --strip, -s     Strip debug symbols from Go binaries (-ldflags="-s -w")
@@ -649,6 +654,19 @@ main() {
             else
                 run_go_tests_tagged "integration e2e" "${args[@]:1}"
             fi
+            ;;
+        --test-native)
+            check_go_deps
+            if [ "${args[1]:-}" = "--" ]; then
+                pkgs=("${args[@]:2}")
+            else
+                pkgs=("${args[@]:1}")
+            fi
+            if [ "${#pkgs[@]}" -eq 0 ]; then
+                pkgs=(./internal/deepdoc/parser/pdf/inference/native/...)
+            fi
+            run_go_tests_tagged "native_det integration" "${pkgs[@]}"
+            run_dla_native_integration_tests
             ;;
         --clean|-C)
             clean
