@@ -132,7 +132,10 @@ func dlaPostprocess(out []float32, sf [4]float32) DLAResult {
 		if score <= scoreThr {
 			continue
 		}
-		cls := int(out[base+5] + 0.5)
+		// Truncate toward zero, matching deepdoc LayoutRecognizer4YOLOv10.postprocess
+		// (boxes[:, -1].astype(int)). The prior int(x+0.5) rounding shifted
+		// class-channel values in [2.5, 2.999] from class 2 to class 3.
+		cls := int(out[base+5])
 		cands = append(cands, cand{
 			nmsBox: nmsBox{
 				X0:    (out[base+0] - sf[2]) * sf[0],

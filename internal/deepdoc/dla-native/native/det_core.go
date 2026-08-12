@@ -74,7 +74,7 @@ type detSessKey struct {
 
 // detSessions is the variable-shape detector pool: bounded at detMaxShapePools
 // distinct shape-pools, each retaining up to detShapePoolCap idle sessions.
-var detSessions = newSessionPool[detSessKey](detMaxShapePools, detShapePoolCap)
+var detSessions = newSessionPool[detSessKey, *session](detMaxShapePools, detShapePoolCap)
 
 // getDetSession returns a reusable detector session for the given resized
 // shape plus a release func. The caller must call release exactly once. On a
@@ -111,6 +111,20 @@ func RunDet(ctx context.Context, modelDir string, img *Image) (DetResult, error)
 	p := make([]float32, rh*rw)
 	copy(p, out)
 
+	// S0–S2 diagnostic: dump the raw pred map (post-sigmoid, pre-threshold)
+	// so it can be diffed against the Python oracle's pred. If the two pred
+	// maps match, decode + preprocess + ONNX inference are proven identical
+	// and the residual det divergence lives entirely in post-processing
+	// (segmentation / contour-vs-component grouping / minAreaRect / unclip /
+	// box_score_fast). Gated by DLA_DUMP_STAGES; harmless otherwise.
+	if os.Getenv("DLA_DUMP_STAGES") != "" {
+		if b, err := json.Marshal(map[string]any{
+			"rh": rh, "rw": rw, "sh": sh, "sw": sw, "pred": p,
+		}); err == nil {
+			_ = os.WriteFile("/tmp/go_pred.json", b, 0o644)
+		}
+	}
+
 	boxes, _ := dbPostProcess(p, rh, rw, sh, sw)
 	return DetResult{Boxes: boxes}, nil
 }
@@ -121,15 +135,19 @@ func round32(v int) int {
 }
 
 // normalizeCHW applies the DetResizeForTest Normalization (scale 1/255,
-// mean/std, hwc->chw) to a BGR byte buffer of size h*w*3.
-func normalizeCHW(bgr []byte, h, w, srcW, srcH int) []float32 {
+// mean/std, hwc->chw) to an RGB byte buffer of size h*w*3. The stats are in
+// RGB order (detMean0=0.485 -> R, detMean1=0.456 -> G, detMean2=0.406 -> B),
+// matching deepdoc's TextDetector, which normalizes the original RGB image
+// directly before ToCHWImage. Channel 0 of the blob is therefore R, exactly
+// as deepdoc produces it.
+func normalizeCHW(rgb []byte, h, w, srcW, srcH int) []float32 {
 	_ = srcW
 	_ = srcH
 	blob := make([]float32, 3*h*w)
 	for y := 0; y < h; y++ {
 		for x := 0; x < w; x++ {
 			for c := 0; c < 3; c++ {
-				v := float32(bgr[(y*w+x)*3+c]) / 255.0
+				v := float32(rgb[(y*w+x)*3+c]) / 255.0
 				switch c {
 				case 0:
 					v = (v - detMean0) / detStd0
@@ -191,6 +209,42 @@ func dlaFlushPreUnclip() {
 	b, _ := json.Marshal(dlaPreUnclip)
 	_ = os.WriteFile("/tmp/go_quads_pre.json", b, 0o644)
 	dlaPreUnclip = nil
+}
+
+// S3 diagnostic: collect every post-geometry, pre-score-filter candidate
+// (the scaled quad + its pre-unclip score) so the Go/cv2 det divergence can be
+// classified box-for-box as geometry/grouping (region missing on one side) vs
+// score-threshold (same region, one side's box_score_fast crossed 0.5
+// differently). Gated by DLA_DUMP_CANDIDATES.
+var dlaCandidates []candidateRec
+
+type candidateRec struct {
+	Quad    [4][2]float64 `json:"quad"`    // post-unclip, scaled to source
+	PreQuad [4][2]float64 `json:"preQuad"` // pre-unclip, in resized coords
+	Score   float64       `json:"score"`   // pre-unclip box_score_fast
+}
+
+func dlaRecordCandidate(q [4][2]float32, pre [4]pt, score float32) {
+	if os.Getenv("DLA_DUMP_CANDIDATES") == "" {
+		return
+	}
+	var v, pv [4][2]float64
+	for i := range q {
+		v[i] = [2]float64{float64(q[i][0]), float64(q[i][1])}
+	}
+	for i := range pre {
+		pv[i] = [2]float64{pre[i].X, pre[i].Y}
+	}
+	dlaCandidates = append(dlaCandidates, candidateRec{Quad: v, PreQuad: pv, Score: float64(score)})
+}
+
+func dlaFlushCandidates() {
+	if os.Getenv("DLA_DUMP_CANDIDATES") == "" {
+		return
+	}
+	b, _ := json.Marshal(map[string]any{"cands": dlaCandidates})
+	_ = os.WriteFile("/tmp/go_candidates.json", b, 0o644)
+	dlaCandidates = nil
 }
 
 // S2 diagnostic: collect each contour's post-unclip min-area rect (quad2, in

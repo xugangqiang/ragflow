@@ -9,8 +9,9 @@ package native
 
 import "math"
 
-// bilinearResize resizes an HxWx3 (BGR) image to outW x outH using the same
-// coordinate mapping as cv2.INTER_LINEAR: dst = (src + 0.5) * scale - 0.5.
+// bilinearResize resizes an HxWx3 image (channel order is caller's concern;
+// the function resizes each channel independently) to outW x outH using the
+// same coordinate mapping as cv2.INTER_LINEAR: dst = (src + 0.5) * scale - 0.5.
 func bilinearResize(src []byte, sw, sh, outW, outH int) []byte {
 	dst := make([]byte, outW*outH*3)
 	if sw == 0 || sh == 0 {

@@ -184,8 +184,10 @@ func TestUnclipExpands(t *testing.T) {
 }
 
 func TestFillPolyCoversQuad(t *testing.T) {
-	// 11x11 mask; fill the quad from (0,0) to (10,10): 10x10 = 100 interior
-	// pixel centers.
+	// 11x11 mask; fill the quad from (0,0) to (10,10). OpenCV's cv2.fillPoly
+	// treats the integer vertices as pixel corners and (with the +0.5
+	// fixed-point rounding) fills the full 11x11 cell = 121 pixels, matching
+	// cv2.fillPoly bit-for-bit.
 	quad := [4]pt{{0, 0}, {10, 0}, {10, 10}, {0, 10}}
 	mask := make([]bool, 11*11)
 	fillPoly(mask, 11, 11, quad)
@@ -195,8 +197,8 @@ func TestFillPolyCoversQuad(t *testing.T) {
 			n++
 		}
 	}
-	if n != 100 {
-		t.Fatalf("filled %d px, want 100", n)
+	if n != 121 {
+		t.Fatalf("filled %d px, want 121 (cv2.fillPoly)", n)
 	}
 }
 

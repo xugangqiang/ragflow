@@ -100,6 +100,18 @@ jobs:
           print("models ready:", sorted(os.listdir(out)))
           PY
 
+      - name: Link models into deepdoc default model dir
+        # The DLA/TSR oracles (ref_dla.py / ref_tsr.py) call deepdoc's own
+        # LayoutRecognizer4YOLOv10 / TableStructureRecognizer, which load models
+        # from deepdoc's *default* directory (get_project_base_directory() +
+        # rag/res/deepdoc) rather than from MODEL_DIR. Symlink that default dir
+        # at the repo root to the HF-downloaded models so the real-deepdoc
+        # oracles resolve without code changes. (rag/res is gitignored, so this
+        # symlink is ephemeral per CI run.)
+        run: |
+          mkdir -p rag/res
+          ln -sfn "${{ github.workspace }}/models/deepdoc" rag/res/deepdoc
+
       - name: Run drift gate (Python oracle vs pinned golden)
         working-directory: internal/deepdoc/dla-native
         env:

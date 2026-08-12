@@ -158,6 +158,12 @@ func (s *session) Destroy() {
 	}
 }
 
+func (s *session) isPoisoned() bool { return s.poisoned }
+
+// markPoisoned records that a Run was force-terminated; a poisoned session is
+// not safe to reuse, so the pool Destroys it on release.
+func (s *session) markPoisoned() { s.poisoned = true }
+
 func prod(shape []int64) int64 {
 	p := int64(1)
 	for _, d := range shape {

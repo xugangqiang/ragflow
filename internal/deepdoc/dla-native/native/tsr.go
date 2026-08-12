@@ -176,7 +176,11 @@ func tsrPostprocess(out []float32, sf [2]float32) TSRResult {
 }
 
 // alignTSR pulls row/header boxes to the table's horizontal extremes and
-// column boxes to its vertical extremes (mirrors TableStructureRecognizer.__call__).
+// column boxes to its vertical extremes, matching deepdoc
+// TableStructureRecognizer.__call__: when there are more than 4 boxes of a
+// kind it aligns to the mean (rows/headers) or median (columns) of the edges,
+// otherwise to the plain min/max extremes. The adjustment is one-sided — a box
+// edge is only pulled in to the bound when it exceeds it, never pushed out.
 func alignTSR(boxes []TSRBox) {
 	var leftVals, rightVals, topVals, botVals []float32
 	for _, b := range boxes {
@@ -192,8 +196,15 @@ func alignTSR(boxes []TSRBox) {
 	if len(leftVals) == 0 {
 		return
 	}
-	left := minOf(leftVals)
-	right := maxOf(rightVals)
+	// Rows/headers: mean when >4 boxes, else min (left) / max (right).
+	left := meanOf(leftVals)
+	if len(leftVals) <= 4 {
+		left = minOf(leftVals)
+	}
+	right := meanOf(rightVals)
+	if len(rightVals) <= 4 {
+		right = maxOf(rightVals)
+	}
 	for i := range boxes {
 		if strings.Contains(boxes[i].Label, "row") || strings.Contains(boxes[i].Label, "header") {
 			if boxes[i].X0 > left {
@@ -207,8 +218,15 @@ func alignTSR(boxes []TSRBox) {
 	if len(topVals) == 0 {
 		return
 	}
-	top := minOf(topVals)
-	bot := maxOf(botVals)
+	// Columns: median when >4 boxes, else min (top) / max (bottom).
+	top := medianOf(topVals)
+	if len(topVals) <= 4 {
+		top = minOf(topVals)
+	}
+	bot := medianOf(botVals)
+	if len(botVals) <= 4 {
+		bot = maxOf(botVals)
+	}
 	for i := range boxes {
 		if boxes[i].Label == "table column" {
 			if boxes[i].Top > top {
@@ -219,6 +237,25 @@ func alignTSR(boxes []TSRBox) {
 			}
 		}
 	}
+}
+
+func meanOf(v []float32) float32 {
+	var s float32
+	for _, x := range v {
+		s += x
+	}
+	return s / float32(len(v))
+}
+
+func medianOf(v []float32) float32 {
+	s := make([]float32, len(v))
+	copy(s, v)
+	sort.Slice(s, func(i, j int) bool { return s[i] < s[j] })
+	n := len(s)
+	if n%2 == 1 {
+		return s[n/2]
+	}
+	return (s[n/2-1] + s[n/2]) / 2
 }
 
 var tsrClassMap = map[string]int{

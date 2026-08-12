@@ -15,9 +15,10 @@ package native
 // the pool for reuse. This keeps the Get/Run/Release window single-owner, which
 // is what makes reuse safe under the page/region worker pools.
 //
-// The pool is generic over the key type so both the fixed-shape recognizers
-// (modelSessKey) and the variable-shape detector (detSessKey) share one
-// implementation. Two bounds apply:
+// The pool is generic over the key type K and the pooled session type V so both
+// the fixed-shape recognizers (DLA/TSR/OCR-rec, recSession) and the
+// variable-shape detector (detSession) share one implementation. Two bounds
+// apply:
 //   - maxKeys caps the number of distinct key-pools; when exceeded the
 //     least-recently-used key-pool is evicted and its idle sessions Destroyed
 //     (bounds memory for the variable-shape detector, which can see many
@@ -27,30 +28,42 @@ package native
 //     degenerate case for the fixed-shape recognizers, whose key set is tiny.
 
 import (
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
 )
 
-// sessionKeyPool holds reusable sessions for one key.
-type sessionKeyPool struct {
-	mu   sync.Mutex
-	live bool // false once evicted; checked-out sessions self-Destroy on release
-	free []*session
+// pooledSession is the minimal contract the pool needs from any cached ONNX
+// session: release its resources, and report/mark the poisoned flag set when a
+// Run is force-terminated via context (ORT does not guarantee reuse safety
+// after a termination, so the pool must Destroy rather than re-Put).
+type pooledSession interface {
+	Destroy()
+	isPoisoned() bool
+	markPoisoned()
 }
 
-// sessionPool is a generic reusable ONNX session pool keyed by K.
-type sessionPool[K comparable] struct {
+// sessionKeyPool holds reusable sessions for one key.
+type sessionKeyPool[V pooledSession] struct {
+	mu   sync.Mutex
+	live bool // false once evicted; checked-out sessions self-Destroy on release
+	free []V
+}
+
+// sessionPool is a generic reusable ONNX session pool keyed by K, storing
+// values of type V (any pooledSession).
+type sessionPool[K comparable, V pooledSession] struct {
 	mu      sync.Mutex
-	pools   map[K]*sessionKeyPool
+	pools   map[K]*sessionKeyPool[V]
 	lru     []K // front = least-recently-used
 	maxKeys int
 	maxFree int
 }
 
-func newSessionPool[K comparable](maxKeys, maxFree int) *sessionPool[K] {
-	return &sessionPool[K]{
-		pools:   make(map[K]*sessionKeyPool),
+func newSessionPool[K comparable, V pooledSession](maxKeys, maxFree int) *sessionPool[K, V] {
+	return &sessionPool[K, V]{
+		pools:   make(map[K]*sessionKeyPool[V]),
 		maxKeys: maxKeys,
 		maxFree: maxFree,
 	}
@@ -60,14 +73,14 @@ func newSessionPool[K comparable](maxKeys, maxFree int) *sessionPool[K] {
 // miss, plus a release func. The caller must call release exactly once. A
 // poisoned session is Destroyed on release rather than pooled (ORT does not
 // guarantee reuse safety after a forced termination).
-func (p *sessionPool[K]) Get(key K, newFn func() (*session, error)) (*session, func(), error) {
+func (p *sessionPool[K, V]) Get(key K, newFn func() (V, error)) (V, func(), error) {
 	p.mu.Lock()
 	kp := p.pools[key]
 	if kp == nil {
 		if p.maxKeys > 0 && len(p.pools) >= p.maxKeys {
 			p.evictLRU()
 		}
-		kp = &sessionKeyPool{live: true}
+		kp = &sessionKeyPool[V]{live: true}
 		p.pools[key] = kp
 		p.lru = append(p.lru, key)
 	} else {
@@ -76,23 +89,24 @@ func (p *sessionPool[K]) Get(key K, newFn func() (*session, error)) (*session, f
 	p.mu.Unlock()
 
 	kp.mu.Lock()
-	var s *session
+	var s V
 	if n := len(kp.free); n > 0 {
 		s = kp.free[n-1]
 		kp.free = kp.free[:n-1]
 	}
 	kp.mu.Unlock()
 
-	if s == nil {
+	if isNil(s) {
 		var err error
 		s, err = newFn()
 		if err != nil {
-			return nil, nil, err
+			var zero V
+			return zero, nil, err
 		}
 	}
 
 	release := func() {
-		if s.poisoned {
+		if s.isPoisoned() {
 			s.Destroy()
 			return
 		}
@@ -108,16 +122,24 @@ func (p *sessionPool[K]) Get(key K, newFn func() (*session, error)) (*session, f
 	return s, release, nil
 }
 
+// isNil reports whether a generic pooledSession value is its zero value (a nil
+// pointer). Every pooled type is a pointer, so reflection's IsNil is safe here.
+// newFn only runs on a miss.
+func isNil[V pooledSession](v V) bool {
+	rv := reflect.ValueOf(v)
+	return rv.IsNil()
+}
+
 // KeyCount returns the number of distinct key-pools currently live. Used by
 // tests that assert the pool set is bounded.
-func (p *sessionPool[K]) KeyCount() int {
+func (p *sessionPool[K, V]) KeyCount() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return len(p.pools)
 }
 
 // touchLRU moves key to the most-recently-used end. Caller holds p.mu.
-func (p *sessionPool[K]) touchLRU(key K) {
+func (p *sessionPool[K, V]) touchLRU(key K) {
 	for i, k := range p.lru {
 		if k == key {
 			p.lru = append(p.lru[:i], p.lru[i+1:]...)
@@ -129,7 +151,7 @@ func (p *sessionPool[K]) touchLRU(key K) {
 
 // evictLRU drops the least-recently-used key-pool and destroys its idle
 // sessions. Caller holds p.mu.
-func (p *sessionPool[K]) evictLRU() {
+func (p *sessionPool[K, V]) evictLRU() {
 	if len(p.lru) == 0 {
 		return
 	}
@@ -151,17 +173,17 @@ func (p *sessionPool[K]) evictLRU() {
 
 // ---- fixed-shape recognizer pool (DLA / TSR / OCR-rec) ----
 
-// modelSessKey is the pool key for the fixed-shape models. Unlike the DB
-// detector these models always run at a constant input size, so the tuple is
-// constant per modelDir in practice.
-type modelSessKey struct {
+// sessKey is the pool key for the fixed-shape models. Unlike the DB detector
+// these models always run at a constant input size, so the tuple is constant
+// per modelDir in practice.
+type sessKey struct {
 	modelPath, inName, outName string
 	inShape, outShape          string
 	intraOpThreads             int
 }
 
-func modelSessKeyOf(modelPath, inName string, inShape []int64, outName string, outShape []int64, intraOpThreads int) modelSessKey {
-	return modelSessKey{
+func sessKeyOf(modelPath, inName string, inShape []int64, outName string, outShape []int64, intraOpThreads int) sessKey {
+	return sessKey{
 		modelPath:      modelPath,
 		inName:         inName,
 		outName:        outName,
@@ -181,13 +203,49 @@ func shapeKey(s []int64) string {
 
 // modelSessions is unbounded (maxKeys/maxFree = 0): the fixed-shape key set is
 // tiny, so the degenerate no-eviction case is correct here.
-var modelSessions = newSessionPool[modelSessKey](0, 0)
+var modelSessions = newSessionPool[sessKey, *session](0, 0)
 
 // getModelSession returns a reusable session for the given model signature plus
 // a release func. The caller must call release exactly once.
 func getModelSession(modelPath, inName string, inShape []int64, outName string, outShape []int64, intraOpThreads int) (*session, func(), error) {
-	key := modelSessKeyOf(modelPath, inName, inShape, outName, outShape, intraOpThreads)
+	key := sessKeyOf(modelPath, inName, inShape, outName, outShape, intraOpThreads)
 	return modelSessions.Get(key, func() (*session, error) {
 		return NewSession(modelPath, inName, inShape, outName, outShape, intraOpThreads)
+	})
+}
+
+// ---- dynamic-width OCR-rec pool ----
+
+// recKey is the pool key for the dynamic-width OCR-rec model. The session is
+// pinned to one input width (the input tensor is fixed-shape per width), and
+// the output is auto-allocated at the model's true (width-dependent) sequence
+// length, so the key carries the width but no output shape.
+type recKey struct {
+	modelPath, inName, outName string
+	inShape                    string
+	intraOpThreads             int
+}
+
+func recKeyOf(modelPath, inName string, inShape []int64, outName string, intraOpThreads int) recKey {
+	return recKey{
+		modelPath:      modelPath,
+		inName:         inName,
+		outName:        outName,
+		inShape:        shapeKey(inShape),
+		intraOpThreads: intraOpThreads,
+	}
+}
+
+// recSessions is unbounded (maxKeys/maxFree = 0): a document sees at most a
+// handful of distinct line widths, so the degenerate no-eviction case is
+// correct here.
+var recSessions = newSessionPool[recKey, *recSession](0, 0)
+
+// getRecSession returns a reusable dynamic-width OCR-rec session for the given
+// input width plus a release func. The caller must call release exactly once.
+func getRecSession(modelPath, inName string, inShape []int64, outName string, intraOpThreads int) (*recSession, func(), error) {
+	key := recKeyOf(modelPath, inName, inShape, outName, intraOpThreads)
+	return recSessions.Get(key, func() (*recSession, error) {
+		return newRecSession(modelPath, inName, inShape, outName, intraOpThreads)
 	})
 }
