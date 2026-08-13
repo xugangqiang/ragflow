@@ -315,8 +315,9 @@ func emptyPDFResult(filename string) ParseResult {
 // SetNativeDocAnalyzerFactory) as the fallback used when no external DeepDoc
 // HTTP service is configured. It is nil in builds/tests that do not opt into
 // the native backend, keeping the parser's unit-test build free of the
-// onnxruntime dependency; in that case the empty mock below preserves the
-// pre-in-process default behavior.
+// onnxruntime dependency. When neither backend is available deepDocAnalyzerFromEnv
+// returns an error rather than a mock, so the caller fails loudly (MockDocAnalyzer
+// is test-only infrastructure and must never sit in this production path).
 var nativeAnalyzerFactory func() (deepdoctype.DocAnalyzer, bool)
 
 // SetNativeDocAnalyzerFactory registers the in-process DeepDoc analyzer as the
@@ -326,7 +327,10 @@ func SetNativeDocAnalyzerFactory(f func() (deepdoctype.DocAnalyzer, bool)) {
 	nativeAnalyzerFactory = f
 }
 
-func deepDocAnalyzerFromEnv() deepdoctype.DocAnalyzer {
+// deepDocAnalyzerFromEnv resolves the configured DeepDoc analyzer. It never
+// returns a mock: if no backend is available it returns an error so parsing
+// fails loudly instead of silently producing empty layout/table/OCR results.
+func deepDocAnalyzerFromEnv() (deepdoctype.DocAnalyzer, error) {
 	baseURL := strings.TrimSpace(common.GetEnv(common.EnvDeepDocURL))
 	if baseURL != "" {
 		// An external service is configured: use it and ONLY it. Even if it
@@ -334,27 +338,26 @@ func deepDocAnalyzerFromEnv() deepdoctype.DocAnalyzer {
 		// in-process backend (config-driven isolation).
 		client, err := inference.NewClient(baseURL)
 		if err != nil {
-			return &deepdocpdf.MockDocAnalyzer{Healthy: true}
+			return nil, fmt.Errorf("deepdoc: cannot build client for DEEPDOC_URL %q: %w", baseURL, err)
 		}
 		if !client.Health() {
-			return &deepdocpdf.MockDocAnalyzer{Healthy: true}
+			return nil, fmt.Errorf("deepdoc: DEEPDOC_URL %q is configured but the service is unreachable", baseURL)
 		}
 		// Wrap with Redis-backed cache (1h TTL) so repeated
 		// DLA/TSR/OCR inference on the same image is served from
 		// Redis instead of re-hitting the DeepDoc HTTP service. The
 		// wrapper is a no-op when Redis is not configured (see
 		// internal/deepdoc/parser/pdf/inference/cache.go).
-		return inference.NewDocAnalyzerCache(client, inference.DefaultCacheTTL)
+		return inference.NewDocAnalyzerCache(client, inference.DefaultCacheTTL), nil
 	}
 	// No external service configured → local in-process fallback, if the
-	// native backend registered a serving analyzer. Otherwise the empty mock
-	// keeps behavior identical to the pre-in-process default.
+	// native backend registered a serving analyzer.
 	if nativeAnalyzerFactory != nil {
 		if a, ok := nativeAnalyzerFactory(); ok {
-			return a
+			return a, nil
 		}
 	}
-	return &deepdocpdf.MockDocAnalyzer{Healthy: true}
+	return nil, fmt.Errorf("deepdoc: no DeepDoc backend available: set DEEPDOC_URL to an external service or provide the local in-process backend (ORT + models)")
 }
 
 func pdfParseResultToJSON(filename string, parsed *deepdoctype.ParseResult) ParseResult {
@@ -700,7 +703,11 @@ func parsePDFWithDeepDocOptions(ctx context.Context, filename string, data []byt
 	if len(data) == 0 {
 		return emptyPDFResult(filename)
 	}
-	parsed, err := parseFn(ctx, data, deepDocAnalyzerFromEnv())
+	analyzer, aerr := deepDocAnalyzerFromEnv()
+	if aerr != nil {
+		return ParseResult{Err: aerr}
+	}
+	parsed, err := parseFn(ctx, data, analyzer)
 	if err != nil {
 		return ParseResult{Err: err}
 	}
