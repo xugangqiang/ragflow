@@ -17,8 +17,13 @@
 #                          portable runner (ORT only, no CGO PDF static libs).
 #
 # det is exercised in go-dla-native purely as a Golden-comparison tool
-# (RunDet vs the Python reference), NOT as a production-wired path — there is
-# no parser/pdf native_det seam.
+# (RunDet vs the Python reference). The model-backed DLA/TSR/OCR-rec/det tests
+# here run against dla-native directly (ORT only, no CGO PDF static libs) to
+# keep this portable runner fast. The production-wired path — the in-process
+# DeepDoc backend registered into the parser via SetNativeDocAnalyzerFactory
+# under the native_det build tag — is covered separately by the server smoke
+# test and the native_det integration tier, which additionally provision the
+# static PDF libs (office_oxide/pdfium/pdf_oxide) and lld.
 name: deepdoc-drift
 permissions:
   contents: read
@@ -49,6 +54,7 @@ concurrency:
 
 env:
   MODEL_REPO: InfiniFlow/deepdoc
+  # mirrors internal/common.DeepDocModelFiles (Go in-process backend).
   MODEL_FILES: "det.onnx layout.onnx tsr.onnx rec.onnx ocr.res"
   PYTHON_VERSION: '3.13'
   GO_VERSION: '1.26'
@@ -137,7 +143,7 @@ jobs:
       - name: Install ORT shared lib (CPU)
         id: ort
         run: |
-          python3 -m pip install --quiet "onnxruntime==1.23.2"
+          python3 -m pip install --quiet "onnxruntime==1.23.2"  # mirrors internal/common.DeepDocORTVersion
           echo "ORT_LIB=$(python3 -c 'import glob,onnxruntime,os;d=os.path.join(os.path.dirname(onnxruntime.__file__),"capi");c=[f for f in glob.glob(os.path.join(d,"libonnxruntime.so*")) if "providers" not in f][0];print(c)')" >> "$GITHUB_OUTPUT"
 
       - name: Cache DeepDoc models

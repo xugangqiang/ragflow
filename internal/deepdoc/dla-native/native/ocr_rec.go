@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	ort "github.com/yalue/onnxruntime_go"
 )
@@ -134,8 +135,27 @@ func ocrRecPreprocess(img *Image, resizedW, imgW int) []float32 {
 	return blob
 }
 
-// loadCharDict returns the full decode vocabulary: ["blank"] + <ocr.res lines> + " ".
+// charDictCache memoises loadCharDict by the ocr.res path. RunOCRRec is called
+// once per cropped text line, so without caching every line would re-read and
+// re-parse the same vocabulary file from disk. The decoded slice is only ever
+// read (by ocrRecCTCDecode), never mutated, so sharing it across goroutines is
+// safe.
+var charDictCache sync.Map // map[string][]string, keyed by ocr.res path
+
+// loadCharDict returns the decode vocabulary: ["blank"] + <ocr.res lines> + " ".
 func loadCharDict(path string) ([]string, error) {
+	if v, ok := charDictCache.Load(path); ok {
+		return v.([]string), nil
+	}
+	chars, err := readCharDict(path)
+	if err != nil {
+		return nil, err
+	}
+	charDictCache.Store(path, chars)
+	return chars, nil
+}
+
+func readCharDict(path string) ([]string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err

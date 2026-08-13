@@ -83,9 +83,12 @@ var detSessions = newSessionPool[detSessKey, *session](detMaxShapePools, detShap
 func getDetSession(modelPath string, rh, rw int64) (*session, func(), error) {
 	key := detSessKey{modelPath, rh, rw}
 	return detSessions.Get(key, func() (*session, error) {
-		// Single-threaded (1): a multi-threaded DB detector Run leaves worker
-		// threads settling while the postprocess invokes OpenCV findContours,
-		// whose parallel_for_ then under-runs and returns contracted contours.
+		// intraOpThreads=1 is preserved as-is for the verified det parity
+		// (mean|Δ|≈4e-5 vs the Python reference). The historical comment that
+		// this avoids competing OpenCV findContours worker threads does NOT
+		// apply to this pure-Go port, where the postprocess runs fully
+		// synchronously after RunWithOptions returns. Re-confirm parity on the
+		// det fixtures before switching to 0 (all cores) to match DLA/TSR.
 		return NewSession(modelPath, "x",
 			[]int64{1, 3, rh, rw}, "sigmoid_0.tmp_0",
 			[]int64{1, 1, rh, rw}, 1)
@@ -125,7 +128,7 @@ func RunDet(ctx context.Context, modelDir string, img *Image) (DetResult, error)
 		}
 	}
 
-	boxes, _ := dbPostProcess(p, rh, rw, sh, sw)
+	boxes := dbPostProcess(p, rh, rw, sh, sw)
 	return DetResult{Boxes: boxes}, nil
 }
 
@@ -140,9 +143,7 @@ func round32(v int) int {
 // matching deepdoc's TextDetector, which normalizes the original RGB image
 // directly before ToCHWImage. Channel 0 of the blob is therefore R, exactly
 // as deepdoc produces it.
-func normalizeCHW(rgb []byte, h, w, srcW, srcH int) []float32 {
-	_ = srcW
-	_ = srcH
+func normalizeCHW(rgb []byte, h, w int) []float32 {
 	blob := make([]float32, 3*h*w)
 	for y := 0; y < h; y++ {
 		for x := 0; x < w; x++ {

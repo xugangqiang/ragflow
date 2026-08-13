@@ -236,10 +236,22 @@ func recKeyOf(modelPath, inName string, inShape []int64, outName string, intraOp
 	}
 }
 
-// recSessions is unbounded (maxKeys/maxFree = 0): a document sees at most a
-// handful of distinct line widths, so the degenerate no-eviction case is
-// correct here.
-var recSessions = newSessionPool[recKey, *recSession](0, 0)
+const (
+	// recMaxShapePools caps distinct (modelPath, width) pools. Unlike the
+	// fixed-shape DLA/TSR models, a long-running server ingesting many
+	// differently-sized text lines would otherwise pin one pooled session (and
+	// its ORT tensors) per distinct width forever. The shared sessionPool
+	// evicts the least-recently-used width pool (Destroying its idle sessions)
+	// once the cap is exceeded, bounding memory.
+	recMaxShapePools = 64
+	// recShapePoolCap caps idle sessions retained per width; extras are
+	// Destroyed on release instead of pooled.
+	recShapePoolCap = 4
+)
+
+// recSessions is the dynamic-width OCR-rec pool: bounded at recMaxShapePools
+// distinct width-pools, each retaining up to recShapePoolCap idle sessions.
+var recSessions = newSessionPool[recKey, *recSession](recMaxShapePools, recShapePoolCap)
 
 // getRecSession returns a reusable dynamic-width OCR-rec session for the given
 // input width plus a release func. The caller must call release exactly once.

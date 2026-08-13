@@ -154,7 +154,8 @@ func cacheKeyOrEmpty(method string, img image.Image) string {
 
 // DLA see doctype.DocAnalyzer.
 func (c *DocAnalyzerCache) DLA(ctx context.Context, img image.Image) ([]doctype.DLARegion, error) {
-	if key := cacheKeyOrEmpty("dla", img); key != "" && c.store.Enabled() {
+	key := cacheKeyOrEmpty("dla", img)
+	if key != "" && c.store.Enabled() {
 		var cached []doctype.DLARegion
 		if c.store.GetObj(ctx, key, &cached) {
 			return cached, nil
@@ -164,7 +165,7 @@ func (c *DocAnalyzerCache) DLA(ctx context.Context, img image.Image) ([]doctype.
 	if err != nil || img == nil {
 		return out, err
 	}
-	if key := cacheKeyOrEmpty("dla", img); key != "" && c.store.Enabled() {
+	if key != "" && c.store.Enabled() {
 		c.store.SetObj(ctx, key, out, c.ttl)
 	}
 	return out, nil
@@ -172,7 +173,8 @@ func (c *DocAnalyzerCache) DLA(ctx context.Context, img image.Image) ([]doctype.
 
 // TSR see doctype.DocAnalyzer.
 func (c *DocAnalyzerCache) TSR(ctx context.Context, img image.Image) ([]doctype.TSRCell, error) {
-	if key := cacheKeyOrEmpty("tsr", img); key != "" && c.store.Enabled() {
+	key := cacheKeyOrEmpty("tsr", img)
+	if key != "" && c.store.Enabled() {
 		var cached []doctype.TSRCell
 		if c.store.GetObj(ctx, key, &cached) {
 			return cached, nil
@@ -182,7 +184,7 @@ func (c *DocAnalyzerCache) TSR(ctx context.Context, img image.Image) ([]doctype.
 	if err != nil || img == nil {
 		return out, err
 	}
-	if key := cacheKeyOrEmpty("tsr", img); key != "" && c.store.Enabled() {
+	if key != "" && c.store.Enabled() {
 		c.store.SetObj(ctx, key, out, c.ttl)
 	}
 	return out, nil
@@ -190,7 +192,8 @@ func (c *DocAnalyzerCache) TSR(ctx context.Context, img image.Image) ([]doctype.
 
 // OCRDetect see doctype.DocAnalyzer.
 func (c *DocAnalyzerCache) OCRDetect(ctx context.Context, img image.Image) ([]doctype.OCRBox, error) {
-	if key := cacheKeyOrEmpty("ocr_detect", img); key != "" && c.store.Enabled() {
+	key := cacheKeyOrEmpty("ocr_detect", img)
+	if key != "" && c.store.Enabled() {
 		var cached []doctype.OCRBox
 		if c.store.GetObj(ctx, key, &cached) {
 			return cached, nil
@@ -200,7 +203,7 @@ func (c *DocAnalyzerCache) OCRDetect(ctx context.Context, img image.Image) ([]do
 	if err != nil || img == nil {
 		return out, err
 	}
-	if key := cacheKeyOrEmpty("ocr_detect", img); key != "" && c.store.Enabled() {
+	if key != "" && c.store.Enabled() {
 		c.store.SetObj(ctx, key, out, c.ttl)
 	}
 	return out, nil
@@ -208,7 +211,8 @@ func (c *DocAnalyzerCache) OCRDetect(ctx context.Context, img image.Image) ([]do
 
 // OCRRecognize see doctype.DocAnalyzer.
 func (c *DocAnalyzerCache) OCRRecognize(ctx context.Context, img image.Image) ([]doctype.OCRText, error) {
-	if key := cacheKeyOrEmpty("ocr_recognize", img); key != "" && c.store.Enabled() {
+	key := cacheKeyOrEmpty("ocr_recognize", img)
+	if key != "" && c.store.Enabled() {
 		var cached []doctype.OCRText
 		if c.store.GetObj(ctx, key, &cached) {
 			return cached, nil
@@ -218,7 +222,7 @@ func (c *DocAnalyzerCache) OCRRecognize(ctx context.Context, img image.Image) ([
 	if err != nil || img == nil {
 		return out, err
 	}
-	if key := cacheKeyOrEmpty("ocr_recognize", img); key != "" && c.store.Enabled() {
+	if key != "" && c.store.Enabled() {
 		c.store.SetObj(ctx, key, out, c.ttl)
 	}
 	return out, nil

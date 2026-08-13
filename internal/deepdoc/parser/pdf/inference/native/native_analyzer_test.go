@@ -29,6 +29,29 @@ import (
 //	  MODEL_DIR=/path/to/deepdoc \
 //	  go test -tags "native_det integration" -run TestNativeAnalyzerInProcess \
 //	  ./internal/deepdoc/parser/pdf/inference/native/...
+// TestNativeAnalyzerUninitializedNegative locks the fail-fast contract the
+// server depends on (see registerNativeDeepDoc): before Register wires ONNX
+// Runtime, the backend must report not-serving and NewAnalyzer must refuse to
+// build. It exercises the negative branches of Serving/NewAnalyzer/Health that
+// the happy-path test never hits. It makes no InitORT call, so it is safe to
+// run first (ORT is process-global) and even when ORT_LIB/MODEL_DIR are unset.
+func TestNativeAnalyzerUninitializedNegative(t *testing.T) {
+	if Serving() {
+		t.Fatal("Serving() reported true before any Register; backend must be inert until initialized")
+	}
+	modelDir := os.Getenv("MODEL_DIR")
+	if modelDir == "" {
+		modelDir = filepath.Join("..", "..", "..", "..", "rag", "res", "deepdoc")
+	}
+	if _, err := NewAnalyzer(modelDir); err == nil {
+		t.Error("NewAnalyzer succeeded before ONNX Runtime init; expected error")
+	}
+	a := &NativeAnalyzer{modelDir: modelDir}
+	if a.Health() {
+		t.Error("Health() reported healthy before ONNX Runtime init; expected false")
+	}
+}
+
 func TestNativeAnalyzerInProcess(t *testing.T) {
 	ortLib := os.Getenv("ORT_LIB")
 	modelDir := os.Getenv("MODEL_DIR")

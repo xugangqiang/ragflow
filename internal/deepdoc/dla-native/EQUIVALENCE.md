@@ -37,7 +37,7 @@ go test -tags integration -run 'TestEquivalenceReport|TestDetMembershipAllFixtur
 
 Models are fetched once with `ragflow_deps/download_deps.py` (a snapshot of
 `InfiniFlow/deepdoc`). The ONNX Runtime shared library is `libonnxruntime.so`
-(any 1.23.x build; validated with 1.23.2, ABI-compatible with the
+(any 1.23.x build; validated with 1.23.2 (see internal/common.DeepDocORTVersion), ABI-compatible with the
 `onnxruntime_go` v1.23.0 binding — the same line the Python goldens were
 generated with, so validated parity is preserved).
 
@@ -81,7 +81,7 @@ Both effects are **deterministic and reproducible**, not random accuracy loss.
 3. **Coverage confirmation required.** Go implements {det, dla, tsr, ocr}.
    Confirm the Python path being replaced uses only these recognizers (e.g. a
    separate table-cell recognizer would not be covered).
-4. **Runtime version.** Validated with onnxruntime 1.23.2; re-verify if the
+4. **Runtime version.** Validated with onnxruntime 1.23.2 (see internal/common.DeepDocORTVersion); re-verify if the
    production Python uses a different ORT version (stable within 1.23.x).
 5. **HTTP server shape.** If the goal is a standalone HTTP service mirroring
    `deepdoc_server`, that surface is not built — only the in-process library and

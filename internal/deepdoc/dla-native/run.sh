@@ -8,6 +8,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
+# Default ORT_LIB pins native onnxruntime 1.23.2 (mirrors internal/common.DeepDocORTVersion).
 ORT_LIB="${ORT_LIB:-/home/shenyushi/workspace/ragflow/.venv/lib/python3.12/site-packages/onnxruntime/capi/libonnxruntime.so.1.23.2}"
 MODEL_DIR="${MODEL_DIR:-/home/shenyushi/workspace/ragflow/rag/res/deepdoc}"
 PY="${PY:-/home/shenyushi/workspace/ragflow/.venv/bin/python}"

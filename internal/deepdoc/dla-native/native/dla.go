@@ -34,7 +34,13 @@ type DLAResult struct {
 }
 
 var (
-	// yoloDlaLabels mirrors LayoutRecognizer4YOLOv10.labels (10 classes).
+	// yoloDlaLabels mirrors LayoutRecognizer4YOLOv10.labels (10 classes). It
+	// must stay element-for-element identical to inference.DefaultDLALabels
+	// (same order, same duplicate indices 4/7/9) — that list is the wire
+	// contract the in-process detector serialises through. The two live in
+	// separate modules so they cannot share one constant; keep them in sync by
+	// hand. Case here is irrelevant: dlaPostprocess lowercases each entry
+	// before looking it up in dlaClassMap.
 	yoloDlaLabels = []string{
 		"title", "Text", "Reference", "Figure", "Figure caption",
 		"Table", "Table caption", "Table caption", "Equation", "Figure caption",
@@ -169,6 +175,14 @@ func dlaPostprocess(out []float32, sf [4]float32) DLAResult {
 	// Re-map class ids through the OSS label->Go index map.
 	mapped := res.Boxes[:0]
 	for _, b := range res.Boxes {
+		// Guard the raw YOLO class index before the slice lookup: the model
+		// output column is the integer class id, but an out-of-range or
+		// negative value would panic on yoloDlaLabels[b.Class] and take the
+		// server process down. Drop the box instead, mirroring the bestCls
+		// bounds guard in tsr.go.
+		if b.Class < 0 || b.Class >= len(yoloDlaLabels) {
+			continue
+		}
 		label := yoloDlaLabels[b.Class]
 		goCls, ok := dlaClassMap[strings.ToLower(label)]
 		if !ok {

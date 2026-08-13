@@ -53,6 +53,12 @@ func NewClient(baseURL string) (*Client, error) {
 // DefaultDLALabels returns the 10-class DLA taxonomy matching Python's
 // deepdoc/vision/dla_cli.py:10-21.  Duplicates at indices 4, 7, 9 are
 // kept verbatim for backward compatibility with existing inference servers.
+//
+// This list is the wire contract: the in-process detector (dla-native/native)
+// serialises its DLA output through these same indices, and its internal
+// yoloDlaLabels must stay element-for-element identical to this (same order,
+// same duplicate indices 4/7/9). The two live in separate modules, so they
+// cannot share one Go constant; keep them in sync by hand.
 func DefaultDLALabels() []string {
 	return []string{
 		pdf.LayoutTypeTitle, pdf.LayoutTypeText, pdf.LayoutTypeReference,
@@ -135,9 +141,11 @@ func (c *Client) TSR(ctx context.Context, cropped image.Image) ([]pdf.TSRCell, e
 	return cells, nil
 }
 
-// ocrDetectResponse matches DeepDoc /predict/ocr?operator=det output:
+// ocrDetectResponse matches DeepDoc /predict/ocr?operator=det output.
+// The nested arrays are [page][batch][box][point][coord], so a quad is
+// output[page][batch][box] = [[x0,y0],[x1,y1],[x2,y2],[x3,y3]].
 //
-//	{"output": [[[[[[x0,y0],[x1,y1],[x2,y2],[x3,y3]], ...]]]]}
+//	{"output": [[[[[x0,y0],[x1,y1],[x2,y2],[x3,y3]], ...]]]]}
 type ocrDetectResponse struct {
 	Output [][][][][]float64 `json:"output"`
 }
@@ -177,8 +185,8 @@ func (c *Client) OCRDetect(ctx context.Context, cropped image.Image) ([]pdf.OCRB
 
 	var boxes []pdf.OCRBox
 	for _, outer := range result.Output {
-		for _, page := range outer {
-			for _, box := range page {
+		for _, batch := range outer {
+			for _, box := range batch {
 				if len(box) < 4 {
 					continue
 				}
@@ -207,8 +215,8 @@ func (c *Client) OCRRecognize(ctx context.Context, cropped image.Image) ([]pdf.O
 	}
 	var texts []pdf.OCRText
 	for _, page := range result.Output {
-		for _, item := range page {
-			for _, pair := range item {
+		for _, batch := range page {
+			for _, pair := range batch {
 				if len(pair) >= 2 {
 					text, _ := pair[0].(string)
 					conf, _ := pair[1].(float64)
@@ -226,7 +234,10 @@ func (c *Client) Health() bool {
 	if err != nil {
 		return false
 	}
-	resp.Body.Close()
+	defer resp.Body.Close()
+	// Drain before closing so net/http can reuse the connection on its keep-
+	// alive pool instead of tearing it down on every health probe.
+	_, _ = io.Copy(io.Discard, resp.Body)
 	return resp.StatusCode == 200
 }
 
@@ -270,7 +281,13 @@ func (c *Client) post(ctx context.Context, endpoint string, imgData []byte, file
 
 		if resp.StatusCode == 200 {
 			defer resp.Body.Close()
-			return struct{}{}, json.NewDecoder(io.LimitReader(resp.Body, 64<<20)).Decode(result)
+			if err := json.NewDecoder(io.LimitReader(resp.Body, 64<<20)).Decode(result); err != nil {
+				// A 200 with an unparseable body is not transient: retrying
+				// would only re-run expensive inference on the backend and
+				// fail again, amplifying load. Treat it as terminal.
+				return struct{}{}, backoff.Permanent(fmt.Errorf("decode %s: %w", endpoint, err))
+			}
+			return struct{}{}, nil
 		}
 
 		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))

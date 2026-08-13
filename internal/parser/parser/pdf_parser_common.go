@@ -315,9 +315,9 @@ func emptyPDFResult(filename string) ParseResult {
 // SetNativeDocAnalyzerFactory) as the fallback used when no external DeepDoc
 // HTTP service is configured. It is nil in builds/tests that do not opt into
 // the native backend, keeping the parser's unit-test build free of the
-// onnxruntime dependency. When neither backend is available deepDocAnalyzerFromEnv
-// returns an error rather than a mock, so the caller fails loudly (MockDocAnalyzer
-// is test-only infrastructure and must never sit in this production path).
+// onnxruntime dependency. The resolution policy itself lives in
+// resolveDocAnalyzer, which takes the factory as an explicit parameter so the
+// logic is unit-testable without mutating this global.
 var nativeAnalyzerFactory func() (deepdoctype.DocAnalyzer, bool)
 
 // SetNativeDocAnalyzerFactory registers the in-process DeepDoc analyzer as the
@@ -327,11 +327,26 @@ func SetNativeDocAnalyzerFactory(f func() (deepdoctype.DocAnalyzer, bool)) {
 	nativeAnalyzerFactory = f
 }
 
-// deepDocAnalyzerFromEnv resolves the configured DeepDoc analyzer. It never
-// returns a mock: if no backend is available it returns an error so parsing
-// fails loudly instead of silently producing empty layout/table/OCR results.
+// deepDocAnalyzerFromEnv resolves the configured DeepDoc analyzer from the
+// process environment. It is a thin wrapper over resolveDocAnalyzer that feeds
+// the runtime DEEPDOC_URL and the registered in-process factory.
 func deepDocAnalyzerFromEnv() (deepdoctype.DocAnalyzer, error) {
-	baseURL := strings.TrimSpace(common.GetEnv(common.EnvDeepDocURL))
+	return resolveDocAnalyzer(common.GetEnv(common.EnvDeepDocURL), nativeAnalyzerFactory)
+}
+
+// resolveDocAnalyzer applies the DeepDoc backend policy:
+//   - an external DEEPDOC_URL is used exclusively and fails loudly if
+//     unreachable (never silently falls back to the in-process backend);
+//   - otherwise the in-process factory is used as the local fallback;
+//   - if neither is available it returns an error so parsing fails loudly
+//     instead of silently producing empty layout/table/OCR results.
+//
+// It takes its inputs explicitly (baseURL + factory) rather than reading
+// globals, so the policy is unit-testable in isolation. It never returns a
+// mock: if no backend is available it returns an error (MockDocAnalyzer is
+// test-only infrastructure and must never sit in this production path).
+func resolveDocAnalyzer(baseURL string, factory func() (deepdoctype.DocAnalyzer, bool)) (deepdoctype.DocAnalyzer, error) {
+	baseURL = strings.TrimSpace(baseURL)
 	if baseURL != "" {
 		// An external service is configured: use it and ONLY it. Even if it
 		// is unreachable we must not silently fall back to the local
@@ -352,8 +367,8 @@ func deepDocAnalyzerFromEnv() (deepdoctype.DocAnalyzer, error) {
 	}
 	// No external service configured → local in-process fallback, if the
 	// native backend registered a serving analyzer.
-	if nativeAnalyzerFactory != nil {
-		if a, ok := nativeAnalyzerFactory(); ok {
+	if factory != nil {
+		if a, ok := factory(); ok {
 			return a, nil
 		}
 	}

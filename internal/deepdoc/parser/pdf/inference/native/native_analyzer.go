@@ -19,18 +19,13 @@ import (
 	"context"
 	"fmt"
 	"image"
-	"os"
-	"path/filepath"
 
 	"dla-native/native"
+	"ragflow/internal/common"
 	"ragflow/internal/deepdoc/parser/pdf/inference"
 	deepdoctype "ragflow/internal/deepdoc/parser/type"
 	"ragflow/internal/parser/parser"
 )
-
-// requiredModels are the files the in-process backend needs. They mirror the
-// HuggingFace InfiniFlow/deepdoc snapshot the Python service ships.
-var requiredModels = []string{"layout.onnx", "tsr.onnx", "det.onnx", "rec.onnx", "ocr.res"}
 
 // registeredModelDir is the model directory recorded by Register, used by
 // Serving for startup diagnostics.
@@ -54,10 +49,8 @@ func NewAnalyzer(modelDir string) (*NativeAnalyzer, error) {
 	if !native.Initialized() {
 		return nil, fmt.Errorf("deepdoc native: onnxruntime not initialized")
 	}
-	for _, m := range requiredModels {
-		if _, err := os.Stat(filepath.Join(modelDir, m)); err != nil {
-			return nil, fmt.Errorf("deepdoc native: missing model %s: %w", m, err)
-		}
+	if !common.HasModelFiles(modelDir) {
+		return nil, fmt.Errorf("deepdoc native: missing required model files in %s", modelDir)
 	}
 	return &NativeAnalyzer{modelDir: modelDir}, nil
 }
@@ -86,19 +79,22 @@ func Register(modelDir, ortLib string) error {
 	return nil
 }
 
-// Serving reports whether the backend can currently serve: ONNX Runtime is
-// initialized and every required model file is present. It is used for
-// startup logging only; the parser's factory already gates on the same check.
-func Serving() bool {
+// canServe reports whether the backend can serve from modelDir: ONNX Runtime
+// is initialized and every required model file is present. Serving and
+// NativeAnalyzer.Health share this exact check; they differ only in which
+// model directory they probe (the process-registered one vs the instance's).
+func canServe(modelDir string) bool {
 	if !native.Initialized() {
 		return false
 	}
-	for _, m := range requiredModels {
-		if _, err := os.Stat(filepath.Join(registeredModelDir, m)); err != nil {
-			return false
-		}
-	}
-	return true
+	return common.HasModelFiles(modelDir)
+}
+
+// Serving reports whether the backend can currently serve from the
+// process-registered model directory. Used for startup logging only; the
+// parser's factory already gates on the same check via canServe.
+func Serving() bool {
+	return canServe(registeredModelDir)
 }
 
 // DLA runs layout detection on a page image.
@@ -184,15 +180,9 @@ func (a *NativeAnalyzer) OCRRecognize(ctx context.Context, img image.Image) ([]d
 	return []deepdoctype.OCRText{{Text: res.Text, Confidence: float64(res.Score)}}, nil
 }
 
-// Health reports whether ORT is initialized and every model file is present.
+// Health reports whether the backend can serve from this analyzer's model
+// directory: ONNX Runtime is initialized and every required model file is
+// present. It delegates to canServe.
 func (a *NativeAnalyzer) Health() bool {
-	if !native.Initialized() {
-		return false
-	}
-	for _, m := range requiredModels {
-		if _, err := os.Stat(filepath.Join(a.modelDir, m)); err != nil {
-			return false
-		}
-	}
-	return true
+	return canServe(a.modelDir)
 }

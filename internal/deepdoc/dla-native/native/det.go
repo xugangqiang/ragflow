@@ -52,11 +52,11 @@ func detPreprocess(img *Image) (blob []float32, resizeH, resizeW, srcH, srcW int
 	// amplified into score-crossing orphans.
 	rgb := img.Pix
 	resized := bilinearResize(rgb, w, h, resizeW, resizeH)
-	return normalizeCHW(resized, resizeH, resizeW, srcW, srcH), resizeH, resizeW, srcH, srcW
+	return normalizeCHW(resized, resizeH, resizeW), resizeH, resizeW, srcH, srcW
 }
 
 // dbPostProcess mirrors DBPostProcess.boxes_from_bitmap + TextDetector.filter_tag_det_res.
-func dbPostProcess(pred []float32, h, w, srcH, srcW int) ([]DetBox, []float32) {
+func dbPostProcess(pred []float32, h, w, srcH, srcW int) []DetBox {
 	// Binary segmentation mask.
 	seg := make([]bool, h*w)
 	for i, v := range pred {
@@ -101,7 +101,6 @@ func dbPostProcess(pred []float32, h, w, srcH, srcW int) ([]DetBox, []float32) {
 	}
 
 	boxes := make([]DetBox, 0, len(comps))
-	scores := make([]float32, 0, len(comps))
 	for _, comp := range comps {
 		hull := convexHull(comp)
 		if len(hull) < 3 {
@@ -136,13 +135,12 @@ func dbPostProcess(pred []float32, h, w, srcH, srcW int) ([]DetBox, []float32) {
 			continue
 		}
 		boxes = append(boxes, DetBox{Pts: q, Score: score})
-		scores = append(scores, score)
 	}
 
 	// filter_tag_det_res: clockwise order + integer clip + drop tiny boxes.
 	dlaFlushPreUnclip()
 	dlaFlushCandidates()
-	return filterTagDetRes(boxes, srcH, srcW), scores
+	return filterTagDetRes(boxes, srcH, srcW)
 }
 
 // findContours extracts foreground contours via Moore-neighbour (Suzuki-Abe

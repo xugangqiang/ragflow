@@ -65,15 +65,22 @@ type session struct {
 
 // NewSession opens modelPath. inShape/outShape describe the fixed tensor
 // dimensions; outSize is the total element count of the output tensor.
-// intraOpThreads controls ONNX Runtime's intra-op parallelism. The DB detector
-// must pass 1 (single-threaded): a multi-threaded Run leaves worker threads
-// settling while the detector's postprocess invokes OpenCV's findContours,
-// whose parallel_for_ then under-runs and returns contracted contours. The
-// other recognizers (DLA/TSR/OCR-rec) do no contour extraction in the Run path,
-// so they pass 0 to use all cores — matching deepdoc's Python onnxruntime
-// (intra_op_num_threads defaults to 0 = all cores). The parallel reduction
-// order must match Python's for bit-stable parity; a single-threaded run folds
-// reductions in a different order and drifts from the Python reference.
+// intraOpThreads controls ONNX Runtime's intra-op parallelism. DLA/TSR/OCR-rec
+// pass 0 to use all cores — matching deepdoc's Python onnxruntime
+// (intra_op_num_threads defaults to 0 = all cores); their Run path does no
+// contour extraction, so the parallel reduction order matches Python for
+// bit-stable parity.
+//
+// The DB text detector is currently pinned to 1 (single-threaded). NOTE: the
+// historical rationale for this — that a multi-threaded Run would leave ONNX
+// Runtime worker threads settling while the postprocess's OpenCV findContours
+// ran its parallel_for_ and under-ran — does NOT apply to this pure-Go port.
+// Here the postprocess (hand-rolled findContours / boxScoreFast / fillPoly) is
+// fully synchronous and only runs after RunWithOptions returns, so there is no
+// thread competition with the detector. The pin is preserved as-is because the
+// det pred map was verified at intraOpThreads=1 (mean|Δ|≈4e-5 vs the Python
+// reference); flipping it to 0 must be re-confirmed on the det integration
+// fixtures before landing, since the reduction order differs.
 // InitORT must have been called first.
 func NewSession(modelPath, inName string, inShape []int64, outName string, outShape []int64, intraOpThreads int) (*session, error) {
 	in := make([]float32, prod(inShape))
@@ -94,8 +101,9 @@ func NewSession(modelPath, inName string, inShape []int64, outName string, outSh
 		return nil, err
 	}
 	// intraOpThreads == 0 → all cores (mirrors Python's onnxruntime default);
-	// the DB detector passes 1 to keep findContours free of competing worker
-	// threads (see NewSession doc above).
+	// the DB detector passes 1, preserved as-is for verified det parity (see
+	// NewSession doc above — the old findContours/parallel_for_ rationale does
+	// not apply to this pure-Go port).
 	if err := opts.SetIntraOpNumThreads(intraOpThreads); err != nil {
 		opts.Destroy()
 		inT.Destroy()

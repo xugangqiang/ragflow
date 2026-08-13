@@ -18,6 +18,7 @@ package common
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -31,111 +32,112 @@ func GetEnvSmall(key string) string {
 
 // environment variables
 const (
-	EnvDeepDocURL                        = "DEEPDOC_URL"
-	EnvTensorrtDLAServer                 = "TENSORRT_DLA_SVR"
-	EnvRAGFlowTTSCacheTTLSeconds         = "RAGFLOW_TTS_CACHE_TTL_SECONDS"
-	EnvComponentExecTimeout              = "COMPONENT_EXEC_TIMEOUT"
-	EnvDocEngine                         = "DOC_ENGINE"
-	EnvMaxFileNumPerUser                 = "MAX_FILE_NUM_PER_USER"
-	EnvRAGFlowDictPath                   = "RAGFLOW_DICT_PATH"
-	EnvDefaultSuperuserEmail             = "DEFAULT_SUPERUSER_EMAIL"
-	EnvDefaultSuperuserNickname          = "DEFAULT_SUPERUSER_NICKNAME"
-	EnvDefaultSuperuserPassword          = "DEFAULT_SUPERUSER_PASSWORD"
-	EnvDBType                            = "DB_TYPE"
-	EnvDevice                            = "DEVICE"
-	EnvStorageImpl                       = "STORAGE_IMPL"
-	EnvStageHandCacheCap                 = "STAGEHAND_CACHE_CAP"
-	EnvStageHandCacheTTLSeconds          = "STAGEHAND_CACHE_TTL_SECONDS"
-	EnvStageHandCacheSweepInterval       = "STAGEHAND_CACHE_SWEEP_INTERVAL"
-	EnvStageHandExtractResultFile        = "STAGEHAND_EXTRACT_RESULT_FILE"
-	EnvAgentRunAccessKeyID               = "AGENTRUN_ACCESS_KEY_ID"
-	EnvAgentRunAccessKeySecret           = "AGENTRUN_ACCESS_KEY_SECRET"
-	EnvAgentRunAccountID                 = "AGENTRUN_ACCOUNT_ID"
-	EnvAgentRunRegion                    = "AGENTRUN_REGION"
-	EnvAgentRunTemplateName              = "AGENTRUN_TEMPLATE_NAME"
-	EnvAgentRunExecuteHost               = "AGENTRUN_EXECUTE_HOST"
-	EnvAgentRunTimeout                   = "AGENTRUN_TIMEOUT"
-	EnvE2BTemplate                       = "E2B_TEMPLATE"
-	EnvE2BTemplateName                   = "E2B_TEMPLATE_NAME"
-	EnvE2BTimeout                        = "E2B_TIMEOUT"
-	EnvE2BAPIURL                         = "E2B_API_URL"
-	EnvE2BApiKey                         = "E2B_API_KEY"
-	EnvE2BAccessToken                    = "E2B_ACCESS_TOKEN"
-	EnvE2BDomain                         = "E2B_DOMAIN"
-	EnvTenkiApiKey                       = "TENKI_API_KEY"
-	EnvTenkiAPIURL                       = "TENKI_API_URL"
-	EnvTenkiImage                        = "TENKI_IMAGE"
-	EnvTenkiTimeout                      = "TENKI_TIMEOUT"
-	EnvTenkiAllowOutbound                = "TENKI_ALLOW_OUTBOUND"
-	EnvLocalPythonBin                    = "LOCAL_PYTHON_BIN"
-	EnvLocalNodeBin                      = "LOCAL_NODE_BIN"
-	EnvLocalWorkDir                      = "LOCAL_WORK_DIR"
-	EnvLocalTimeout                      = "LOCAL_TIMEOUT"
-	EnvLocalMaxMemoryMB                  = "LOCAL_MAX_MEMORY_MB"
-	EnvLocalMaxOutputBytes               = "LOCAL_MAX_OUTPUT_BYTES"
-	EnvLocalMaxArtifacts                 = "LOCAL_MAX_ARTIFACTS"
-	EnvLocalMaxArtifactBytes             = "LOCAL_MAX_ARTIFACT_BYTES"
-	EnvPath                              = "PATH"
-	EnvOMPNumThreads                     = "OMP_NUM_THREADS"
-	EnvOpenBLASNumThreads                = "OPENBLAS_NUM_THREADS"
-	EnvMKLNumThreads                     = "MKL_NUM_THREADS"
-	EnvVECLIBMaximumThreads              = "VECLIB_MAXIMUM_THREADS"
-	EnvNumEXPRNumThreads                 = "NUMEXPR_NUM_THREADS"
-	EnvXDGCacheHome                      = "XDG_CACHE_HOME"
-	EnvOpenAIApiKey                      = "OPENAI_API_KEY"
-	EnvOpenAIBaseURL                     = "OPENAI_BASE_URL"
-	EnvOpenAIModel                       = "OPENAI_MODEL"
-	EnvStageHandExtractSchemaJSON        = "STAGEHAND_EXTRACT_SCHEMA_JSON"
-	EnvSandboxProviderType               = "SANDBOX_PROVIDER_TYPE"
-	EnvSandboxExecutorManagerURL         = "SANDBOX_EXECUTOR_MANAGER_URL"
-	EnvSandboxExecutorManagerTimeout     = "SANDBOX_EXECUTOR_MANAGER_TIMEOUT"
-	EnvSandboxExecutorManagerPoolSize    = "SANDBOX_EXECUTOR_MANAGER_POOL_SIZE"
-	EnvSandboxExecutorManagerMaxRetries  = "SANDBOX_EXECUTOR_MANAGER_MAX_RETRIES"
-	EnvSandboxBasePythonImage            = "SANDBOX_BASE_PYTHON_IMAGE"
-	EnvSandboxBaseNodeJSImage            = "SANDBOX_BASE_NODEJS_IMAGE"
-	EnvSandboxArtifactBucket             = "SANDBOX_ARTIFACT_BUCKET"
-	EnvSSHHost                           = "SSH_HOST"
-	EnvSSHPort                           = "SSH_PORT"
-	EnvSSHUsername                       = "SSH_USERNAME"
-	EnvSSHPassword                       = "SSH_PASSWORD"
-	EnvSSHPrivateKey                     = "SSH_PRIVATE_KEY"
-	EnvSSHPrivateKeyPath                 = "SSH_PRIVATE_KEY_PATH"
-	EnvSSHPassphrase                     = "SSH_PASSPHRASE"
-	EnvSSHPythonBin                      = "SSH_PYTHON_BIN"
-	EnvSSHNodeBin                        = "SSH_NODE_BIN"
-	EnvSSHWorkDir                        = "SSH_WORK_DIR"
-	EnvSSHTimeout                        = "SSH_TIMEOUT"
-	EnvSSHMaxOutputBytes                 = "SSH_MAX_OUTPUT_BYTES"
-	EnvSSHMaxArtifacts                   = "SSH_MAX_ARTIFACTS"
-	EnvSSHMaxArtifactBytes               = "SSH_MAX_ARTIFACT_BYTES"
-	EnvSSHKnownHosts                     = "SSH_KNOWN_HOSTS"
-	EnvTrinoUseTls                       = "TRINO_USE_TLS"
-	EnvSSHEnableAPIURL                   = "SSH_ENABLE_API_URL"
-	EnvAllowAnyHost                      = "ALLOW_ANY_HOST"
-	EnvTavilyApiKey                      = "TAVILY_API_KEY"
-	EnvQueritAPIKey                      = "QUERIT_API_KEY"
-	EnvHome                              = "HOME"
-	EnvUserProfile                       = "USERPROFILE"
-	EnvHttpHTTPProxy                     = "http_proxy"
-	EnvHttpHTTPSProxy                    = "https_proxy"
-	EnvBatchSingle                       = "BATCH_SINGLE"
-	EnvBatchCount                        = "BATCH_COUNT"
-	EnvBatchLogLevel                     = "BATCH_LOG_LEVEL"
-	EnvBatchSkipOCR                      = "BATCH_SKIP_OCR"
-	EnvBatchCompareOnly                  = "BATCH_COMPARE_ONLY"
-	EnvBatchCompareFilter                = "BATCH_COMPARE_FILTER"
-	EnvBatchCompareCSV                   = "BATCH_COMPARE_CSV"
-	EnvPYOCRSuffix                       = "PY_OCR_SUFFIX"
-	EnvOSSDeepDocURL                     = "OSSDEEPDOC_URL"
+	EnvDeepDocURL                       = "DEEPDOC_URL"
+	EnvTensorrtDLAServer                = "TENSORRT_DLA_SVR"
+	EnvRAGFlowTTSCacheTTLSeconds        = "RAGFLOW_TTS_CACHE_TTL_SECONDS"
+	EnvComponentExecTimeout             = "COMPONENT_EXEC_TIMEOUT"
+	EnvDocEngine                        = "DOC_ENGINE"
+	EnvMaxFileNumPerUser                = "MAX_FILE_NUM_PER_USER"
+	EnvRAGFlowDictPath                  = "RAGFLOW_DICT_PATH"
+	EnvDefaultSuperuserEmail            = "DEFAULT_SUPERUSER_EMAIL"
+	EnvDefaultSuperuserNickname         = "DEFAULT_SUPERUSER_NICKNAME"
+	EnvDefaultSuperuserPassword         = "DEFAULT_SUPERUSER_PASSWORD"
+	EnvDBType                           = "DB_TYPE"
+	EnvDevice                           = "DEVICE"
+	EnvStorageImpl                      = "STORAGE_IMPL"
+	EnvStageHandCacheCap                = "STAGEHAND_CACHE_CAP"
+	EnvStageHandCacheTTLSeconds         = "STAGEHAND_CACHE_TTL_SECONDS"
+	EnvStageHandCacheSweepInterval      = "STAGEHAND_CACHE_SWEEP_INTERVAL"
+	EnvStageHandExtractResultFile       = "STAGEHAND_EXTRACT_RESULT_FILE"
+	EnvAgentRunAccessKeyID              = "AGENTRUN_ACCESS_KEY_ID"
+	EnvAgentRunAccessKeySecret          = "AGENTRUN_ACCESS_KEY_SECRET"
+	EnvAgentRunAccountID                = "AGENTRUN_ACCOUNT_ID"
+	EnvAgentRunRegion                   = "AGENTRUN_REGION"
+	EnvAgentRunTemplateName             = "AGENTRUN_TEMPLATE_NAME"
+	EnvAgentRunExecuteHost              = "AGENTRUN_EXECUTE_HOST"
+	EnvAgentRunTimeout                  = "AGENTRUN_TIMEOUT"
+	EnvE2BTemplate                      = "E2B_TEMPLATE"
+	EnvE2BTemplateName                  = "E2B_TEMPLATE_NAME"
+	EnvE2BTimeout                       = "E2B_TIMEOUT"
+	EnvE2BAPIURL                        = "E2B_API_URL"
+	EnvE2BApiKey                        = "E2B_API_KEY"
+	EnvE2BAccessToken                   = "E2B_ACCESS_TOKEN"
+	EnvE2BDomain                        = "E2B_DOMAIN"
+	EnvTenkiApiKey                      = "TENKI_API_KEY"
+	EnvTenkiAPIURL                      = "TENKI_API_URL"
+	EnvTenkiImage                       = "TENKI_IMAGE"
+	EnvTenkiTimeout                     = "TENKI_TIMEOUT"
+	EnvTenkiAllowOutbound               = "TENKI_ALLOW_OUTBOUND"
+	EnvLocalPythonBin                   = "LOCAL_PYTHON_BIN"
+	EnvLocalNodeBin                     = "LOCAL_NODE_BIN"
+	EnvLocalWorkDir                     = "LOCAL_WORK_DIR"
+	EnvLocalTimeout                     = "LOCAL_TIMEOUT"
+	EnvLocalMaxMemoryMB                 = "LOCAL_MAX_MEMORY_MB"
+	EnvLocalMaxOutputBytes              = "LOCAL_MAX_OUTPUT_BYTES"
+	EnvLocalMaxArtifacts                = "LOCAL_MAX_ARTIFACTS"
+	EnvLocalMaxArtifactBytes            = "LOCAL_MAX_ARTIFACT_BYTES"
+	EnvPath                             = "PATH"
+	EnvOMPNumThreads                    = "OMP_NUM_THREADS"
+	EnvOpenBLASNumThreads               = "OPENBLAS_NUM_THREADS"
+	EnvMKLNumThreads                    = "MKL_NUM_THREADS"
+	EnvVECLIBMaximumThreads             = "VECLIB_MAXIMUM_THREADS"
+	EnvNumEXPRNumThreads                = "NUMEXPR_NUM_THREADS"
+	EnvXDGCacheHome                     = "XDG_CACHE_HOME"
+	EnvOpenAIApiKey                     = "OPENAI_API_KEY"
+	EnvOpenAIBaseURL                    = "OPENAI_BASE_URL"
+	EnvOpenAIModel                      = "OPENAI_MODEL"
+	EnvStageHandExtractSchemaJSON       = "STAGEHAND_EXTRACT_SCHEMA_JSON"
+	EnvSandboxProviderType              = "SANDBOX_PROVIDER_TYPE"
+	EnvSandboxExecutorManagerURL        = "SANDBOX_EXECUTOR_MANAGER_URL"
+	EnvSandboxExecutorManagerTimeout    = "SANDBOX_EXECUTOR_MANAGER_TIMEOUT"
+	EnvSandboxExecutorManagerPoolSize   = "SANDBOX_EXECUTOR_MANAGER_POOL_SIZE"
+	EnvSandboxExecutorManagerMaxRetries = "SANDBOX_EXECUTOR_MANAGER_MAX_RETRIES"
+	EnvSandboxBasePythonImage           = "SANDBOX_BASE_PYTHON_IMAGE"
+	EnvSandboxBaseNodeJSImage           = "SANDBOX_BASE_NODEJS_IMAGE"
+	EnvSandboxArtifactBucket            = "SANDBOX_ARTIFACT_BUCKET"
+	EnvSSHHost                          = "SSH_HOST"
+	EnvSSHPort                          = "SSH_PORT"
+	EnvSSHUsername                      = "SSH_USERNAME"
+	EnvSSHPassword                      = "SSH_PASSWORD"
+	EnvSSHPrivateKey                    = "SSH_PRIVATE_KEY"
+	EnvSSHPrivateKeyPath                = "SSH_PRIVATE_KEY_PATH"
+	EnvSSHPassphrase                    = "SSH_PASSPHRASE"
+	EnvSSHPythonBin                     = "SSH_PYTHON_BIN"
+	EnvSSHNodeBin                       = "SSH_NODE_BIN"
+	EnvSSHWorkDir                       = "SSH_WORK_DIR"
+	EnvSSHTimeout                       = "SSH_TIMEOUT"
+	EnvSSHMaxOutputBytes                = "SSH_MAX_OUTPUT_BYTES"
+	EnvSSHMaxArtifacts                  = "SSH_MAX_ARTIFACTS"
+	EnvSSHMaxArtifactBytes              = "SSH_MAX_ARTIFACT_BYTES"
+	EnvSSHKnownHosts                    = "SSH_KNOWN_HOSTS"
+	EnvTrinoUseTls                      = "TRINO_USE_TLS"
+	EnvSSHEnableAPIURL                  = "SSH_ENABLE_API_URL"
+	EnvAllowAnyHost                     = "ALLOW_ANY_HOST"
+	EnvTavilyApiKey                     = "TAVILY_API_KEY"
+	EnvQueritAPIKey                     = "QUERIT_API_KEY"
+	EnvHome                             = "HOME"
+	EnvUserProfile                      = "USERPROFILE"
+	EnvHttpHTTPProxy                    = "http_proxy"
+	EnvHttpHTTPSProxy                   = "https_proxy"
+	EnvBatchSingle                      = "BATCH_SINGLE"
+	EnvBatchCount                       = "BATCH_COUNT"
+	EnvBatchLogLevel                    = "BATCH_LOG_LEVEL"
+	EnvBatchSkipOCR                     = "BATCH_SKIP_OCR"
+	EnvBatchCompareOnly                 = "BATCH_COMPARE_ONLY"
+	EnvBatchCompareFilter               = "BATCH_COMPARE_FILTER"
+	EnvBatchCompareCSV                  = "BATCH_COMPARE_CSV"
+	EnvPYOCRSuffix                      = "PY_OCR_SUFFIX"
+	EnvOSSDeepDocURL                    = "OSSDEEPDOC_URL"
 	// EnvDeepDocModelDir points the in-process (Go) DeepDoc backend at the
-	// model snapshot (layout.onnx/tsr.onnx/det.onnx/rec.onnx/ocr.res). Used
-	// only when no external DeepDoc HTTP service is configured (DEEPDOC_URL
-	// unset); mirrors deepdoc_server.py's --model-dir (default rag/res/deepdoc).
+	// model snapshot (see common.DeepDocModelFiles). Used only when no external
+	// DeepDoc HTTP service is configured (DEEPDOC_URL unset); mirrors
+	// deepdoc_server.py's --model-dir (default rag/res/deepdoc).
 	EnvDeepDocModelDir = "DEEPDOC_MODEL_DIR"
 	// EnvDeepDocORTLib points the in-process backend at libonnxruntime.so.
 	// Optional: if empty but ORT was initialized elsewhere, the backend still
 	// serves; if unset and uninitialized, it degrades to the empty analyzer.
 	EnvDeepDocORTLib = "DEEPDOC_ORT_LIB"
+
 	EnvUpdateGolden                      = "UPDATE_GOLDEN"
 	EnvBatchParityFilter                 = "BATCH_PARITY_FILTER"
 	EnvDumpCount                         = "DUMP_COUNT"
@@ -201,3 +203,61 @@ const (
 	EnvGoogleDriveWebOAuthRedirectURI    = "GOOGLE_DRIVE_WEB_OAUTH_REDIRECT_URI"
 	EnvSpacyModelDir                     = "SPACY_MODEL_DIR"
 )
+
+// DeepDocModelFiles is the single source of truth for the weights the
+// in-process (Go) DeepDoc backend and the Python DeepDoc service both
+// require. cmd/ resolves the model directory against it; infnative
+// validates file presence against it. Order is insignificant (callers do
+// set-membership checks); keep it stable so logs and diffs stay readable.
+//
+// External consumers that re-list these names must stay in sync:
+//   - .github/workflows/deepdoc-drift.yml  (MODEL_FILES)
+//   - deepdoc/server/download_deps.py      (FILES)
+var DeepDocModelFiles = []string{
+	"det.onnx",
+	"layout.onnx",
+	"tsr.onnx",
+	"rec.onnx",
+	"ocr.res",
+}
+
+// HasModelFiles reports whether dir contains every file listed in
+// DeepDocModelFiles. It is the single presence check shared by the server
+// (cmd/ragflow_server_native.go) and the in-process analyzer (infnative:
+// NewAnalyzer / canServe); those call sites must not re-roll this loop.
+func HasModelFiles(dir string) bool {
+	for _, f := range DeepDocModelFiles {
+		if _, err := os.Stat(filepath.Join(dir, f)); err != nil {
+			return false
+		}
+	}
+	return true
+}
+
+// DeepDocORTVersion is the onnxruntime native release the in-process (Go)
+// DeepDoc backend is built and tested against (e.g. "1.23.2"). It is the
+// single source for the download URL, extracted dir name, and SONAME used
+// across Go and Python. The Go binding (github.com/yalue/onnxruntime_go) and
+// the pip onnxruntime== pin must track this MINOR version: the binding uses
+// its own release numbering (v1.23.0 <-> ORT 1.23.x) but is ABI-compatible with
+// this native release on the same minor line.
+//
+// To bump ORT: update DeepDocORTVersion (Go) AND ORT_VERSION in
+// ragflow_deps/download_deps.py AND the onnxruntime/onnxruntime-gpu pins in
+// pyproject.toml + .github/workflows/deepdoc-drift.yml, and refresh the
+// onnxruntime_go binding minor in go.mod.
+const DeepDocORTVersion = "1.23.2"
+
+// DefaultDeepDocORTLib returns the conventional in-process ORT shared library
+// path under ~/ragflow-native-libs, derived from DeepDocORTVersion. It lives in
+// this tag-free package so it is unit-testable in the default tier without the
+// native_det build tag or the ORT static libs. Callers must still stat the path
+// before use. Returns "" when home is empty/unresolvable.
+func DefaultDeepDocORTLib(home string) string {
+	if home == "" {
+		return ""
+	}
+	return filepath.Join(home, "ragflow-native-libs", "onnxruntime",
+		"onnxruntime-linux-x64-"+DeepDocORTVersion, "lib",
+		"libonnxruntime.so."+DeepDocORTVersion)
+}

@@ -38,6 +38,13 @@ from typing import Union
 import nltk
 from huggingface_hub import snapshot_download
 
+# mirrors internal/common.DeepDocORTVersion (Go in-process backend). Single
+# source for the onnxruntime native release: the download URL, .tgz name,
+# extracted dir name, and SONAME below are all derived from it. The pip
+# onnxruntime== pin (pyproject.toml) and the onnxruntime_go binding minor
+# (go.mod) must stay on the same minor line.
+ORT_VERSION = "1.23.2"
+
 
 def get_urls(use_china_mirrors=False) -> list[Union[str, list[str]]]:
     if use_china_mirrors:
@@ -74,12 +81,12 @@ def get_urls(use_china_mirrors=False) -> list[Union[str, list[str]]]:
             ["https://github.com/yfedoseev/pdf_oxide/releases/download/v0.3.67/pdf_oxide-go-ffi-linux-amd64.tar.gz", "pdf_oxide-go-ffi-linux-amd64.tar.gz"],
             ["https://github.com/yfedoseev/office_oxide/releases/download/v0.1.8/native-linux-x86_64.tar.gz", "office_oxide-linux-x86_64.tar.gz"],
             # ONNX Runtime C++ shared library for the Go dla-native inference
-            # binding (onnxruntime_go v1.23.0 in go.mod). Version 1.23.2 stays on
+            # binding (onnxruntime_go v1.23.0 in go.mod). ORT_VERSION stays on
             # the same 1.23.x C-API line (ABI-compatible with the binding) and
             # matches the onnxruntime the Python goldens were generated with, so
             # the validated Go-vs-Python parity (det 3/5, TSR tolerance, OCR
             # text) is preserved. InitORT loads it via ORT_LIB.
-            ["https://github.com/microsoft/onnxruntime/releases/download/v1.23.2/onnxruntime-linux-x64-1.23.2.tgz", "onnxruntime-linux-x64-1.23.2.tgz"],
+            [f"https://github.com/microsoft/onnxruntime/releases/download/v{ORT_VERSION}/onnxruntime-linux-x64-{ORT_VERSION}.tgz", f"onnxruntime-linux-x64-{ORT_VERSION}.tgz"],
         ]
     else:
         return [
@@ -115,12 +122,12 @@ def get_urls(use_china_mirrors=False) -> list[Union[str, list[str]]]:
             ["https://github.com/yfedoseev/pdf_oxide/releases/download/v0.3.67/pdf_oxide-go-ffi-linux-amd64.tar.gz", "pdf_oxide-go-ffi-linux-amd64.tar.gz"],
             ["https://github.com/yfedoseev/office_oxide/releases/download/v0.1.8/native-linux-x86_64.tar.gz", "office_oxide-linux-x86_64.tar.gz"],
             # ONNX Runtime C++ shared library for the Go dla-native inference
-            # binding (onnxruntime_go v1.23.0 in go.mod). Version 1.23.2 stays on
+            # binding (onnxruntime_go v1.23.0 in go.mod). ORT_VERSION stays on
             # the same 1.23.x C-API line (ABI-compatible with the binding) and
             # matches the onnxruntime the Python goldens were generated with, so
             # the validated Go-vs-Python parity (det 3/5, TSR tolerance, OCR
             # text) is preserved. InitORT loads it via ORT_LIB.
-            ["https://github.com/microsoft/onnxruntime/releases/download/v1.23.2/onnxruntime-linux-x64-1.23.2.tgz", "onnxruntime-linux-x64-1.23.2.tgz"],
+            [f"https://github.com/microsoft/onnxruntime/releases/download/v{ORT_VERSION}/onnxruntime-linux-x64-{ORT_VERSION}.tgz", f"onnxruntime-linux-x64-{ORT_VERSION}.tgz"],
         ]
 
 
@@ -169,7 +176,7 @@ if __name__ == "__main__":
         ("pdfium-linux-x64-static.tgz", "pdfium-static"),
         ("pdf_oxide-go-ffi-linux-amd64.tar.gz", "pdf_oxide"),
         ("office_oxide-linux-x86_64.tar.gz", "office_oxide"),
-        ("onnxruntime-linux-x64-1.23.2.tgz", "onnxruntime"),
+        (f"onnxruntime-linux-x64-{ORT_VERSION}.tgz", "onnxruntime"),
     ]
     import tarfile
 
@@ -190,12 +197,12 @@ if __name__ == "__main__":
     # ONNX Runtime: expose an unversioned lib name and log the ORT_LIB path the
     # Go dla-native InitORT expects (internal/deepdoc/dla-native).
     ort_lib_dir = os.path.join(
-        native_deps_dir, "onnxruntime", "onnxruntime-linux-x64-1.23.2", "lib")
-    ort_so = os.path.join(ort_lib_dir, "libonnxruntime.so.1.23.2")
+        native_deps_dir, "onnxruntime", f"onnxruntime-linux-x64-{ORT_VERSION}", "lib")
+    ort_so = os.path.join(ort_lib_dir, f"libonnxruntime.so.{ORT_VERSION}")
     if os.path.isfile(ort_so):
         ort_link = os.path.join(ort_lib_dir, "libonnxruntime.so")
         if not os.path.islink(ort_link):
-            os.symlink("libonnxruntime.so.1.23.2", ort_link)
+            os.symlink(f"libonnxruntime.so.{ORT_VERSION}", ort_link)
         print(f"  ✓ onnxruntime ready: ORT_LIB={ort_so}")
     else:
         print(f"  Skipping onnxruntime symlink: {ort_so} not found")

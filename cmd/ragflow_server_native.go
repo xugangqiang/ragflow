@@ -13,19 +13,23 @@ import (
 	infnative "ragflow/internal/deepdoc/parser/pdf/inference/native"
 )
 
-// requiredModelFiles are the weights the in-process backend needs. Used to
-// validate a candidate model directory before committing to it as the default.
-var requiredModelFiles = []string{"det.onnx", "layout.onnx", "tsr.onnx", "rec.onnx", "ocr.res"}
-
 // registerNativeDeepDoc wires the in-process (Go) DeepDoc backend as the local
 // fallback used when no external DeepDoc HTTP service is configured
-// (DEEPDOC_URL unset). It is a best-effort registration: if ORT/lib/models are
-// unavailable the backend reports not-serving and the parser degrades to the
-// empty analyzer, so a deployment without the native deps still starts cleanly.
+// (DEEPDOC_URL unset). The registration is best-effort: if ORT/lib/models are
+// unavailable the backend simply reports not-serving.
+//
+// Fail-fast contract (P0): at least one DeepDoc backend must be available at
+// startup — an external service (DEEPDOC_URL set) OR the local in-process
+// backend (ORT + models present, built with -tags native_det). There is NO
+// silent degradation to an empty analyzer: if DEEPDOC_URL is unset and the
+// in-process backend is not serving, the server aborts. This mirrors the
+// runtime resolver (deepDocAnalyzerFromEnv), which uses a configured client
+// exclusively and fails loudly when it is unreachable, only falling back to the
+// in-process backend when no client URL is set.
 //
 // This file is compiled only under the native_det build tag; the default build
-// uses ragflow_server_nonative.go (a no-op) so the unit-test path stays free of
-// the onnxruntime dependency.
+// uses ragflow_server_nonative.go (a fail-fast no-op) so the unit-test path
+// stays free of the onnxruntime dependency.
 func registerNativeDeepDoc() {
 	modelDir := resolveDeepDocModelDir()
 	ortLib := resolveDeepDocORTLib()
@@ -80,16 +84,17 @@ func resolveDeepDocModelDir() string {
 }
 
 // resolveDeepDocORTLib returns the explicit DEEPDOC_ORT_LIB env, else the
-// onnxruntime shared library extracted by ragflow_deps/download_deps.py.
+// onnxruntime shared library extracted by ragflow_deps/download_deps.py,
+// whose default location is derived from common.DeepDocORTVersion.
 func resolveDeepDocORTLib() string {
 	if v := strings.TrimSpace(common.GetEnv(common.EnvDeepDocORTLib)); v != "" {
 		return v
 	}
 	if home, err := os.UserHomeDir(); err == nil {
-		cand := filepath.Join(home, "ragflow-native-libs", "onnxruntime",
-			"onnxruntime-linux-x64-1.23.2", "lib", "libonnxruntime.so.1.23.2")
-		if _, err := os.Stat(cand); err == nil {
-			return cand
+		if cand := common.DefaultDeepDocORTLib(home); cand != "" {
+			if _, err := os.Stat(cand); err == nil {
+				return cand
+			}
 		}
 	}
 	return ""
@@ -97,10 +102,5 @@ func resolveDeepDocORTLib() string {
 
 // dirHasModels reports whether dir contains every required model file.
 func dirHasModels(dir string) bool {
-	for _, f := range requiredModelFiles {
-		if _, err := os.Stat(filepath.Join(dir, f)); err != nil {
-			return false
-		}
-	}
-	return true
+	return common.HasModelFiles(dir)
 }
