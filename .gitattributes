@@ -1,2 +1,6 @@
 *.sh text eol=lf
 docker/entrypoint.sh text eol=lf executable
+
+# Golden images for Go tests are binary; keep pre-commit text filters
+# (end-of-file-fixer, mixed-line-ending, trailing-whitespace) away from them.
+*.png binary
