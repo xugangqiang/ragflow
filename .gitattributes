@@ -1,6 +1,8 @@
 *.sh text eol=lf
 docker/entrypoint.sh text eol=lf executable
 
-# Golden images for Go tests are binary; keep pre-commit text filters
-# (end-of-file-fixer, mixed-line-ending, trailing-whitespace) away from them.
-*.png binary
+# Binary fixtures must be stored byte-for-byte. Mark them binary so git
+# never applies text/CRLF normalization, and so the pre-commit text fixers
+# (see tools/hooks/check_files.py) skip them. OLE2 .msg files in particular
+# were previously corrupted by the mixed-line-ending / end-of-file fixers.
+*.msg binary

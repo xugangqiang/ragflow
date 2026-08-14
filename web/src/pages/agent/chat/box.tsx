@@ -97,7 +97,10 @@ function AgentChatBox() {
   return (
     <>
       <section className="flex flex-1 flex-col px-5 min-h-0 pb-4">
-        <div className="flex-1 overflow-auto" ref={messageContainerRef}>
+        <div
+          className="flex-1 overflow-auto min-h-0"
+          ref={messageContainerRef}
+        >
           <div>
             {!sendLoading && <div data-testid="agent-run-idle" />}
             {/* <Spin spinning={sendLoading}> */}
@@ -107,8 +110,7 @@ function AgentChatBox() {
                   loading={
                     message.role === MessageType.Assistant &&
                     sendLoading &&
-                    derivedMessages.length - 1 === i &&
-                    !message.content
+                    derivedMessages.length - 1 === i
                   }
                   key={buildMessageUuidWithRole(message)}
                   nickname={userInfo.nickname}
