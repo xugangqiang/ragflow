@@ -12,28 +12,22 @@ package native
 //   ORT_LIB=... MODEL_DIR=... go test -tags integration ./native/...
 
 import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math"
+	"mime/multipart"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
-)
-
-const (
-	// coordFloor is the documented hard accuracy floor (px) of the comparison
-	// tool: det stabilizes at ~3px from bilinearResize + box#8 postprocess,
-	// format-independent. DLA/TSR are tighter, but tolerances are sized above
-	// this worst case so any regression past the floor trips the gate instead
-	// of hiding under it.
-	coordFloor = 3.0
-	// coordTolMargin lifts the coordinate tolerance just above coordFloor.
-	coordTolMargin = 0.5
-
-	cmpTolCoord = coordFloor + coordTolMargin // 3.5
-	cmpTolScore = 0.05                        // tolerance on detection scores
 )
 
 func skipIfNoModels(t *testing.T) {
@@ -45,112 +39,60 @@ func skipIfNoModels(t *testing.T) {
 	}
 }
 
-// compareBoxes matches every golden box to a Go box of the same class by
-// nearest center and reports the max per-coordinate difference.
-func compareBoxes(t *testing.T, gold, got [][]float64) {
-	t.Helper()
-	if len(gold) == 0 {
-		t.Fatalf("golden has no boxes")
-	}
-	used := make([]bool, len(got))
-	maxd := 0.0
-	matched := 0
-	for _, gb := range gold {
-		cls := int(gb[5])
-		bcx, bcy := (gb[0]+gb[2])/2, (gb[1]+gb[3])/2
-		best, bd := -1, math.MaxFloat64
-		for i, vb := range got {
-			if used[i] || int(vb[5]) != cls {
-				continue
-			}
-			vcx, vcy := (vb[0]+vb[2])/2, (vb[1]+vb[3])/2
-			d := (bcx-vcx)*(bcx-vcx) + (bcy-vcy)*(bcy-vcy)
-			if d < bd {
-				bd, best = d, i
-			}
-		}
-		if best < 0 {
-			t.Errorf("no Go box matched golden class %d at (%.0f,%.0f)", cls, bcx, bcy)
-			continue
-		}
-		used[best] = true
-		matched++
-		for j := 0; j < 6; j++ {
-			tol := cmpTolCoord
-			if j == 4 {
-				tol = cmpTolScore
-			}
-			if math.Abs(gb[j]-got[best][j]) > tol {
-				t.Errorf("class %d coord %d diff %.3f > tol %.2f (gold=%v got=%v)",
-					cls, j, math.Abs(gb[j]-got[best][j]), tol, gb, got[best])
-			}
-			if j != 4 {
-				maxd = math.Max(maxd, math.Abs(gb[j]-got[best][j]))
-			}
-		}
-	}
-	t.Logf("matched %d/%d golden boxes, max coord diff %.4f px", matched, len(gold), maxd)
+// modelSnapshotHashes locks the DeepDoc model snapshot that generated the
+// golden fixtures and that backs the equivalence proof. The goldens are only
+// meaningful if produced against these exact weights; if any model file in
+// MODEL_DIR drifts, the equivalence claim is void and we must fail hard rather
+// than silently emit a misleading pass.
+//
+// Update these values ONLY when the model snapshot is intentionally upgraded,
+// and regenerate every golden fixture against the new snapshot in the same
+// change (see /tmp/gen_corpus.py and ref_*.py).
+var modelSnapshotHashes = map[string]string{
+	"det.onnx":   "30a86f5731181461d08021402766601e4302a9b9b9666be8aff402696339cdff",
+	"layout.onnx": "de401c03ee30b1c120416dc06f0705237f0c36d3cdb692c9bfefe8a8f98a4b70",
+	"tsr.onnx":   "1585f88015c60209f16a079a26d944afca790ab7022fe7d0574113ccb9a6f9b4",
+	"rec.onnx":   "1c7cf60de2afd728d512f4190cf37455092b45f06175365c6fc58d8cd7e2a68b",
+	"ocr.res":    "28b2362ad4ab2dc38769aa72feb535e3a9ddb3fd2a7585a05920e6393b1dc7f7",
 }
 
-// matchBoxesRelaxed returns (matched count, max coordinate diff among matches,
-// unmatched goldens) using caller-supplied tolerances. Unlike compareBoxes it
-// does NOT fail the test — callers decide what a match/mismatch means. A
-// golden box counts as matched only if its nearest same-class Go box is within
-// coordTol (on any coordinate) and scoreTol; otherwise it is returned as
-// unmatched. Used by the extreme-aspect boundary test, whose tolerances are
-// deliberately wider than the real-table parity floor.
-func matchBoxesRelaxed(t *testing.T, gold, got [][]float64, coordTol, scoreTol float64) (matched int, maxd float64, unmatched [][]float64) {
-	t.Helper()
-	used := make([]bool, len(got))
-	for _, gb := range gold {
-		cls := int(gb[5])
-		bcx, bcy := (gb[0]+gb[2])/2, (gb[1]+gb[3])/2
-		best, bd := -1, math.MaxFloat64
-		for i, vb := range got {
-			if used[i] || int(vb[5]) != cls {
-				continue
-			}
-			vcx, vcy := (vb[0]+vb[2])/2, (vb[1]+vb[3])/2
-			d := (bcx-vcx)*(bcx-vcx) + (bcy-vcy)*(bcy-vcy)
-			if d < bd {
-				bd, best = d, i
-			}
-		}
-		if best < 0 {
-			unmatched = append(unmatched, gb)
-			continue
-		}
-		// Enforce the relaxed tolerance: if even the nearest same-class box is
-		// farther than the tolerance, treat it as unmatched (structural miss).
-		coordDiff, scoreDiff := 0.0, math.Abs(gb[4]-got[best][4])
-		for j := 0; j < 4; j++ {
-			coordDiff = math.Max(coordDiff, math.Abs(gb[j]-got[best][j]))
-		}
-		if coordDiff > coordTol || scoreDiff > scoreTol {
-			unmatched = append(unmatched, gb)
-			continue
-		}
-		used[best] = true
-		matched++
-		maxd = math.Max(maxd, coordDiff)
-	}
-	return matched, maxd, unmatched
-}
-
-func loadGoldenBoxes(t *testing.T, path string) [][]float64 {
-	t.Helper()
-	raw, err := os.ReadFile(path)
+func sha256File(path string) (string, error) {
+	f, err := os.Open(path)
 	if err != nil {
-		t.Fatalf("read golden %s: %v", path, err)
+		return "", err
 	}
-	// DLA/TSR goldens use the Go DocAnalyzer wire shape: {"bboxes": [[...]]}.
-	var wrap struct {
-		Bboxes [][]float64 `json:"bboxes"`
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
 	}
-	if err := json.Unmarshal(raw, &wrap); err != nil {
-		t.Fatalf("parse golden %s: %v", path, err)
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// checkModelSnapshotHash is reviewer follow-up P0: lock the model snapshot so
+// the equivalence proof cannot pass against a different (drifted) set of model
+// weights than the goldens were generated with. Fatal on any mismatch.
+func checkModelSnapshotHash(t *testing.T, md string) {
+	for name, want := range modelSnapshotHashes {
+		got, err := sha256File(filepath.Join(md, name))
+		if err != nil {
+			t.Fatalf("read model %s: %v", name, err)
+		}
+		if got != want {
+			t.Fatalf("model snapshot drift for %s: got sha256 %s, want %s — "+
+				"goldens were generated against a different model; regenerate fixtures or update the lock",
+				name, got, want)
+		}
+		t.Logf("model snapshot ok: %s %s", name, got)
 	}
-	return wrap.Bboxes
+}
+
+// TestModelSnapshotHash is the standalone entry point for P0; it runs as part
+// of the normal integration suite so a snapshot drift fails CI before any
+// golden comparison happens.
+func TestModelSnapshotHash(t *testing.T) {
+	skipIfNoModels(t)
+	checkModelSnapshotHash(t, os.Getenv("MODEL_DIR"))
 }
 
 // dlaPages / tsrPages / ocrRecLines enumerate the fixtures the Go port is
@@ -162,8 +104,12 @@ func loadGoldenBoxes(t *testing.T, path string) [][]float64 {
 // only produce whole-page false detections, so they are excluded from tsrPages.
 // tsr_table_normal is a moderate 2.65:1 table; tsr_table_rotation is a 1:6.3
 // tall rotated table. Both sit comfortably under the 3px tolerance.
-var dlaPages = []string{"page0", "mp_textbook_en_p0", "mp_whitepaper_cn_p0", "mp_paper_eq_p0", "mp_zhtw_ent_p0"}
-var tsrPages = []string{"table0", "tsr_table_normal", "tsr_table_rotation"}
+var dlaPages = []string{"page0", "mp_textbook_en_p0", "mp_whitepaper_cn_p0", "mp_paper_eq_p0", "mp_zhtw_ent_p0",
+	"dla_2510_figcap", "dla_bookrag_figcap", "dla_2510_eq",
+	"dla_real_cn_report", "dla_real_zhtw", "dla_real_en_paper"}
+var tsrPages = []string{"table0", "tsr_table_normal", "tsr_table_rotation",
+	"tsr_06_table_content", "tsr_18_table_caption", "tsr_13_crosspage", "tsr_14_interleaved",
+	"tsr_real_report"}
 
 // ocrRecLines covers EN (regular text + bold/italic/serif font variants of the
 // same sentence to exercise font robustness), pure CJK, mixed EN+CJK, and a
@@ -175,6 +121,7 @@ var ocrRecLines = []string{
 	"line0", "line_cn",
 	"line_en_bold", "line_en_italic", "line_en_serif",
 	"line_mix", "line_num", "line_cn_long",
+	"line_real_cn", "line_real_zhtw", "line_real_en",
 }
 
 func TestDLAIntegration(t *testing.T) {
@@ -196,8 +143,8 @@ func TestDLAIntegration(t *testing.T) {
 			if err := json.Unmarshal([]byte(res.Wire()), &got); err != nil {
 				t.Fatalf("parse Go wire: %v", err)
 			}
-			gold := loadGoldenBoxes(t, filepath.Join("..", "testdata", stem+".dla.golden.json"))
-			compareBoxes(t, gold, got.Boxes)
+			gold := LoadGoldenBoxes(t, filepath.Join("..", "testdata", stem+".dla.golden.json"))
+			CompareBoxes(t, gold, got.Boxes)
 		})
 	}
 }
@@ -223,8 +170,8 @@ func TestTSRIntegration(t *testing.T) {
 			if err := json.Unmarshal([]byte(res.Wire()), &got); err != nil {
 				t.Fatalf("parse Go wire: %v", err)
 			}
-			gold := loadGoldenBoxes(t, filepath.Join("..", "testdata", stem+".tsr.golden.json"))
-			compareBoxes(t, gold, got.Boxes)
+			gold := LoadGoldenBoxes(t, filepath.Join("..", "testdata", stem+".tsr.golden.json"))
+			CompareBoxes(t, gold, got.Boxes)
 		})
 	}
 }
@@ -257,13 +204,13 @@ func TestTSRExtremeAspect(t *testing.T) {
 	if err := json.Unmarshal([]byte(res.Wire()), &got); err != nil {
 		t.Fatalf("parse Go wire: %v", err)
 	}
-	gold := loadGoldenBoxes(t, filepath.Join("..", "testdata", "tsr_table_caption.tsr.golden.json"))
+	gold := LoadGoldenBoxes(t, filepath.Join("..", "testdata", "tsr_table_caption.tsr.golden.json"))
 
 	const (
 		relaxCoord = 10.0
 		relaxScore = 0.10
 	)
-	matched, maxd, unmatched := matchBoxesRelaxed(t, gold, got.Boxes, relaxCoord, relaxScore)
+	matched, maxd, unmatched := MatchBoxesRelaxed(t, gold, got.Boxes, relaxCoord, relaxScore)
 	t.Logf("extreme-aspect: matched %d/%d, max coord diff %.3f px, unmatched=%d",
 		matched, len(gold), maxd, len(unmatched))
 	for _, u := range unmatched {
@@ -457,6 +404,106 @@ func TestOCRRecSessionReuse(t *testing.T) {
 	}
 }
 
+// wireRunner runs one inference pass and returns its serialized wire output.
+type wireRunner func(ctx context.Context, md string, img *Image) (string, error)
+
+// runConcurrentMatchesSerial drives `run` once serially to establish a baseline
+// wire, then `workers` times concurrently from separate goroutines, and asserts
+// every concurrent result is byte-identical to the serial baseline. This is
+// reviewer follow-up P3: it proves the shared model-session pool is
+// concurrency-safe — no cross-call tensor contamination and no data race under
+// parallel load. (The pool is the only shared mutable state across calls; the
+// per-call input/output tensors are owned by the call.)
+func runConcurrentMatchesSerial(t *testing.T, md string, img *Image, name string, run wireRunner) {
+	base, err := run(t.Context(), md, img)
+	if err != nil {
+		t.Fatalf("%s serial: %v", name, err)
+	}
+	const workers = 8
+	var wg sync.WaitGroup
+	results := make([]string, workers)
+	errs := make([]error, workers)
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			r, e := run(t.Context(), md, img)
+			results[i], errs[i] = r, e
+		}(i)
+	}
+	wg.Wait()
+	for i := 0; i < workers; i++ {
+		if errs[i] != nil {
+			t.Fatalf("%s concurrent worker %d: %v", name, i, errs[i])
+		}
+		if results[i] != base {
+			t.Fatalf("%s concurrent run %d differs from serial baseline (session pool not concurrency-safe)", name, i)
+		}
+	}
+	t.Logf("%s: %d concurrent runs == serial baseline (wire-identical)", name, workers)
+}
+
+// TestInferenceConcurrencyConsistent exercises the shared session pool under
+// parallel load for every inference task (DLA / TSR / OCR-rec / Det) and proves
+// numerical output is identical to a serial run. Catches data races and
+// cross-call contamination that the single-flight reuse tests cannot.
+func TestInferenceConcurrencyConsistent(t *testing.T) {
+	skipIfNoModels(t)
+	md := os.Getenv("MODEL_DIR")
+
+	dlaImg, err := Decode(filepath.Join("..", "testdata", "page0.png"))
+	if err != nil {
+		t.Fatalf("decode dla: %v", err)
+	}
+	runConcurrentMatchesSerial(t, md, dlaImg, "DLA",
+		func(ctx context.Context, m string, im *Image) (string, error) {
+			r, e := RunDLA(ctx, m, im)
+			if e != nil {
+				return "", e
+			}
+			return r.Wire(), nil
+		})
+
+	tsrImg, err := Decode(filepath.Join("..", "testdata", "table0.png"))
+	if err != nil {
+		t.Fatalf("decode tsr: %v", err)
+	}
+	runConcurrentMatchesSerial(t, md, tsrImg, "TSR",
+		func(ctx context.Context, m string, im *Image) (string, error) {
+			r, e := RunTSR(ctx, m, im)
+			if e != nil {
+				return "", e
+			}
+			return r.Wire(), nil
+		})
+
+	ocrImg, err := Decode(filepath.Join("..", "testdata", "line0.png"))
+	if err != nil {
+		t.Fatalf("decode ocr: %v", err)
+	}
+	runConcurrentMatchesSerial(t, md, ocrImg, "OCR-rec",
+		func(ctx context.Context, m string, im *Image) (string, error) {
+			r, e := RunOCRRec(ctx, m, im)
+			if e != nil {
+				return "", e
+			}
+			return r.Wire(), nil
+		})
+
+	detImg, err := Decode(filepath.Join("..", "testdata", "page0.png"))
+	if err != nil {
+		t.Fatalf("decode det: %v", err)
+	}
+	runConcurrentMatchesSerial(t, md, detImg, "Det",
+		func(ctx context.Context, m string, im *Image) (string, error) {
+			r, e := RunDet(ctx, m, im)
+			if e != nil {
+				return "", e
+			}
+			return r.Wire(), nil
+		})
+}
+
 func TestDetIntegration(t *testing.T) {
 	skipIfNoModels(t)
 	imgPath := filepath.Join("..", "testdata", "page0.png")
@@ -496,9 +543,9 @@ func TestDetIntegration(t *testing.T) {
 	refBoxes := gold.Output[0][0]
 
 	// The pure-Go geometry reaches the 3px hard floor (HANDOFF §4.4, box#8).
-	// Tolerance is coordFloor + coordTolMargin, just above that floor, so a
+	// Tolerance is CoordFloor + CoordTolMargin, just above that floor, so a
 	// regression bumps it over the line.
-	detCoordTol := coordFloor + coordTolMargin
+	detCoordTol := CoordFloor + CoordTolMargin
 	used := make([]bool, len(goBoxes))
 	matched, maxd := 0, 0.0
 	for _, rb := range refBoxes {
@@ -543,9 +590,10 @@ func TestDetIntegration(t *testing.T) {
 // TestDetMembershipAllFixtures quantifies the det box-membership gap (gap 3).
 // For every committed det fixture it runs RunDet and compares the Go box set
 // against the golden (Python) box set in TWO complementary ways:
-//   1. center-distance match (tol 3.5px) — isolates coordinate drift;
-//   2. IoU match (thr 0.5) — isolates true box-membership divergence (splits,
-//      merges, hallucinations), independent of how far a box's center moved.
+//  1. center-distance match (tol 3.5px) — isolates coordinate drift;
+//  2. IoU match (thr 0.5) — isolates true box-membership divergence (splits,
+//     merges, hallucinations), independent of how far a box's center moved.
+//
 // The original TestDetIntegration only checked golden→Go by nearest center on
 // a single fixture, so a Go box shifted >3.5px was mis-flagged and a Go box
 // with no golden counterpart was invisible.
@@ -567,12 +615,12 @@ func TestDetMembershipAllFixtures(t *testing.T) {
 	}
 
 	type stat struct {
-		stem                                   string
-		nGold, nGo                             int
-		centerOrphanGold, centerOrphanGo       int
-		iouMatchedGold, iouMatchedGo           int
-		iouOrphanGold, iouOrphanGo             int
-		maxd                                   float64
+		stem                             string
+		nGold, nGo                       int
+		centerOrphanGold, centerOrphanGo int
+		iouMatchedGold, iouMatchedGo     int
+		iouOrphanGold, iouOrphanGo       int
+		maxd                             float64
 	}
 	var stats []stat
 	sumGold, sumGo := 0, 0
@@ -599,7 +647,7 @@ func TestDetMembershipAllFixtures(t *testing.T) {
 		if err := json.Unmarshal([]byte(res.Wire()), &got); err != nil {
 			t.Fatalf("parse Go wire %s: %v", stem, err)
 		}
-		goBoxes := flattenQuads(got.Output)
+		goBoxes := FlattenQuads(got.Output)
 
 		raw, err := os.ReadFile(filepath.Join(dir, name))
 		if err != nil {
@@ -611,21 +659,21 @@ func TestDetMembershipAllFixtures(t *testing.T) {
 		if err := json.Unmarshal(raw, &gold); err != nil {
 			t.Fatalf("parse golden %s: %v", stem, err)
 		}
-		goldBoxes := flattenQuads(gold.Output)
+		goldBoxes := FlattenQuads(gold.Output)
 
-		mG, mGo, maxd := matchBothDirections(goldBoxes, goBoxes, cmpTolCoord)
-		imG, imGo := matchIoUBothDirections(goldBoxes, goBoxes, 0.5)
+		mG, mGo, maxd := MatchBothDirections(goldBoxes, goBoxes, CmpTolCoord)
+		imG, imGo := MatchIoUBothDirections(goldBoxes, goBoxes, 0.5)
 		s := stat{
-			stem:                stem,
-			nGold:               len(goldBoxes),
-			nGo:                 len(goBoxes),
-			centerOrphanGold:    len(goldBoxes) - mG,
-			centerOrphanGo:      len(goBoxes) - mGo,
-			iouMatchedGold:      imG,
-			iouMatchedGo:        imGo,
-			iouOrphanGold:       len(goldBoxes) - imG,
-			iouOrphanGo:         len(goBoxes) - imGo,
-			maxd:                maxd,
+			stem:             stem,
+			nGold:            len(goldBoxes),
+			nGo:              len(goBoxes),
+			centerOrphanGold: len(goldBoxes) - mG,
+			centerOrphanGo:   len(goBoxes) - mGo,
+			iouMatchedGold:   imG,
+			iouMatchedGo:     imGo,
+			iouOrphanGold:    len(goldBoxes) - imG,
+			iouOrphanGo:      len(goBoxes) - imGo,
+			maxd:             maxd,
 		}
 		stats = append(stats, s)
 		sumGold += s.nGold
@@ -692,157 +740,6 @@ func TestDetMembershipAllFixtures(t *testing.T) {
 		baselineIoUOrphanGold, baselineIoUOrphanGo, iuSlack, sumIIoG, sumIIoGo)
 }
 
-// flattenQuads collapses a det Wire()/golden output payload to its box list.
-// Both nest quads under output[0][0].
-func flattenQuads(out [][][][][2]float64) [][][2]float64 {
-	if len(out) == 0 || len(out[0]) == 0 {
-		return nil
-	}
-	return out[0][0]
-}
-
-// matchBothDirections matches two quad sets by nearest center within tol (px),
-// in BOTH directions. It returns the number of golden boxes that found a Go
-// match, the number of Go boxes that found a golden match, and the worst
-// per-corner coordinate difference observed among matched pairs.
-func matchBothDirections(gold, got [][][2]float64, tol float64) (matchedGold, matchedGo int, maxd float64) {
-	sq := func(x float64) float64 { return x * x }
-	// golden -> Go
-	usedGo := make([]bool, len(got))
-	for _, gb := range gold {
-		gcx, gcy := quadCenter(gb)
-		best, bd := -1, math.MaxFloat64
-		for i, vb := range got {
-			if usedGo[i] {
-				continue
-			}
-			vcx, vcy := quadCenter(vb)
-			d := sq(gcx-vcx) + sq(gcy-vcy)
-			if d < bd {
-				bd, best = d, i
-			}
-		}
-		if best < 0 || math.Sqrt(bd) > tol {
-			continue
-		}
-		usedGo[best] = true
-		matchedGold++
-		for j := 0; j < 4; j++ {
-			for k := 0; k < 2; k++ {
-				if d := math.Abs(gb[j][k] - got[best][j][k]); d > maxd {
-					maxd = d
-				}
-			}
-		}
-	}
-	// Go -> golden (reverse), to surface Go boxes with no golden counterpart.
-	usedGold := make([]bool, len(gold))
-	for _, vb := range got {
-		vcx, vcy := quadCenter(vb)
-		best, bd := -1, math.MaxFloat64
-		for i, gb := range gold {
-			if usedGold[i] {
-				continue
-			}
-			gcx, gcy := quadCenter(gb)
-			d := sq(gcx-vcx) + sq(gcy-vcy)
-			if d < bd {
-				bd, best = d, i
-			}
-		}
-		if best < 0 || math.Sqrt(bd) > tol {
-			continue
-		}
-		usedGold[best] = true
-		matchedGo++
-		for j := 0; j < 4; j++ {
-			for k := 0; k < 2; k++ {
-				if d := math.Abs(gold[best][j][k] - vb[j][k]); d > maxd {
-					maxd = d
-				}
-			}
-		}
-	}
-	return matchedGold, matchedGo, maxd
-}
-
-// quadAABB returns the axis-aligned bounding box of a quad.
-func quadAABB(q [][2]float64) (x0, y0, x1, y1 float64) {
-	x0, y0, x1, y1 = q[0][0], q[0][1], q[0][0], q[0][1]
-	for _, p := range q {
-		if p[0] < x0 {
-			x0 = p[0]
-		}
-		if p[1] < y0 {
-			y0 = p[1]
-		}
-		if p[0] > x1 {
-			x1 = p[0]
-		}
-		if p[1] > y1 {
-			y1 = p[1]
-		}
-	}
-	return
-}
-
-// iou returns the intersection-over-union of two quads' AABBs.
-func iou(a, b [][2]float64) float64 {
-	ax0, ay0, ax1, ay1 := quadAABB(a)
-	bx0, by0, bx1, by1 := quadAABB(b)
-	ix0, iy0 := math.Max(ax0, bx0), math.Max(ay0, by0)
-	ix1, iy1 := math.Min(ax1, bx1), math.Min(ay1, by1)
-	iw, ih := ix1-ix0, iy1-iy0
-	if iw <= 0 || ih <= 0 {
-		return 0
-	}
-	inter := iw * ih
-	areaA := (ax1 - ax0) * (ay1 - ay0)
-	areaB := (bx1 - bx0) * (by1 - by0)
-	return inter / (areaA + areaB - inter)
-}
-
-// matchIoUBothDirections matches two quad sets by greedy best-IoU in BOTH
-// directions. A pair matches only if IoU >= thr. This isolates true
-// box-membership divergence (one box split into two, two merged into one,
-// spurious detections) from mere coordinate drift: a box shifted 20px but
-// still overlapping its twin scores high IoU and is NOT an orphan.
-func matchIoUBothDirections(gold, got [][][2]float64, thr float64) (matchedGold, matchedGo int) {
-	usedGo := make([]bool, len(got))
-	for _, gb := range gold {
-		best, bestI := -1, 0.0
-		for i, vb := range got {
-			if usedGo[i] {
-				continue
-			}
-			if v := iou(gb, vb); v > bestI {
-				bestI, best = v, i
-			}
-		}
-		if best >= 0 && bestI >= thr {
-			usedGo[best] = true
-			matchedGold++
-		}
-	}
-	usedGold := make([]bool, len(gold))
-	for _, vb := range got {
-		best, bestI := -1, 0.0
-		for i, gb := range gold {
-			if usedGold[i] {
-				continue
-			}
-			if v := iou(gb, vb); v > bestI {
-				bestI, best = v, i
-			}
-		}
-		if best >= 0 && bestI >= thr {
-			usedGold[best] = true
-			matchedGo++
-		}
-	}
-	return matchedGold, matchedGo
-}
-
 // TestDetOCRAdjudication answers a different question than
 // TestDetMembershipAllFixtures. The membership test measures how close Go's
 // boxes are to Python's (alignment). This harness measures which detector
@@ -864,7 +761,7 @@ func TestDetOCRAdjudication(t *testing.T) {
 
 	// Fixtures with non-zero IoU orphans (the only ones worth adjudicating).
 	stems := []string{
-		"mp_cn_sm_p0",   // dense Chinese small text — worst divergence
+		"mp_cn_sm_p0",    // dense Chinese small text — worst divergence
 		"mp_arxiv_p0",    // multi-column paper
 		"mp_en_dense_p0", // dense English
 		"mp_physics_p5",
@@ -894,7 +791,7 @@ func TestDetOCRAdjudication(t *testing.T) {
 		if err := json.Unmarshal([]byte(res.Wire()), &got); err != nil {
 			t.Fatalf("parse Go wire %s: %v", stem, err)
 		}
-		goBoxes := flattenQuads(got.Output)
+		goBoxes := FlattenQuads(got.Output)
 
 		raw, err := os.ReadFile(filepath.Join(dir, stem+".det.golden.json"))
 		if err != nil {
@@ -906,7 +803,7 @@ func TestDetOCRAdjudication(t *testing.T) {
 		if err := json.Unmarshal(raw, &gold); err != nil {
 			t.Fatalf("parse golden %s: %v", stem, err)
 		}
-		pyBoxes := flattenQuads(gold.Output)
+		pyBoxes := FlattenQuads(gold.Output)
 
 		pyOnly, goOnly := matchIoUOrphans(pyBoxes, goBoxes, iouThr)
 		fPyOnly, fPyOnlyReal := 0, 0
@@ -1074,15 +971,6 @@ func TestDetSessionPoolBounded(t *testing.T) {
 	t.Logf("det session pool set bounded: %d pools (cap %d) after %d distinct sizes", got, detMaxShapePools, n)
 }
 
-func quadCenter(q [][2]float64) (float64, float64) {
-	var sx, sy float64
-	for _, p := range q {
-		sx += p[0]
-		sy += p[1]
-	}
-	return sx / float64(len(q)), sy / float64(len(q))
-}
-
 // jsonTemplate reduces a decoded JSON value to a structural signature where
 // every number becomes "#", every string "$", every bool "?", and object keys
 // are sorted. Two values with identical nesting/keys/leaf-types produce the
@@ -1225,9 +1113,10 @@ func TestDumpGoCandidates(t *testing.T) {
 // TestDumpStages is a diagnostic: run RunDet on one fixture (FIXTURE env) with
 // the stage-dump env vars set, writing the Go-side intermediates that the
 // Python oracle (cmp_stages.py) is diffed against:
-//   /tmp/go_pred.json       — raw pred map (post-sigmoid, pre-threshold)
-//   /tmp/go_quads_pre.json  — pre-unclip min-area rect per component (resized)
-//   /tmp/go_candidates.json — post-geometry, pre-score-filter quad+score
+//
+//	/tmp/go_pred.json       — raw pred map (post-sigmoid, pre-threshold)
+//	/tmp/go_quads_pre.json  — pre-unclip min-area rect per component (resized)
+//	/tmp/go_candidates.json — post-geometry, pre-score-filter quad+score
 //
 // Not a regression test. Pair with: python cmp_stages.py <img> <model_dir>;
 // then python diff_stages.py for the per-stage comparison.
@@ -1278,6 +1167,9 @@ func TestDumpStages(t *testing.T) {
 func TestEquivalenceReport(t *testing.T) {
 	skipIfNoModels(t)
 	md := os.Getenv("MODEL_DIR")
+	// P0: refuse to produce an equivalence report against a drifted model
+	// snapshot — the goldens would be meaningless.
+	checkModelSnapshotHash(t, md)
 	dir := "../testdata"
 
 	type row struct {
@@ -1308,8 +1200,8 @@ func TestEquivalenceReport(t *testing.T) {
 			if err := json.Unmarshal([]byte(res.Wire()), &got); err != nil {
 				t.Fatalf("wire %s: %v", stem, err)
 			}
-			gold := loadGoldenBoxes(t, filepath.Join(dir, stem+".dla.golden.json"))
-			mm, mx2, _ := matchBoxesRelaxed(t, gold, got.Boxes, 2.0, 0.05)
+			gold := LoadGoldenBoxes(t, filepath.Join(dir, stem+".dla.golden.json"))
+			mm, mx2, _ := MatchBoxesRelaxed(t, gold, got.Boxes, CmpTolCoord, CmpTolScore)
 			m += mm
 			tot += len(gold)
 			mx = math.Max(mx, mx2)
@@ -1335,8 +1227,8 @@ func TestEquivalenceReport(t *testing.T) {
 			if err := json.Unmarshal([]byte(res.Wire()), &got); err != nil {
 				t.Fatalf("wire %s: %v", stem, err)
 			}
-			gold := loadGoldenBoxes(t, filepath.Join(dir, stem+".tsr.golden.json"))
-			mm, mx2, _ := matchBoxesRelaxed(t, gold, got.Boxes, 2.0, 0.05)
+			gold := LoadGoldenBoxes(t, filepath.Join(dir, stem+".tsr.golden.json"))
+			mm, mx2, _ := MatchBoxesRelaxed(t, gold, got.Boxes, CmpTolCoord, CmpTolScore)
 			m += mm
 			tot += len(gold)
 			mx = math.Max(mx, mx2)
@@ -1398,7 +1290,7 @@ func TestEquivalenceReport(t *testing.T) {
 			if err := json.Unmarshal([]byte(res.Wire()), &got); err != nil {
 				t.Fatalf("wire %s: %v", stem, err)
 			}
-			goBoxes := flattenQuads(got.Output)
+			goBoxes := FlattenQuads(got.Output)
 			raw, err := os.ReadFile(filepath.Join(dir, stem+".det.golden.json"))
 			if err != nil {
 				t.Fatalf("read golden %s: %v", stem, err)
@@ -1409,8 +1301,8 @@ func TestEquivalenceReport(t *testing.T) {
 			if err := json.Unmarshal(raw, &gold); err != nil {
 				t.Fatalf("parse golden %s: %v", stem, err)
 			}
-			goldBoxes := flattenQuads(gold.Output)
-			imG, imGo := matchIoUBothDirections(goldBoxes, goBoxes, iouThr)
+			goldBoxes := FlattenQuads(gold.Output)
+			imG, imGo := MatchIoUBothDirections(goldBoxes, goBoxes, iouThr)
 			orphanG += len(goldBoxes) - imG
 			orphanGo += len(goBoxes) - imGo
 			tot += len(goldBoxes)
@@ -1436,4 +1328,305 @@ func TestEquivalenceReport(t *testing.T) {
 			}
 		}
 	}
+}
+
+// TestWireVsLiveServer is the belt-and-suspenders for the "Go output equals the
+// running deepdoc_server" claim (reviewer follow-up P1). It POSTs each fixture's
+// PNG to the REAL deepdoc_server HTTP endpoints and compares the live JSON
+// response field-by-field against the Go DocAnalyzer-equivalent Wire() output
+// (RunDLA / RunDet / RunTSR / RunOCRRec). TestWireSchemaMatchesGolden only
+// compared Go's Wire() against the re-serialized golden shape; this test
+// compares against the live service itself, so any divergence between Go and the
+// actual HTTP contract — e.g. a server-side change, or a golden that drifted
+// from the service — is caught directly rather than inferred.
+//
+// The deepdoc_server is a verified thin wrapper: its adapters only decode the
+// request bytes, convert color space, run the same deepdoc.vision recognizers
+// with the same config the goldens were generated against (DLA/TSR thr=0.2,
+// OCR default pipeline), clamp bboxes, and map label->class_id. There is no
+// extra resize / DPI / rotation / server-side rasterization. See EQUIVALENCE.md
+// "Open challenges / reviewer follow-ups".
+//
+// Requires a running deepdoc_server at DEEPDOC_URL (default
+// http://localhost:9390) and ORT_LIB/MODEL_DIR for the Go side. Skips if either
+// is absent.
+func TestWireVsLiveServer(t *testing.T) {
+	base := os.Getenv("DEEPDOC_URL")
+	if base == "" {
+		base = "http://localhost:9390"
+	}
+	if err := liveServerHealth(base); err != nil {
+		t.Skipf("deepdoc_server not reachable at %s (%v); set DEEPDOC_URL to enable live comparison", base, err)
+	}
+	skipIfNoModels(t) // ORT_LIB/MODEL_DIR + InitORT for the Go side
+	md := os.Getenv("MODEL_DIR")
+	ctx := context.Background()
+
+	postServer := func(t *testing.T, path, operator string, png []byte) []byte {
+		t.Helper()
+		url := strings.TrimRight(base, "/") + path
+		if operator != "" {
+			url += "?operator=" + operator
+		}
+		return postImage(t, url, png, operator)
+	}
+
+	// DLA — server {"bboxes":[...]} vs Go RunDLA().Wire() {"bboxes":[...]}.
+	for _, stem := range []string{"page0", "mp_textbook_en_p0", "dla_2510_eq"} {
+		stem := stem
+		t.Run("dla/"+stem, func(t *testing.T) {
+			png := readFixturePNG(t, stem)
+			srv := postServer(t, "/predict/dla", "", png)
+			img, err := Decode(filepath.Join("..", "testdata", stem+".png"))
+			if err != nil {
+				t.Fatalf("decode %s: %v", stem, err)
+			}
+			res, err := RunDLA(ctx, md, img)
+			if err != nil {
+				t.Fatalf("RunDLA %s: %v", stem, err)
+			}
+			goWire := res.Wire()
+			compareBBoxesJSON(t, srv, []byte(goWire), "dla", CmpTolScore)
+		})
+	}
+
+	// TSR — same shape; the analyzer does not expose a TSR score, so widen the
+	// score tolerance the way TestAnalyzerTSRGolden does.
+	for _, stem := range []string{"table0", "tsr_table_rotation"} {
+		stem := stem
+		t.Run("tsr/"+stem, func(t *testing.T) {
+			png := readFixturePNG(t, stem)
+			srv := postServer(t, "/predict/tsr", "", png)
+			img, err := Decode(filepath.Join("..", "testdata", stem+".png"))
+			if err != nil {
+				t.Fatalf("decode %s: %v", stem, err)
+			}
+			res, err := RunTSR(ctx, md, img)
+			if err != nil {
+				t.Fatalf("RunTSR %s: %v", stem, err)
+			}
+			goWire := res.Wire()
+			compareBBoxesJSON(t, srv, []byte(goWire), "tsr", 1.0)
+		})
+	}
+
+	// Det — server {"output":[[quads]]} vs Go RunDet().Wire() {"output":[[quads]]}.
+	for _, stem := range []string{"page0", "mp_en_dense_p0"} {
+		stem := stem
+		t.Run("det/"+stem, func(t *testing.T) {
+			png := readFixturePNG(t, stem)
+			srv := postServer(t, "/predict/ocr", "det", png)
+			img, err := Decode(filepath.Join("..", "testdata", stem+".png"))
+			if err != nil {
+				t.Fatalf("decode %s: %v", stem, err)
+			}
+			res, err := RunDet(ctx, md, img)
+			if err != nil {
+				t.Fatalf("RunDet %s: %v", stem, err)
+			}
+			goWire := res.Wire()
+			compareDetJSON(t, srv, []byte(goWire))
+		})
+	}
+
+	// OCR rec — server {"output":[[[text, score]]]} vs Go RunOCRRec().Wire()
+	// (compareRecJSON checks text only; Go now emits the real score).
+	for _, stem := range []string{"line0", "line_cn"} {
+		stem := stem
+		t.Run("rec/"+stem, func(t *testing.T) {
+			png := readFixturePNG(t, stem)
+			srv := postServer(t, "/predict/ocr", "rec", png)
+			img, err := Decode(filepath.Join("..", "testdata", stem+".png"))
+			if err != nil {
+				t.Fatalf("decode %s: %v", stem, err)
+			}
+			res, err := RunOCRRec(ctx, md, img)
+			if err != nil {
+				t.Fatalf("RunOCRRec %s: %v", stem, err)
+			}
+			goWire := res.Wire()
+			compareRecJSON(t, srv, []byte(goWire))
+		})
+	}
+}
+
+func readFixturePNG(t *testing.T, stem string) []byte {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("..", "testdata", stem+".png"))
+	if err != nil {
+		t.Fatalf("read fixture %s: %v", stem, err)
+	}
+	return b
+}
+
+// postImage POSTs png bytes as the "request" multipart field to url and returns
+// the raw response body, failing the test on any transport or HTTP error. When
+// operator is non-empty it is also sent as a "operator" form field (the
+// deepdoc_server ocr endpoint reads it from the form; the query param is sent
+// too for compatibility with either LitServe request shape).
+func postImage(t *testing.T, url string, png []byte, operator string) []byte {
+	t.Helper()
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	fw, err := mw.CreateFormFile("request", "image.png")
+	if err != nil {
+		t.Fatalf("create form file: %v", err)
+	}
+	if _, err := fw.Write(png); err != nil {
+		t.Fatalf("write form file: %v", err)
+	}
+	if operator != "" {
+		if err := mw.WriteField("operator", operator); err != nil {
+			t.Fatalf("write operator field: %v", err)
+		}
+	}
+	if err := mw.Close(); err != nil {
+		t.Fatalf("close multipart: %v", err)
+	}
+	req, err := http.NewRequest(http.MethodPost, url, &body)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST %s: %v", url, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("POST %s: status %d: %s", url, resp.StatusCode, string(b))
+	}
+	out, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	return out
+}
+
+// liveServerHealth probes GET /health so a missing server yields a clear Skip
+// instead of a wall of connection-refused traces.
+func liveServerHealth(base string) error {
+	req, err := http.NewRequest(http.MethodGet, strings.TrimRight(base, "/")+"/health", nil)
+	if err != nil {
+		return err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("status %d", resp.StatusCode)
+	}
+	return nil
+}
+
+// compareBBoxesJSON compares a server {"bboxes":[...]} response against the Go
+// Wire() {"bboxes":[...]} output. The server response is the reference ("gold");
+// Go is "got". Matching is class-aware with the documented coordinate/score
+// tolerances.
+func compareBBoxesJSON(t *testing.T, serverJSON, goJSON []byte, kind string, scoreTol float64) {
+	t.Helper()
+	var s struct {
+		Bboxes [][]float64 `json:"bboxes"`
+	}
+	if err := json.Unmarshal(serverJSON, &s); err != nil {
+		t.Fatalf("parse server %s json: %v", kind, err)
+	}
+	var g struct {
+		Bboxes [][]float64 `json:"bboxes"`
+	}
+	if err := json.Unmarshal(goJSON, &g); err != nil {
+		t.Fatalf("parse go %s json: %v", kind, err)
+	}
+	matched, maxd, _ := MatchBoxesRelaxed(t, s.Bboxes, g.Bboxes, CmpTolCoord, scoreTol)
+	t.Logf("%s: server=%d go=%d matched=%d maxd=%.3f px", kind, len(s.Bboxes), len(g.Bboxes), matched, maxd)
+	if matched != len(s.Bboxes) {
+		t.Errorf("%s: %d/%d server boxes matched by Go (missing %d)", kind, matched, len(s.Bboxes), len(s.Bboxes)-matched)
+	}
+}
+
+// compareDetJSON compares a server det {"output":[[quads]]} response against the
+// Go Wire() det output. The only accepted divergence between Go and the live
+// cv2-backed server is the documented Det 3/5 contour-tracer floor (+slack);
+// anything larger is a real Go-vs-service regression.
+func compareDetJSON(t *testing.T, serverJSON, goJSON []byte) {
+	t.Helper()
+	srvBoxes := flattenOutput(t, serverJSON, "det")
+	goBoxes := flattenOutput(t, goJSON, "det")
+	imG, imGo := MatchIoUBothDirections(srvBoxes, goBoxes, 0.5)
+	orphanG := len(srvBoxes) - imG
+	orphanGo := len(goBoxes) - imGo
+	t.Logf("det: server=%d go=%d | IoU orphan(g/g)=%d/%d", len(srvBoxes), len(goBoxes), orphanG, orphanGo)
+	const (
+		baselineG  = 3
+		baselineGo = 5
+		slack      = 3
+	)
+	if orphanG > baselineG+slack {
+		t.Errorf("det: %d/%d server boxes unmatched under IoU (> baseline %d+%d)", imG, len(srvBoxes), baselineG, slack)
+	}
+	if orphanGo > baselineGo+slack {
+		t.Errorf("det: Go produced %d extra boxes under IoU (> baseline %d+%d)", orphanGo, baselineGo, slack)
+	}
+}
+
+// compareRecJSON compares a server rec {"output":[[[text,1.0]]]} response against
+// the Go Wire() rec output, exactly (text must be identical).
+func compareRecJSON(t *testing.T, serverJSON, goJSON []byte) {
+	t.Helper()
+	srvTexts := flattenTexts(t, serverJSON)
+	goTexts := flattenTexts(t, goJSON)
+	if len(srvTexts) != len(goTexts) {
+		t.Errorf("rec: count mismatch server=%d go=%d", len(srvTexts), len(goTexts))
+	}
+	n := len(srvTexts)
+	if len(goTexts) < n {
+		n = len(goTexts)
+	}
+	for i := 0; i < n; i++ {
+		if srvTexts[i] != goTexts[i] {
+			t.Errorf("rec[%d]: server %q != go %q", i, srvTexts[i], goTexts[i])
+		}
+	}
+}
+
+// flattenOutput extracts the quad list from a det Wire()/server payload
+// (boxes live under output[0][0]).
+func flattenOutput(t *testing.T, raw []byte, kind string) [][][2]float64 {
+	t.Helper()
+	var v struct {
+		Output [][][][][2]float64 `json:"output"`
+	}
+	if err := json.Unmarshal(raw, &v); err != nil {
+		t.Fatalf("parse %s json: %v", kind, err)
+	}
+	return FlattenQuads(v.Output)
+}
+
+// flattenTexts extracts the recognized strings from a rec Wire()/server payload
+// (pairs live under output[0][0], text is pair[0]).
+func flattenTexts(t *testing.T, raw []byte) []string {
+	t.Helper()
+	var v struct {
+		Output [][][]any `json:"output"`
+	}
+	if err := json.Unmarshal(raw, &v); err != nil {
+		t.Fatalf("parse rec json: %v", err)
+	}
+	if len(v.Output) == 0 || len(v.Output[0]) == 0 {
+		return nil
+	}
+	var out []string
+	for _, item := range v.Output[0][0] {
+		pair, ok := item.([]any)
+		if !ok || len(pair) < 1 {
+			continue
+		}
+		if s, ok := pair[0].(string); ok {
+			out = append(out, s)
+		}
+	}
+	return out
 }

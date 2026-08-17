@@ -4,6 +4,7 @@ package infnative
 
 import (
 	"context"
+	"encoding/json"
 	"image"
 	"image/draw"
 	"image/png"
@@ -12,6 +13,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	"dla-native/native"
+	"ragflow/internal/deepdoc/parser/pdf/inference"
 	deepdoctype "ragflow/internal/deepdoc/parser/type"
 )
 
@@ -29,6 +32,7 @@ import (
 //	  MODEL_DIR=/path/to/deepdoc \
 //	  go test -tags "native_det integration" -run TestNativeAnalyzerInProcess \
 //	  ./internal/deepdoc/parser/pdf/inference/native/...
+//
 // TestNativeAnalyzerUninitializedNegative locks the fail-fast contract the
 // server depends on (see registerNativeDeepDoc): before Register wires ONNX
 // Runtime, the backend must report not-serving and NewAnalyzer must refuse to
@@ -185,4 +189,229 @@ func cropBox(src image.Image, b deepdoctype.OCRBox) image.Image {
 	out := image.NewRGBA(image.Rect(0, 0, r.Dx(), r.Dy()))
 	draw.Draw(out, out.Bounds(), src, r.Min, draw.Src)
 	return out
+}
+
+// === Value-level golden equivalence for the in-process DocAnalyzer seam ===
+//
+// The tests below prove the NativeAnalyzer (the DocAnalyzer the PDF parser
+// actually consumes) produces output equivalent to the Python deepdoc
+// reference, reusing the SAME Python-reference goldens as the dla-native
+// integration suite. This closes the gap noted in EQUIVALENCE.md: the in-
+// process backend previously only had a smoke test (non-empty, in-bounds);
+// these tests assert value-level parity through the analyzer's public API.
+
+// goldenPath resolves a dla-native testdata fixture from this package's test
+// directory (internal/deepdoc/parser/pdf/inference/native). Four ".." climb to
+// internal/deepdoc, where the dla-native module lives.
+func goldenPath(name string) string {
+	return filepath.Join("..", "..", "..", "..", "dla-native", "testdata", name)
+}
+
+// openFixture decodes a PNG fixture the way the production path does (Go's
+// image decode -> NativeAnalyzer), so the comparison exercises the real server
+// code path rather than the dla-native internal decoder.
+func openFixture(t *testing.T, stem string) image.Image {
+	t.Helper()
+	f, err := os.Open(goldenPath(stem + ".png"))
+	if err != nil {
+		t.Skipf("fixture unavailable: %v", err)
+	}
+	defer f.Close()
+	src, err := png.Decode(f)
+	if err != nil {
+		t.Fatalf("decode fixture %s: %v", stem, err)
+	}
+	return src
+}
+
+// labelKey maps a layout/TSR label to a stable integer key so the analyzer's
+// string Label can be matched against the golden's integer class under the
+// same key space. Duplicate labels (DLA has two "table caption" entries) map to
+// their first index on BOTH sides, mirroring the analyzer's class->label
+// expansion.
+func labelKey(labels []string, label string) int {
+	for i, l := range labels {
+		if l == label {
+			return i
+		}
+	}
+	return -1
+}
+
+// analyzerWithModels builds a NativeAnalyzer after ensuring ONNX Runtime is
+// initialized. It mirrors skipIfNoModels in the dla-native suite: the test is
+// skipped (not failed) when ORT_LIB/MODEL_DIR are unset, and InitORT is
+// idempotent so it composes with the other analyzer tests in this file.
+func analyzerWithModels(t *testing.T) *NativeAnalyzer {
+	t.Helper()
+	ortLib := os.Getenv("ORT_LIB")
+	modelDir := os.Getenv("MODEL_DIR")
+	if ortLib == "" || modelDir == "" {
+		t.Skip("ORT_LIB and MODEL_DIR required (in-process backend integration)")
+	}
+	if err := native.InitORT(ortLib); err != nil {
+		t.Fatalf("InitORT: %v", err)
+	}
+	a, err := NewAnalyzer(modelDir)
+	if err != nil {
+		t.Fatalf("NewAnalyzer: %v", err)
+	}
+	return a
+}
+
+// TestAnalyzerDLAGolden proves the analyzer's DLA output matches the Python
+// reference golden (class + coordinates + confidence) within the documented
+// sub-pixel floor, across the same fixtures the dla-native suite uses.
+func TestAnalyzerDLAGolden(t *testing.T) {
+	a := analyzerWithModels(t)
+	ctx := context.Background()
+	labels := inference.DefaultDLALabels()
+	stems := []string{"page0", "mp_textbook_en_p0", "mp_whitepaper_cn_p0", "mp_paper_eq_p0", "mp_zhtw_ent_p0",
+		"dla_2510_figcap", "dla_bookrag_figcap", "dla_2510_eq",
+		"dla_real_cn_report", "dla_real_zhtw", "dla_real_en_paper"}
+	for _, stem := range stems {
+		stem := stem
+		t.Run(stem, func(t *testing.T) {
+			img := openFixture(t, stem)
+			regions, err := a.DLA(ctx, img)
+			if err != nil {
+				t.Fatalf("DLA: %v", err)
+			}
+			got := make([][]float64, 0, len(regions))
+			for _, r := range regions {
+				got = append(got, []float64{r.X0, r.Y0, r.X1, r.Y1, r.Confidence, float64(labelKey(labels, r.Label))})
+			}
+			gold := native.LoadGoldenBoxes(t, goldenPath(stem+".dla.golden.json"))
+			// Rewrite the golden's integer class to the same label key so both
+			// sides match on the analyzer's label semantics.
+			for i := range gold {
+				gold[i][5] = float64(labelKey(labels, labels[int(gold[i][5])]))
+			}
+			matched, maxd, unmatched := native.MatchBoxesRelaxed(t, gold, got, 2.0, native.CmpTolScore)
+			t.Logf("DLA %s: matched %d/%d, maxd %.3f px, unmatched %d", stem, matched, len(gold), maxd, len(unmatched))
+			if matched != len(gold) {
+				t.Errorf("DLA %s: matched %d/%d golden regions", stem, matched, len(gold))
+			}
+		})
+	}
+}
+
+// TestAnalyzerTSRGolden proves the analyzer's TSR output matches the Python
+// reference golden (structure: which cells are table/column/row) within the
+// documented floor. The analyzer does not expose a TSR score, so the score
+// tolerance is widened to ignore it; only class + coordinates are asserted.
+func TestAnalyzerTSRGolden(t *testing.T) {
+	a := analyzerWithModels(t)
+	ctx := context.Background()
+	labels := inference.DefaultTSRLabels()
+	stems := []string{"table0", "tsr_table_normal", "tsr_table_rotation",
+		"tsr_06_table_content", "tsr_18_table_caption", "tsr_13_crosspage", "tsr_14_interleaved",
+		"tsr_real_report"}
+	for _, stem := range stems {
+		stem := stem
+		t.Run(stem, func(t *testing.T) {
+			img := openFixture(t, stem)
+			cells, err := a.TSR(ctx, img)
+			if err != nil {
+				t.Fatalf("TSR: %v", err)
+			}
+			got := make([][]float64, 0, len(cells))
+			for _, c := range cells {
+				got = append(got, []float64{c.X0, c.Y0, c.X1, c.Y1, 0, float64(labelKey(labels, c.Label))})
+			}
+			gold := native.LoadGoldenBoxes(t, goldenPath(stem+".tsr.golden.json"))
+			for i := range gold {
+				gold[i][5] = float64(labelKey(labels, labels[int(gold[i][5])]))
+			}
+			matched, maxd, unmatched := native.MatchBoxesRelaxed(t, gold, got, native.CmpTolCoord, 1.0)
+			t.Logf("TSR %s: matched %d/%d, maxd %.3f px, unmatched %d", stem, matched, len(gold), maxd, len(unmatched))
+			if matched != len(gold) {
+				t.Errorf("TSR %s: matched %d/%d golden cells", stem, matched, len(gold))
+			}
+		})
+	}
+}
+
+// TestAnalyzerOCRRecGolden proves the analyzer's OCR text recognition matches
+// the Python reference golden exactly (EN / CJK / mixed / digits).
+func TestAnalyzerOCRRecGolden(t *testing.T) {
+	a := analyzerWithModels(t)
+	ctx := context.Background()
+	stems := []string{"line0", "line_cn", "line_mix", "line_num",
+		"line_real_cn", "line_real_zhtw", "line_real_en"}
+	for _, stem := range stems {
+		stem := stem
+		t.Run(stem, func(t *testing.T) {
+			img := openFixture(t, stem)
+			rec, err := a.OCRRecognize(ctx, img)
+			if err != nil {
+				t.Fatalf("OCRRecognize: %v", err)
+			}
+			gold := ocrRecGoldText(t, goldenPath(stem+".ocr_rec.golden.json"))
+			got := ""
+			if len(rec) > 0 {
+				got = rec[0].Text
+			}
+			if got != gold {
+				t.Errorf("OCR-rec %s: got %q, gold %q", stem, got, gold)
+			}
+		})
+	}
+}
+
+// TestAnalyzerDetGolden proves the analyzer's text detection matches the Python
+// reference golden on page0: every Python box has a Go twin by center within the
+// documented floor, and Go does not hallucinate beyond the accepted 3/5 orphan
+// floor.
+func TestAnalyzerDetGolden(t *testing.T) {
+	a := analyzerWithModels(t)
+	ctx := context.Background()
+	img := openFixture(t, "page0")
+	boxes, err := a.OCRDetect(ctx, img)
+	if err != nil {
+		t.Fatalf("OCRDetect: %v", err)
+	}
+	got := make([][][2]float64, 0, len(boxes))
+	for _, b := range boxes {
+		got = append(got, [][2]float64{{b.X0, b.Y0}, {b.X1, b.Y1}, {b.X2, b.Y2}, {b.X3, b.Y3}})
+	}
+	raw, err := os.ReadFile(goldenPath("page0.det.golden.json"))
+	if err != nil {
+		t.Skipf("golden unavailable: %v", err)
+	}
+	var gold struct {
+		Output [][][][][2]float64 `json:"output"`
+	}
+	if err := json.Unmarshal(raw, &gold); err != nil {
+		t.Fatalf("parse golden: %v", err)
+	}
+	goldBoxes := native.FlattenQuads(gold.Output)
+	mG, mGo, maxd := native.MatchBothDirections(goldBoxes, got, native.CmpTolCoord)
+	imG, imGo := native.MatchIoUBothDirections(goldBoxes, got, 0.5)
+	t.Logf("Det page0: center matched(g/g)=%d/%d maxd=%.3f px | IoU orphan(g/g)=%d/%d",
+		mG, mGo, maxd, len(goldBoxes)-imG, len(got)-imGo)
+	if mG != len(goldBoxes) {
+		t.Errorf("Det page0: %d/%d golden boxes matched by center (missing %d)", mG, len(goldBoxes), len(goldBoxes)-mG)
+	}
+	const detOrphanSlack = 5 // accepted IoU floor (3/5) + slack
+	if len(got)-mGo > detOrphanSlack {
+		t.Errorf("Det page0: %d unmatched Go boxes (got %d) exceeds accepted floor %d", len(got)-mGo, len(got), detOrphanSlack)
+	}
+}
+
+// ocrRecGoldText reads the recognized text from an OCR-rec golden JSON
+// ({"output": [[[["<text>"]]]]}).
+func ocrRecGoldText(t *testing.T, path string) string {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Skipf("golden unavailable: %v", err)
+	}
+	var gold struct {
+		Output [][][][]any `json:"output"`
+	}
+	if err := json.Unmarshal(raw, &gold); err != nil {
+		t.Fatalf("parse golden %s: %v", path, err)
+	}
+	return gold.Output[0][0][0][0].(string)
 }

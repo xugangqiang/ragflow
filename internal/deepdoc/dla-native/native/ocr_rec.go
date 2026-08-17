@@ -211,10 +211,12 @@ func ocrRecCTCDecode(out []float32, chars []string) OCRRecResult {
 	return OCRRecResult{Text: text.String(), Score: round4(score)}
 }
 
-// Wire emits the Go DocAnalyzer OCR-rec format: {"output": [[[text, 1.0]]]}.
+// Wire emits the Go DocAnalyzer OCR-rec format: {"output": [[[text, score]]]}.
 func (r OCRRecResult) Wire() string {
-	// Mirror ocr_adapter.recognize: confidence filled with 1.0, 4-level nesting.
-	pair := []any{r.Text, 1.0}
+	// Emit the real recognition confidence (mean per-char softmax prob from
+	// ocrRecCTCDecode) so the wire schema matches ocr.py's
+	// recognize_batch_with_score, 4-level nesting.
+	pair := []any{r.Text, r.Score}
 	arr1 := []any{pair}
 	arr2 := []any{arr1}
 	arr3 := []any{arr2}

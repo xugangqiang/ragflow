@@ -14,7 +14,7 @@ package main
 // Tasks: dla | tsr | ocr-rec | det
 // Wire formats (matching deepdoc/server/adapters/*):
 //   dla/tsr : {"bboxes": [[x0,y0,x1,y1,score,class_id], ...]}
-//   ocr-rec : {"output": [[[["text", 1.0]]]]}
+//   ocr-rec : {"output": [[[["text", score]]]]}  (score = real recognition confidence)
 //   det     : {"output": [[ [ [x,y]*4, ... ] ]]}
 
 import (
