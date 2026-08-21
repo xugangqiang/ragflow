@@ -5,6 +5,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"go.uber.org/zap"
@@ -33,8 +34,9 @@ import (
 func registerNativeDeepDoc() {
 	modelDir := resolveDeepDocModelDir()
 	ortLib := resolveDeepDocORTLib()
+	dropScore := resolveDeepDocDropScore()
 
-	if err := infnative.Register(modelDir, ortLib); err != nil {
+	if err := infnative.Register(modelDir, ortLib, dropScore); err != nil {
 		common.Warn("in-process DeepDoc backend unavailable",
 			zap.String("reason", err.Error()))
 	}
@@ -98,6 +100,20 @@ func resolveDeepDocORTLib() string {
 		}
 	}
 	return ""
+}
+
+// resolveDeepDocDropScore returns the explicit DEEPDOC_DROP_SCORE env, else
+// the in-process backend's default (infnative.DefaultDropScore, which mirrors
+// the Python inference service's Recognizer.drop_score).
+func resolveDeepDocDropScore() float64 {
+	if v := strings.TrimSpace(common.GetEnv(common.EnvDeepDocDropScore)); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			return f
+		}
+		common.Warn("invalid DEEPDOC_DROP_SCORE, using default",
+			zap.String("value", v), zap.Float64("default", infnative.DefaultDropScore))
+	}
+	return infnative.DefaultDropScore
 }
 
 // dirHasModels reports whether dir contains every required model file.

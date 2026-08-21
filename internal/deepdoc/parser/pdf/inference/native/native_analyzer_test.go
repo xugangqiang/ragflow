@@ -47,7 +47,7 @@ func TestNativeAnalyzerUninitializedNegative(t *testing.T) {
 	if modelDir == "" {
 		modelDir = filepath.Join("..", "..", "..", "..", "rag", "res", "deepdoc")
 	}
-	if _, err := NewAnalyzer(modelDir); err == nil {
+	if _, err := NewAnalyzer(modelDir, DefaultDropScore); err == nil {
 		t.Error("NewAnalyzer succeeded before ONNX Runtime init; expected error")
 	}
 	a := &NativeAnalyzer{modelDir: modelDir}
@@ -62,13 +62,13 @@ func TestNativeAnalyzerInProcess(t *testing.T) {
 	if ortLib == "" || modelDir == "" {
 		t.Skip("ORT_LIB and MODEL_DIR required (in-process backend integration)")
 	}
-	if err := Register(modelDir, ortLib); err != nil {
+	if err := Register(modelDir, ortLib, DefaultDropScore); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 	if !Serving() {
 		t.Skip("in-process backend not serving (ORT/models absent)")
 	}
-	a, err := NewAnalyzer(modelDir)
+	a, err := NewAnalyzer(modelDir, DefaultDropScore)
 	if err != nil {
 		t.Fatalf("NewAnalyzer: %v", err)
 	}
@@ -252,7 +252,7 @@ func analyzerWithModels(t *testing.T) *NativeAnalyzer {
 	if err := native.InitORT(ortLib); err != nil {
 		t.Fatalf("InitORT: %v", err)
 	}
-	a, err := NewAnalyzer(modelDir)
+	a, err := NewAnalyzer(modelDir, DefaultDropScore)
 	if err != nil {
 		t.Fatalf("NewAnalyzer: %v", err)
 	}

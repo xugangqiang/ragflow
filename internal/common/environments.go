@@ -137,6 +137,12 @@ const (
 	// Optional: if empty but ORT was initialized elsewhere, the backend still
 	// serves; if unset and uninitialized, it degrades to the empty analyzer.
 	EnvDeepDocORTLib = "DEEPDOC_ORT_LIB"
+	// EnvDeepDocDropScore overrides the confidence threshold below which the
+	// in-process (Go) DeepDoc backend blanks recognized text while preserving
+	// the real score. It MUST match the Python inference service's
+	// Recognizer.drop_score (deepdoc/vision/ocr.py, default 0.5) so both
+	// backends apply the same text-blanking contract.
+	EnvDeepDocDropScore = "DEEPDOC_DROP_SCORE"
 
 	EnvUpdateGolden                      = "UPDATE_GOLDEN"
 	EnvBatchParityFilter                 = "BATCH_PARITY_FILTER"

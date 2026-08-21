@@ -34,8 +34,15 @@ var registeredModelDir string
 // NativeAnalyzer runs DeepDoc vision inference in-process. It satisfies
 // doctype.DocAnalyzer, so the PDF parser consumes it through the exact same
 // interface as the HTTP-backed Client.
+// DefaultDropScore mirrors deepdoc/vision/ocr.py's Recognizer.drop_score
+// (0.5). OCRRecognize blanks text whose score is below this threshold while
+// preserving the real score, so the in-process backend honours the exact same
+// text-blanking contract as the Python inference service.
+const DefaultDropScore = 0.5
+
 type NativeAnalyzer struct {
-	modelDir string
+	modelDir  string
+	dropScore float64
 }
 
 var _ deepdoctype.DocAnalyzer = (*NativeAnalyzer)(nil)
@@ -44,15 +51,17 @@ var _ deepdoctype.DocAnalyzer = (*NativeAnalyzer)(nil)
 // initialized and every required model file exists. It returns an error when
 // the in-process backend cannot serve, letting the caller (the registration
 // factory) fall back to the empty analyzer instead of panicking on an
-// uninitialized ONNX environment.
-func NewAnalyzer(modelDir string) (*NativeAnalyzer, error) {
+// uninitialized ONNX environment. dropScore is the confidence threshold below
+// which recognized text is blanked (see DefaultDropScore and the Python
+// service contract).
+func NewAnalyzer(modelDir string, dropScore float64) (*NativeAnalyzer, error) {
 	if !native.Initialized() {
 		return nil, fmt.Errorf("deepdoc native: onnxruntime not initialized")
 	}
 	if !common.HasModelFiles(modelDir) {
 		return nil, fmt.Errorf("deepdoc native: missing required model files in %s", modelDir)
 	}
-	return &NativeAnalyzer{modelDir: modelDir}, nil
+	return &NativeAnalyzer{modelDir: modelDir, dropScore: dropScore}, nil
 }
 
 // Register wires this backend into the parser as the local in-process
@@ -62,7 +71,16 @@ func NewAnalyzer(modelDir string) (*NativeAnalyzer, error) {
 // this is a no-op for that step. The factory returns false when the backend
 // cannot serve, so the parser degrades to the empty analyzer rather than
 // crashing.
-func Register(modelDir, ortLib string) error {
+// Register wires this backend into the parser as the local in-process
+// fallback. Call it once at process start (the server binary) after
+// resolving modelDir/ortLib/dropScore. A non-empty ortLib is handed to
+// native.InitORT; if ORT is already initialized (or ortLib is empty and
+// InitORT ran elsewhere) this is a no-op for that step. dropScore is the
+// confidence threshold used by OCRRecognize to blank low-confidence text,
+// mirroring the Python service's Recognizer.drop_score. The factory returns
+// false when the backend cannot serve, so the parser degrades to the empty
+// analyzer rather than crashing.
+func Register(modelDir, ortLib string, dropScore float64) error {
 	registeredModelDir = modelDir
 	if ortLib != "" {
 		if err := native.InitORT(ortLib); err != nil {
@@ -70,7 +88,7 @@ func Register(modelDir, ortLib string) error {
 		}
 	}
 	parser.SetNativeDocAnalyzerFactory(func() (deepdoctype.DocAnalyzer, bool) {
-		a, err := NewAnalyzer(modelDir)
+		a, err := NewAnalyzer(modelDir, dropScore)
 		if err != nil {
 			return nil, false
 		}
@@ -176,6 +194,12 @@ func (a *NativeAnalyzer) OCRRecognize(ctx context.Context, img image.Image) ([]d
 	res, err := native.RunOCRRec(ctx, a.modelDir, ni)
 	if err != nil {
 		return nil, err
+	}
+	// Mirror the Python inference service contract: blank text whose score is
+	// below drop_score but preserve the real confidence, so callers consume an
+	// identical OCRText regardless of which backend produced it.
+	if float64(res.Score) < a.dropScore {
+		return []deepdoctype.OCRText{{Text: "", Confidence: float64(res.Score)}}, nil
 	}
 	return []deepdoctype.OCRText{{Text: res.Text, Confidence: float64(res.Score)}}, nil
 }
