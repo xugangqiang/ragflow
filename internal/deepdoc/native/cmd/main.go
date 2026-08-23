@@ -9,7 +9,7 @@ package main
 //
 // Usage:
 //   ORT_LIB=/path/to/libonnxruntime.so.1.23.2 \
-//     go run . -task dla -image testdata/page0.png -modeldir /path/to/models
+//     go run ./cmd -task dla -image testdata/page0.png -modeldir /path/to/models
 //
 // Tasks: dla | tsr | ocr-rec | det
 // Wire formats (matching deepdoc/server/adapters/*):
@@ -23,7 +23,7 @@ import (
 	"fmt"
 	"os"
 
-	"dla-native/native"
+	"native"
 )
 
 func main() {

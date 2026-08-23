@@ -432,40 +432,40 @@ run_go_tests() {
         CGO_CFLAGS="$CGO_CFLAGS" CGO_LDFLAGS="$CGO_LDFLAGS" \
         go test -count=1 "$@"
 
-    run_dla_native_tests
+    run_native_tests
 }
 
-# Run the unit tests of the standalone dla-native module (DeepDoc det/DLA/TSR/
+# Run the unit tests of the standalone native module (DeepDoc det/DLA/TSR/
 # OCR-rec Go ports). It is a NESTED Go module (own go.mod) so the root
 # `./...` in run_go_tests never descends into it — coverage has to be invoked
-# explicitly here (HANDOFF.md §8 D1). The build is pure-Go geometry
+# explicitly here. The build is pure-Go geometry
 # (no external services, no OpenCV), so it belongs in the unit tier. Model-backed
-# integration tests are handled by run_dla_native_integration_tests.
-run_dla_native_tests() {
-    local dla_dir="$PROJECT_ROOT/internal/deepdoc/dla-native"
-    [ -f "$dla_dir/go.mod" ] || return 0
+# integration tests are handled by run_native_integration_tests.
+run_native_tests() {
+    local native_dir="$PROJECT_ROOT/internal/deepdoc/native"
+    [ -f "$native_dir/go.mod" ] || return 0
 
-    print_section "Running dla-native unit tests"
-    ( cd "$dla_dir" && \
+    print_section "Running native unit tests"
+    ( cd "$native_dir" && \
       GOPROXY=${GOPROXY:-https://goproxy.cn,https://proxy.golang.org,direct} \
       CGO_ENABLED=1 \
-      go test -count=1 ./native/ )
+      go test -count=1 ./... )
 }
 
-# Run the model-backed integration tests of the dla-native module. These
+# Run the model-backed integration tests of the native module. These
 # require ORT_LIB + MODEL_DIR at runtime; the tests self-skip when those are
 # unset (see native_integration_test.go skipIfNoModels). Run under the
-# `integration` tier so the model-free unit run (run_dla_native_tests) stays
+# `integration` tier so the model-free unit run (run_native_tests) stays
 # free of external services.
-run_dla_native_integration_tests() {
-    local dla_dir="$PROJECT_ROOT/internal/deepdoc/dla-native"
-    [ -f "$dla_dir/go.mod" ] || return 0
+run_native_integration_tests() {
+    local native_dir="$PROJECT_ROOT/internal/deepdoc/native"
+    [ -f "$native_dir/go.mod" ] || return 0
 
-    print_section "Running dla-native integration tests"
-    ( cd "$dla_dir" && \
+    print_section "Running native integration tests"
+    ( cd "$native_dir" && \
       GOPROXY=${GOPROXY:-https://goproxy.cn,https://proxy.golang.org,direct} \
       CGO_ENABLED=1 \
-      go test -tags integration -count=1 ./native/ )
+      go test -tags integration -count=1 ./... )
 }
 
 # Run Go tests gated behind a build tag (or space-separated tag list), e.g.
@@ -629,7 +629,7 @@ main() {
             else
                 run_go_tests_tagged integration "${args[@]:1}"
             fi
-            run_dla_native_integration_tests
+            run_native_integration_tests
             ;;
         --test-e2e)
             check_go_deps
@@ -663,10 +663,10 @@ main() {
                 pkgs=("${args[@]:1}")
             fi
             if [ "${#pkgs[@]}" -eq 0 ]; then
-                pkgs=(./internal/deepdoc/parser/pdf/inference/native/...)
+                pkgs=(./internal/deepdoc/parser/pdf/inference/native_analyzer/...)
             fi
             run_go_tests_tagged "native_det integration" "${pkgs[@]}"
-            run_dla_native_integration_tests
+            run_native_integration_tests
             ;;
         --clean|-C)
             clean

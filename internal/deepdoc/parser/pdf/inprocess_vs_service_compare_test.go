@@ -40,10 +40,10 @@ import (
 	"strings"
 	"testing"
 
-	"dla-native/native"
+	"native"
 	pdfpkg "ragflow/internal/deepdoc/parser/pdf"
 	inf "ragflow/internal/deepdoc/parser/pdf/inference"
-	infnative "ragflow/internal/deepdoc/parser/pdf/inference/native"
+	infnative "ragflow/internal/deepdoc/parser/pdf/inference/native_analyzer"
 	pdftype "ragflow/internal/deepdoc/parser/pdf/type"
 	deepdoctype "ragflow/internal/deepdoc/parser/type"
 )

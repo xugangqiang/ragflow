@@ -54,7 +54,7 @@ func NewClient(baseURL string) (*Client, error) {
 // deepdoc/vision/dla_cli.py:10-21.  Duplicates at indices 4, 7, 9 are
 // kept verbatim for backward compatibility with existing inference servers.
 //
-// This list is the wire contract: the in-process detector (dla-native/native)
+// This list is the wire contract: the in-process detector (native)
 // serialises its DLA output through these same indices, and its internal
 // yoloDlaLabels must stay element-for-element identical to this (same order,
 // same duplicate indices 4/7/9). The two live in separate modules, so they

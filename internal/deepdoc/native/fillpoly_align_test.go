@@ -20,14 +20,14 @@ import (
 )
 
 type fillPolyCase struct {
-	Mw   int       `json:"mw"`
-	Mh   int       `json:"mh"`
+	Mw   int          `json:"mw"`
+	Mh   int          `json:"mh"`
 	Quad [][2]float64 `json:"quad"`
-	Mask []int     `json:"mask"`
+	Mask []int        `json:"mask"`
 }
 
 func loadFillPolyGolden(t *testing.T) []fillPolyCase {
-	raw, err := os.ReadFile(filepath.Join("..", "testdata", "mp_cn_sm_p0.fillpoly.golden.json"))
+	raw, err := os.ReadFile(filepath.Join("testdata", "mp_cn_sm_p0.fillpoly.golden.json"))
 	if err != nil {
 		t.Fatalf("read fillpoly golden: %v", err)
 	}

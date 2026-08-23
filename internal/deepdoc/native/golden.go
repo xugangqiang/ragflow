@@ -6,14 +6,14 @@ package native
 //
 // These used to live (unexported) inside native_integration_test.go. They are
 // extracted here so the SAME comparison logic is reused by:
-//   - the dla-native integration tests (package native), and
+//   - the native integration tests (package native), and
 //   - the in-process DeepDoc backend tests (package infnative), which prove the
 //     NativeAnalyzer DocAnalyzer seam is functionally equivalent to the Python
 //     deepdoc service using the very same Python-reference goldens.
 //
 // Keeping one implementation avoids two diverging copies of the matching math.
 // This file is gated by the integration build tag (like native_integration_test.go):
-// it is compiled both when the dla-native suite runs (-tags integration) and when
+// it is compiled both when the native suite runs (-tags integration) and when
 // the infnative package imports this module (-tags "native_det integration").
 
 import (

@@ -25,11 +25,16 @@ package pdf_test
 // (build tag native_det) against a live Python service.
 //
 // Prerequisites (set via env):
-//   ORT_LIB      path to libonnxruntime.so
-//   MODEL_DIR    DeepDoc model directory (rag/res/deepdoc)
-//   DEEPDOC_URL  Python inference service, default http://localhost:9390
-//   INPROC_PDFS  optional comma list of PDF basenames to limit the run
-//   INPROC_PAGES optional page cap (int); 0 = all pages of every PDF
+//   ORT_LIB       path to libonnxruntime.so
+//   MODEL_DIR     DeepDoc model directory (rag/res/deepdoc)
+//   DEEPDOC_URL   Python inference service, default http://localhost:9390
+//   INPROC_PDFS   optional comma list of PDF basenames to limit the run
+//   INPROC_PAGES  optional page cap (int); 0 = all pages of every PDF
+//   INPROC_PDF_DIR optional directory to scan for PDFs (default testdata/pdfs)
+//
+// Robustness: each PDF is processed in an isolated closure guarded by recover(),
+// so a failing or panicking PDF is skipped (logged) instead of aborting the
+// whole run. A page is also skipped when either backend fails to detect on it.
 //
 // Usage:
 //   ORT_LIB=... MODEL_DIR=... DEEPDOC_URL=http://localhost:9390 \
@@ -54,10 +59,10 @@ import (
 	"strings"
 	"testing"
 
-	"dla-native/native"
+	"native"
 	pdfpkg "ragflow/internal/deepdoc/parser/pdf"
 	inf "ragflow/internal/deepdoc/parser/pdf/inference"
-	infnative "ragflow/internal/deepdoc/parser/pdf/inference/native"
+	infnative "ragflow/internal/deepdoc/parser/pdf/inference/native_analyzer"
 )
 
 // ---------------------------------------------------------------------------
@@ -290,33 +295,33 @@ type diffItem struct {
 }
 
 type pageDiff struct {
-	PDF             string         `json:"pdf"`
-	Page            int            `json:"page"`
-	GoCount         int            `json:"go_count"`
-	PyCount         int            `json:"py_count"`
-	Matched         int            `json:"matched"`
-	GoOnly          int            `json:"go_only"`
-	PyOnly          int            `json:"py_only"`
-	MatchedMeanIoU  float64        `json:"matched_mean_iou"`
-	MatchedMinIoU   float64        `json:"matched_min_iou"`
-	MatchedMaxCorner float64       `json:"matched_max_corner"`
-	MatchedDrift    int            `json:"matched_drift"` // matched pairs failing the tight-overlap test
-	SubClasses      map[string]int `json:"subclasses"`
-	Items           []diffItem     `json:"items"`
+	PDF              string         `json:"pdf"`
+	Page             int            `json:"page"`
+	GoCount          int            `json:"go_count"`
+	PyCount          int            `json:"py_count"`
+	Matched          int            `json:"matched"`
+	GoOnly           int            `json:"go_only"`
+	PyOnly           int            `json:"py_only"`
+	MatchedMeanIoU   float64        `json:"matched_mean_iou"`
+	MatchedMinIoU    float64        `json:"matched_min_iou"`
+	MatchedMaxCorner float64        `json:"matched_max_corner"`
+	MatchedDrift     int            `json:"matched_drift"` // matched pairs failing the tight-overlap test
+	SubClasses       map[string]int `json:"subclasses"`
+	Items            []diffItem     `json:"items"`
 }
 
 // classifyPage builds the itemized per-page diff and tallies subclasses.
 func classifyPage(goB, pyB []jsonBox, matches []iouMatch, goOnly, pyOnly []int, page int, pdf string) pageDiff {
 	pd := pageDiff{
-		PDF:        pdf,
-		Page:       page,
-		GoCount:    len(goB),
-		PyCount:    len(pyB),
-		Matched:    len(matches),
-		GoOnly:     len(goOnly),
-		PyOnly:     len(pyOnly),
+		PDF:           pdf,
+		Page:          page,
+		GoCount:       len(goB),
+		PyCount:       len(pyB),
+		Matched:       len(matches),
+		GoOnly:        len(goOnly),
+		PyOnly:        len(pyOnly),
 		MatchedMinIoU: 2.0,
-		SubClasses: map[string]int{},
+		SubClasses:    map[string]int{},
 	}
 
 	var iouSum, maxCorner float64
@@ -540,18 +545,18 @@ func writePNG(t *testing.T, path string, img *image.RGBA) {
 // ---------------------------------------------------------------------------
 
 type pdfIouSummary struct {
-	PDF             string         `json:"pdf"`
-	Pages           int            `json:"pages"`
-	GoBoxes         int            `json:"go_boxes"`
-	PyBoxes         int            `json:"py_boxes"`
-	Matched         int            `json:"matched"`
-	GoOnly          int            `json:"go_only"`
-	PyOnly          int            `json:"py_only"`
-	MatchedMeanIoU  float64        `json:"matched_mean_iou"`
-	MatchedMinIoU   float64        `json:"matched_min_iou"`
-	MatchedMaxCorner float64       `json:"matched_max_corner"`
-	MatchedDrift    int            `json:"matched_drift"`
-	SubClass        map[string]int `json:"subclasses"`
+	PDF              string         `json:"pdf"`
+	Pages            int            `json:"pages"`
+	GoBoxes          int            `json:"go_boxes"`
+	PyBoxes          int            `json:"py_boxes"`
+	Matched          int            `json:"matched"`
+	GoOnly           int            `json:"go_only"`
+	PyOnly           int            `json:"py_only"`
+	MatchedMeanIoU   float64        `json:"matched_mean_iou"`
+	MatchedMinIoU    float64        `json:"matched_min_iou"`
+	MatchedMaxCorner float64        `json:"matched_max_corner"`
+	MatchedDrift     int            `json:"matched_drift"`
+	SubClass         map[string]int `json:"subclasses"`
 }
 
 type iouReport struct {
@@ -605,7 +610,10 @@ func TestInProcessVsServiceIoUDiff(t *testing.T) {
 		t.Fatalf("py client health check failed for %s", pyURL)
 	}
 
-	pdfDir := filepath.Join("testdata", "pdfs")
+	pdfDir := os.Getenv("INPROC_PDF_DIR")
+	if pdfDir == "" {
+		pdfDir = filepath.Join("testdata", "pdfs")
+	}
 	outDir := filepath.Join("testdata", "output", "render_compare", "iou")
 	os.MkdirAll(outDir, 0755)
 
@@ -636,100 +644,111 @@ func TestInProcessVsServiceIoUDiff(t *testing.T) {
 	var summaries []pdfIouSummary
 
 	for _, name := range names {
-		data, err := os.ReadFile(filepath.Join(pdfDir, name))
-		if err != nil {
-			t.Logf("%s: read: %v", name, err)
-			continue
-		}
-		eng, err := pdfpkg.NewEngine(data)
-		if err != nil {
-			t.Logf("%s: engine: %v", name, err)
-			continue
-		}
-		pageCount, err := eng.PageCount()
-		if err != nil {
-			t.Logf("%s: pagecount: %v", name, err)
-			eng.Close()
-			continue
-		}
-		if pageCap > 0 && pageCount > pageCap {
-			pageCount = pageCap
-		}
-		base := strings.TrimSuffix(name, ".pdf")
-		sum := pdfIouSummary{PDF: name, Pages: pageCount, SubClass: map[string]int{}, MatchedMinIoU: 2.0}
-
-		for p := 0; p < pageCount; p++ {
-			img, err := pdfpkg.RenderPageToImage(eng, p)
-			if err != nil {
-				t.Logf("%s p%d render: %v", name, p, err)
-				continue
-			}
-			goDet, err := goAna.OCRDetect(ctx, img)
-			if err != nil {
-				t.Logf("%s p%d det(go): %v", name, p, err)
-			}
-			pyDet, err := pyClient.OCRDetect(ctx, img)
-			if err != nil {
-				t.Logf("%s p%d det(py): %v", name, p, err)
-			}
-			gb, pb := boxFromDeep(goDet), boxFromPDF(pyDet)
-			matches, goOnly, pyOnly := greedyIoUMatch(gb, pb)
-			pd := classifyPage(gb, pb, matches, goOnly, pyOnly, p, name)
-
-			sum.GoBoxes += len(gb)
-			sum.PyBoxes += len(pb)
-			sum.Matched += len(matches)
-			sum.GoOnly += len(goOnly)
-			sum.PyOnly += len(pyOnly)
-			sum.MatchedDrift += pd.MatchedDrift
-			if pd.Matched > 0 {
-				sum.MatchedMeanIoU += pd.MatchedMeanIoU * float64(pd.Matched)
-			}
-			if pd.MatchedMinIoU < sum.MatchedMinIoU {
-				sum.MatchedMinIoU = pd.MatchedMinIoU
-			}
-			if pd.MatchedMaxCorner > sum.MatchedMaxCorner {
-				sum.MatchedMaxCorner = pd.MatchedMaxCorner
-			}
-			for k, v := range pd.SubClasses {
-				sum.SubClass[k] += v
-				report.Overall[k] += v
-			}
-			report.MatchedDrift += pd.MatchedDrift
-			report.MatchedTotal += len(matches)
-			if pd.Matched > 0 {
-				report.MatchedMeanIoU += pd.MatchedMeanIoU * float64(pd.Matched)
-			}
-			if pd.MatchedMinIoU < report.MatchedMinIoU {
-				report.MatchedMinIoU = pd.MatchedMinIoU
-			}
-			if pd.MatchedMaxCorner > report.MatchedMaxCorner {
-				report.MatchedMaxCorner = pd.MatchedMaxCorner
-			}
-
-			// Persist pages that diverge in ANY way: missing/extra boxes, or
-			// matched boxes that are not a tight overlap (coord drift).
-			if len(goOnly) > 0 || len(pyOnly) > 0 || pd.MatchedDrift > 0 {
-				report.PagesWithDiff++
-				var driftGo, driftPy []int
-				for _, it := range pd.Items {
-					if it.Kind == "matched" && it.SubClass == "coord_drift" {
-						driftGo = append(driftGo, it.GoIndex)
-						driftPy = append(driftPy, it.PyIndex)
-					}
+		// Each PDF is isolated: a panic in one PDF (e.g. rendering or the
+		// native backend) must skip that PDF, never abort the whole run.
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Logf("%s: PANIC recovered, skipping PDF: %v", name, r)
 				}
-				writeJSONFile(t, outDir, base+"_p"+strconv.Itoa(p)+"_diff.json", pd)
-				overlay := renderOverlay(img, gb, pb, matches, goOnly, pyOnly, driftGo, driftPy)
-				writePNG(t, filepath.Join(outDir, base+"_p"+strconv.Itoa(p)+".png"), overlay)
+			}()
+
+			data, err := os.ReadFile(filepath.Join(pdfDir, name))
+			if err != nil {
+				t.Logf("%s: read: %v", name, err)
+				return
 			}
-		}
-		if sum.Matched > 0 {
-			sum.MatchedMeanIoU /= float64(sum.Matched)
-		}
-		eng.Close()
-		summaries = append(summaries, sum)
-		t.Logf("%s: pages=%d go=%d py=%d matched=%d goOnly=%d pyOnly=%d drift=%d subclasses=%v",
-			name, sum.Pages, sum.GoBoxes, sum.PyBoxes, sum.Matched, sum.GoOnly, sum.PyOnly, sum.MatchedDrift, sum.SubClass)
+			eng, err := pdfpkg.NewEngine(data)
+			if err != nil {
+				t.Logf("%s: engine: %v", name, err)
+				return
+			}
+			defer eng.Close()
+			pageCount, err := eng.PageCount()
+			if err != nil {
+				t.Logf("%s: pagecount: %v", name, err)
+				return
+			}
+			if pageCap > 0 && pageCount > pageCap {
+				pageCount = pageCap
+			}
+			base := strings.TrimSuffix(name, ".pdf")
+			sum := pdfIouSummary{PDF: name, Pages: pageCount, SubClass: map[string]int{}, MatchedMinIoU: 2.0}
+
+			for p := 0; p < pageCount; p++ {
+				img, err := pdfpkg.RenderPageToImage(eng, p)
+				if err != nil {
+					t.Logf("%s p%d render: %v", name, p, err)
+					continue
+				}
+				goDet, err := goAna.OCRDetect(ctx, img)
+				if err != nil {
+					t.Logf("%s p%d det(go): %v", name, p, err)
+					continue
+				}
+				pyDet, err := pyClient.OCRDetect(ctx, img)
+				if err != nil {
+					t.Logf("%s p%d det(py): %v", name, p, err)
+					continue
+				}
+				gb, pb := boxFromDeep(goDet), boxFromPDF(pyDet)
+				matches, goOnly, pyOnly := greedyIoUMatch(gb, pb)
+				pd := classifyPage(gb, pb, matches, goOnly, pyOnly, p, name)
+
+				sum.GoBoxes += len(gb)
+				sum.PyBoxes += len(pb)
+				sum.Matched += len(matches)
+				sum.GoOnly += len(goOnly)
+				sum.PyOnly += len(pyOnly)
+				sum.MatchedDrift += pd.MatchedDrift
+				if pd.Matched > 0 {
+					sum.MatchedMeanIoU += pd.MatchedMeanIoU * float64(pd.Matched)
+				}
+				if pd.MatchedMinIoU < sum.MatchedMinIoU {
+					sum.MatchedMinIoU = pd.MatchedMinIoU
+				}
+				if pd.MatchedMaxCorner > sum.MatchedMaxCorner {
+					sum.MatchedMaxCorner = pd.MatchedMaxCorner
+				}
+				for k, v := range pd.SubClasses {
+					sum.SubClass[k] += v
+					report.Overall[k] += v
+				}
+				report.MatchedDrift += pd.MatchedDrift
+				report.MatchedTotal += len(matches)
+				if pd.Matched > 0 {
+					report.MatchedMeanIoU += pd.MatchedMeanIoU * float64(pd.Matched)
+				}
+				if pd.MatchedMinIoU < report.MatchedMinIoU {
+					report.MatchedMinIoU = pd.MatchedMinIoU
+				}
+				if pd.MatchedMaxCorner > report.MatchedMaxCorner {
+					report.MatchedMaxCorner = pd.MatchedMaxCorner
+				}
+
+				// Persist pages that diverge in ANY way: missing/extra boxes, or
+				// matched boxes that are not a tight overlap (coord drift).
+				if len(goOnly) > 0 || len(pyOnly) > 0 || pd.MatchedDrift > 0 {
+					report.PagesWithDiff++
+					var driftGo, driftPy []int
+					for _, it := range pd.Items {
+						if it.Kind == "matched" && it.SubClass == "coord_drift" {
+							driftGo = append(driftGo, it.GoIndex)
+							driftPy = append(driftPy, it.PyIndex)
+						}
+					}
+					writeJSONFile(t, outDir, base+"_p"+strconv.Itoa(p)+"_diff.json", pd)
+					overlay := renderOverlay(img, gb, pb, matches, goOnly, pyOnly, driftGo, driftPy)
+					writePNG(t, filepath.Join(outDir, base+"_p"+strconv.Itoa(p)+".png"), overlay)
+				}
+			}
+			if sum.Matched > 0 {
+				sum.MatchedMeanIoU /= float64(sum.Matched)
+			}
+			summaries = append(summaries, sum)
+			t.Logf("%s: pages=%d go=%d py=%d matched=%d goOnly=%d pyOnly=%d drift=%d subclasses=%v",
+				name, sum.Pages, sum.GoBoxes, sum.PyBoxes, sum.Matched, sum.GoOnly, sum.PyOnly, sum.MatchedDrift, sum.SubClass)
+		}()
 	}
 
 	report.PDFs = summaries

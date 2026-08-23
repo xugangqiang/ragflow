@@ -13,7 +13,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"dla-native/native"
+	"native"
 	"ragflow/internal/deepdoc/parser/pdf/inference"
 	deepdoctype "ragflow/internal/deepdoc/parser/type"
 )
@@ -22,7 +22,7 @@ import (
 // actually runs end-to-end through the doctype.DocAnalyzer interface: ONNX
 // Runtime init + model load + DLA/TSR/OCR inference on a real page fixture,
 // producing non-empty, in-bounds results. It is the caller-side analogue of the
-// dla-native equivalence suite, but exercised through the DocAnalyzer seam the
+// native equivalence suite, but exercised through the DocAnalyzer seam the
 // PDF parser consumes. Requires libonnxruntime + the InfiniFlow/deepdoc model
 // snapshot; skipped unless both are reachable via ORT_LIB / MODEL_DIR.
 //
@@ -31,7 +31,7 @@ import (
 //	ORT_LIB=/path/libonnxruntime.so.1.23.2 \
 //	  MODEL_DIR=/path/to/deepdoc \
 //	  go test -tags "native_det integration" -run TestNativeAnalyzerInProcess \
-//	  ./internal/deepdoc/parser/pdf/inference/native/...
+//	  ./internal/deepdoc/parser/pdf/inference/native_analyzer/...
 //
 // TestNativeAnalyzerUninitializedNegative locks the fail-fast contract the
 // server depends on (see registerNativeDeepDoc): before Register wires ONNX
@@ -73,9 +73,9 @@ func TestNativeAnalyzerInProcess(t *testing.T) {
 		t.Fatalf("NewAnalyzer: %v", err)
 	}
 
-	// page0.png is a content page with a known DLA golden (see dla-native
+	// page0.png is a content page with a known DLA golden (see native
 	// testdata). Reuse it to prove the DocAnalyzer path runs real inference.
-	imgPath := filepath.Join("..", "..", "..", "..", "dla-native", "testdata", "page0.png")
+	imgPath := filepath.Join("..", "..", "..", "..", "native", "testdata", "page0.png")
 	f, err := os.Open(imgPath)
 	if err != nil {
 		t.Skipf("fixture unavailable: %v", err)
@@ -195,21 +195,21 @@ func cropBox(src image.Image, b deepdoctype.OCRBox) image.Image {
 //
 // The tests below prove the NativeAnalyzer (the DocAnalyzer the PDF parser
 // actually consumes) produces output equivalent to the Python deepdoc
-// reference, reusing the SAME Python-reference goldens as the dla-native
+// reference, reusing the SAME Python-reference goldens as the native
 // integration suite. This closes the gap noted in EQUIVALENCE.md: the in-
 // process backend previously only had a smoke test (non-empty, in-bounds);
 // these tests assert value-level parity through the analyzer's public API.
 
-// goldenPath resolves a dla-native testdata fixture from this package's test
-// directory (internal/deepdoc/parser/pdf/inference/native). Four ".." climb to
-// internal/deepdoc, where the dla-native module lives.
+// goldenPath resolves a native testdata fixture from this package's test
+// directory (internal/deepdoc/parser/pdf/inference/native_analyzer). Four ".." climb to
+// internal/deepdoc, where the native module lives.
 func goldenPath(name string) string {
-	return filepath.Join("..", "..", "..", "..", "dla-native", "testdata", name)
+	return filepath.Join("..", "..", "..", "..", "native", "testdata", name)
 }
 
 // openFixture decodes a PNG fixture the way the production path does (Go's
 // image decode -> NativeAnalyzer), so the comparison exercises the real server
-// code path rather than the dla-native internal decoder.
+// code path rather than the native internal decoder.
 func openFixture(t *testing.T, stem string) image.Image {
 	t.Helper()
 	f, err := os.Open(goldenPath(stem + ".png"))
@@ -239,7 +239,7 @@ func labelKey(labels []string, label string) int {
 }
 
 // analyzerWithModels builds a NativeAnalyzer after ensuring ONNX Runtime is
-// initialized. It mirrors skipIfNoModels in the dla-native suite: the test is
+// initialized. It mirrors skipIfNoModels in the native suite: the test is
 // skipped (not failed) when ORT_LIB/MODEL_DIR are unset, and InitORT is
 // idempotent so it composes with the other analyzer tests in this file.
 func analyzerWithModels(t *testing.T) *NativeAnalyzer {
@@ -261,7 +261,7 @@ func analyzerWithModels(t *testing.T) *NativeAnalyzer {
 
 // TestAnalyzerDLAGolden proves the analyzer's DLA output matches the Python
 // reference golden (class + coordinates + confidence) within the documented
-// sub-pixel floor, across the same fixtures the dla-native suite uses.
+// sub-pixel floor, across the same fixtures the native suite uses.
 func TestAnalyzerDLAGolden(t *testing.T) {
 	a := analyzerWithModels(t)
 	ctx := context.Background()

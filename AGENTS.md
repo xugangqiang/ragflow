@@ -61,7 +61,7 @@ Go tests are classified by build tag so the default `go test ./...` run stays se
 | E2E | `e2e` | No (`-tags e2e`) | Full cross-component pipeline (ingest → index → retrieve) against real services; heavy/slow. |
 | Manual | `manual` | No (`-tags manual`) | Very slow/expensive (deepdoc render/parity/snapshot/bench). **Local opt-in ONLY — never run in CI.** |
 | Native (orthogonal) | `cgo` / `!cgo` | `cgo` auto-satisfies under CGO_ENABLED=1 | Native static libs (`office_oxide`/`pdfium`/`pdf_oxide`). Combine with tiers, e.g. `//go:build cgo && integration`. |
-| `native_det` | `native_det` (orthogonal, server-only) | No — server is built with this tag | ONNX Runtime (`libonnxruntime.so`) + the InfiniFlow/deepdoc model snapshot. Gates the in-process (Go) DeepDoc backend (`internal/deepdoc/parser/pdf/inference/native`). The unit tier stays free of the `onnxruntime` dependency because this package is excluded unless `native_det` is set. |
+| `native_det` | `native_det` (orthogonal, server-only) | No — server is built with this tag | ONNX Runtime (`libonnxruntime.so`) + the InfiniFlow/deepdoc model snapshot. Gates the in-process (Go) DeepDoc backend (`internal/deepdoc/parser/pdf/inference/native_analyzer`). The unit tier stays free of the `onnxruntime` dependency because this package is excluded unless `native_det` is set. |
 
 Run tiers locally via `build.sh`:
 ```bash

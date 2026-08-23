@@ -1,7 +1,7 @@
 """Reference raster-path oracle (Python) — validates the Go prototype through
 the *production* render path, not just against frozen PNG goldens.
 
-The dla-native proof establishes "given the same raster image bytes, Go == Python"
+The native proof establishes "given the same raster image bytes, Go == Python"
 (EQUIVALENCE.md Scope/§Boundary). But the production pipeline does NOT feed
 pre-rendered PNGs to the recognizers: the Go server rasterizes PDF pages with
 pdfium (RenderPage @ 216 DPI) and the Python deepdoc pipeline rasterizes with
@@ -23,7 +23,7 @@ Usage (one task per invocation, JSON to stdout):
     task in {dla, det, tsr}
   page_idx is 0-based (pdfium convention) so it matches the Go side's pageIdx.
 
-Wire formats match the Go DocAnalyzer / dla-native oracles:
+Wire formats match the Go DocAnalyzer / native oracles:
   dla -> {"bboxes": [[x0,y0,x1,y1,score,class_id], ...]}
   tsr -> {"bboxes": [[x0,top,x1,bot,score,class_id], ...]}
   det -> {"output": [[ [ [x,y]*4, ... ] ]]}

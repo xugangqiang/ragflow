@@ -3,7 +3,7 @@
 # Three-way parity contract for the det / DLA / TSR / OCR-rec ports:
 #   1. Python oracle (ref_*.py, which import the *real* deepdoc package) is the
 #      source of truth.
-#   2. A pinned golden JSON (committed under internal/deepdoc/dla-native/testdata)
+#   2. A pinned golden JSON (committed under internal/deepdoc/native/testdata)
 #      captures the oracle output on a fixed fixture set.
 #   3. The Go port is compared against the same golden by the integration tests.
 #
@@ -12,13 +12,13 @@
 #                          compares it to the pinned golden (check_drift.py). If
 #                          deepdoc's Python logic changes without the golden being
 #                          regenerated, this fails and alerts.
-#   - go-dla-native:       runs the dla-native model-backed integration tests
+#   - go-native:       runs the native model-backed integration tests
 #                          (Go vs the same golden) for DLA/TSR/OCR-rec/det on a
 #                          portable runner (ORT only, no CGO PDF static libs).
 #
-# det is exercised in go-dla-native purely as a Golden-comparison tool
+# det is exercised in go-native purely as a Golden-comparison tool
 # (RunDet vs the Python reference). The model-backed DLA/TSR/OCR-rec/det tests
-# here run against dla-native directly (ORT only, no CGO PDF static libs) to
+# here run against native directly (ORT only, no CGO PDF static libs) to
 # keep this portable runner fast. The production-wired path — the in-process
 # DeepDoc backend registered into the parser via SetNativeDocAnalyzerFactory
 # under the native_det build tag — is covered separately by the server smoke
@@ -119,7 +119,7 @@ jobs:
           ln -sfn "${{ github.workspace }}/models/deepdoc" rag/res/deepdoc
 
       - name: Run drift gate (Python oracle vs pinned golden)
-        working-directory: internal/deepdoc/dla-native
+        working-directory: internal/deepdoc/native
         env:
           MODEL_DIR: ${{ github.workspace }}/models/deepdoc
           # The ref_*.py oracles do `from deepdoc.vision.ocr import ...`; the
@@ -129,7 +129,7 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}
         run: uv run python check_drift.py
 
-  go-dla-native:
+  go-native:
     name: go DLA/TSR/OCR-rec/det integration
     runs-on: ubuntu-latest
     steps:
@@ -167,8 +167,8 @@ jobs:
               hf_hub_download(repo_id=repo, filename=f, local_dir=out)
           PY
 
-      - name: Run dla-native integration tests (Go vs pinned golden)
-        working-directory: internal/deepdoc/dla-native
+      - name: Run native integration tests (Go vs pinned golden)
+        working-directory: internal/deepdoc/native
         env:
           ORT_LIB: ${{ steps.ort.outputs.ORT_LIB }}
           MODEL_DIR: ${{ github.workspace }}/models/deepdoc

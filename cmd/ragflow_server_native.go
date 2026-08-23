@@ -11,7 +11,7 @@ import (
 	"go.uber.org/zap"
 
 	"ragflow/internal/common"
-	infnative "ragflow/internal/deepdoc/parser/pdf/inference/native"
+	infnative "ragflow/internal/deepdoc/parser/pdf/inference/native_analyzer"
 )
 
 // registerNativeDeepDoc wires the in-process (Go) DeepDoc backend as the local

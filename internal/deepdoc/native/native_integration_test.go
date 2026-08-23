@@ -49,11 +49,11 @@ func skipIfNoModels(t *testing.T) {
 // and regenerate every golden fixture against the new snapshot in the same
 // change (see /tmp/gen_corpus.py and ref_*.py).
 var modelSnapshotHashes = map[string]string{
-	"det.onnx":   "30a86f5731181461d08021402766601e4302a9b9b9666be8aff402696339cdff",
+	"det.onnx":    "30a86f5731181461d08021402766601e4302a9b9b9666be8aff402696339cdff",
 	"layout.onnx": "de401c03ee30b1c120416dc06f0705237f0c36d3cdb692c9bfefe8a8f98a4b70",
-	"tsr.onnx":   "1585f88015c60209f16a079a26d944afca790ab7022fe7d0574113ccb9a6f9b4",
-	"rec.onnx":   "1c7cf60de2afd728d512f4190cf37455092b45f06175365c6fc58d8cd7e2a68b",
-	"ocr.res":    "28b2362ad4ab2dc38769aa72feb535e3a9ddb3fd2a7585a05920e6393b1dc7f7",
+	"tsr.onnx":    "1585f88015c60209f16a079a26d944afca790ab7022fe7d0574113ccb9a6f9b4",
+	"rec.onnx":    "1c7cf60de2afd728d512f4190cf37455092b45f06175365c6fc58d8cd7e2a68b",
+	"ocr.res":     "28b2362ad4ab2dc38769aa72feb535e3a9ddb3fd2a7585a05920e6393b1dc7f7",
 }
 
 func sha256File(path string) (string, error) {
@@ -129,7 +129,7 @@ func TestDLAIntegration(t *testing.T) {
 	for _, stem := range dlaPages {
 		stem := stem
 		t.Run(stem, func(t *testing.T) {
-			img, err := Decode(filepath.Join("..", "testdata", stem+".png"))
+			img, err := Decode(filepath.Join("testdata", stem+".png"))
 			if err != nil {
 				t.Fatalf("decode: %v", err)
 			}
@@ -143,7 +143,7 @@ func TestDLAIntegration(t *testing.T) {
 			if err := json.Unmarshal([]byte(res.Wire()), &got); err != nil {
 				t.Fatalf("parse Go wire: %v", err)
 			}
-			gold := LoadGoldenBoxes(t, filepath.Join("..", "testdata", stem+".dla.golden.json"))
+			gold := LoadGoldenBoxes(t, filepath.Join("testdata", stem+".dla.golden.json"))
 			CompareBoxes(t, gold, got.Boxes)
 		})
 	}
@@ -154,7 +154,7 @@ func TestTSRIntegration(t *testing.T) {
 	for _, stem := range tsrPages {
 		stem := stem
 		t.Run(stem, func(t *testing.T) {
-			img, err := Decode(filepath.Join("..", "testdata", stem+".png"))
+			img, err := Decode(filepath.Join("testdata", stem+".png"))
 			if err != nil {
 				t.Fatalf("decode: %v", err)
 			}
@@ -170,7 +170,7 @@ func TestTSRIntegration(t *testing.T) {
 			if err := json.Unmarshal([]byte(res.Wire()), &got); err != nil {
 				t.Fatalf("parse Go wire: %v", err)
 			}
-			gold := LoadGoldenBoxes(t, filepath.Join("..", "testdata", stem+".tsr.golden.json"))
+			gold := LoadGoldenBoxes(t, filepath.Join("testdata", stem+".tsr.golden.json"))
 			CompareBoxes(t, gold, got.Boxes)
 		})
 	}
@@ -190,7 +190,7 @@ func TestTSRIntegration(t *testing.T) {
 // documenting the accepted floor amplification rather than hiding it.
 func TestTSRExtremeAspect(t *testing.T) {
 	skipIfNoModels(t)
-	img, err := Decode(filepath.Join("..", "testdata", "tsr_table_caption.png"))
+	img, err := Decode(filepath.Join("testdata", "tsr_table_caption.png"))
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -204,7 +204,7 @@ func TestTSRExtremeAspect(t *testing.T) {
 	if err := json.Unmarshal([]byte(res.Wire()), &got); err != nil {
 		t.Fatalf("parse Go wire: %v", err)
 	}
-	gold := LoadGoldenBoxes(t, filepath.Join("..", "testdata", "tsr_table_caption.tsr.golden.json"))
+	gold := LoadGoldenBoxes(t, filepath.Join("testdata", "tsr_table_caption.tsr.golden.json"))
 
 	const (
 		relaxCoord = 10.0
@@ -242,7 +242,7 @@ func TestOCRRecIntegration(t *testing.T) {
 	for _, stem := range ocrRecLines {
 		stem := stem
 		t.Run(stem, func(t *testing.T) {
-			img, err := Decode(filepath.Join("..", "testdata", stem+".png"))
+			img, err := Decode(filepath.Join("testdata", stem+".png"))
 			if err != nil {
 				t.Fatalf("decode: %v", err)
 			}
@@ -256,7 +256,7 @@ func TestOCRRecIntegration(t *testing.T) {
 			if err := json.Unmarshal([]byte(res.Wire()), &got); err != nil {
 				t.Fatalf("parse Go wire: %v", err)
 			}
-			raw, err := os.ReadFile(filepath.Join("..", "testdata", stem+".ocr_rec.golden.json"))
+			raw, err := os.ReadFile(filepath.Join("testdata", stem+".ocr_rec.golden.json"))
 			if err != nil {
 				t.Fatalf("read golden: %v", err)
 			}
@@ -294,7 +294,7 @@ func TestOCRRecBatchIntegration(t *testing.T) {
 	stems := []string{"line_cn", "line_mix", "line_num", "line0"}
 	imgs := make([]*Image, len(stems))
 	for i, s := range stems {
-		img, err := Decode(filepath.Join("..", "testdata", s+".png"))
+		img, err := Decode(filepath.Join("testdata", s+".png"))
 		if err != nil {
 			t.Fatalf("decode %s: %v", s, err)
 		}
@@ -305,7 +305,7 @@ func TestOCRRecBatchIntegration(t *testing.T) {
 		t.Fatalf("RunOCRRecBatch: %v", err)
 	}
 
-	raw, err := os.ReadFile(filepath.Join("..", "testdata", "batch_ocr_rec.golden.json"))
+	raw, err := os.ReadFile(filepath.Join("testdata", "batch_ocr_rec.golden.json"))
 	if err != nil {
 		t.Fatalf("read batch golden: %v", err)
 	}
@@ -349,7 +349,7 @@ func TestOCRRecBatchIntegration(t *testing.T) {
 
 func TestDLASessionReuse(t *testing.T) {
 	skipIfNoModels(t)
-	img, err := Decode(filepath.Join("..", "testdata", "page0.png"))
+	img, err := Decode(filepath.Join("testdata", "page0.png"))
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -368,7 +368,7 @@ func TestDLASessionReuse(t *testing.T) {
 
 func TestTSRSessionReuse(t *testing.T) {
 	skipIfNoModels(t)
-	img, err := Decode(filepath.Join("..", "testdata", "table0.png"))
+	img, err := Decode(filepath.Join("testdata", "table0.png"))
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -387,7 +387,7 @@ func TestTSRSessionReuse(t *testing.T) {
 
 func TestOCRRecSessionReuse(t *testing.T) {
 	skipIfNoModels(t)
-	img, err := Decode(filepath.Join("..", "testdata", "line0.png"))
+	img, err := Decode(filepath.Join("testdata", "line0.png"))
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -451,7 +451,7 @@ func TestInferenceConcurrencyConsistent(t *testing.T) {
 	skipIfNoModels(t)
 	md := os.Getenv("MODEL_DIR")
 
-	dlaImg, err := Decode(filepath.Join("..", "testdata", "page0.png"))
+	dlaImg, err := Decode(filepath.Join("testdata", "page0.png"))
 	if err != nil {
 		t.Fatalf("decode dla: %v", err)
 	}
@@ -464,7 +464,7 @@ func TestInferenceConcurrencyConsistent(t *testing.T) {
 			return r.Wire(), nil
 		})
 
-	tsrImg, err := Decode(filepath.Join("..", "testdata", "table0.png"))
+	tsrImg, err := Decode(filepath.Join("testdata", "table0.png"))
 	if err != nil {
 		t.Fatalf("decode tsr: %v", err)
 	}
@@ -477,7 +477,7 @@ func TestInferenceConcurrencyConsistent(t *testing.T) {
 			return r.Wire(), nil
 		})
 
-	ocrImg, err := Decode(filepath.Join("..", "testdata", "line0.png"))
+	ocrImg, err := Decode(filepath.Join("testdata", "line0.png"))
 	if err != nil {
 		t.Fatalf("decode ocr: %v", err)
 	}
@@ -490,7 +490,7 @@ func TestInferenceConcurrencyConsistent(t *testing.T) {
 			return r.Wire(), nil
 		})
 
-	detImg, err := Decode(filepath.Join("..", "testdata", "page0.png"))
+	detImg, err := Decode(filepath.Join("testdata", "page0.png"))
 	if err != nil {
 		t.Fatalf("decode det: %v", err)
 	}
@@ -506,7 +506,7 @@ func TestInferenceConcurrencyConsistent(t *testing.T) {
 
 func TestDetIntegration(t *testing.T) {
 	skipIfNoModels(t)
-	imgPath := filepath.Join("..", "testdata", "page0.png")
+	imgPath := filepath.Join("testdata", "page0.png")
 	img, err := Decode(imgPath)
 	if err != nil {
 		t.Fatalf("decode: %v", err)
@@ -527,7 +527,7 @@ func TestDetIntegration(t *testing.T) {
 	}
 	goBoxes := got.Output[0][0]
 
-	raw, err := os.ReadFile(filepath.Join("..", "testdata", "page0.det.golden.json"))
+	raw, err := os.ReadFile(filepath.Join("testdata", "page0.det.golden.json"))
 	if err != nil {
 		t.Fatalf("read golden: %v", err)
 	}
@@ -542,7 +542,7 @@ func TestDetIntegration(t *testing.T) {
 	}
 	refBoxes := gold.Output[0][0]
 
-	// The pure-Go geometry reaches the 3px hard floor (HANDOFF §4.4, box#8).
+	// The pure-Go geometry reaches the 3px hard floor (README.md §3, box#8).
 	// Tolerance is CoordFloor + CoordTolMargin, just above that floor, so a
 	// regression bumps it over the line.
 	detCoordTol := CoordFloor + CoordTolMargin
@@ -607,7 +607,7 @@ func TestDetIntegration(t *testing.T) {
 func TestDetMembershipAllFixtures(t *testing.T) {
 	skipIfNoModels(t)
 	md := os.Getenv("MODEL_DIR")
-	dir := "../testdata"
+	dir := "testdata"
 
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -757,7 +757,7 @@ func TestDetMembershipAllFixtures(t *testing.T) {
 func TestDetOCRAdjudication(t *testing.T) {
 	skipIfNoModels(t)
 	md := os.Getenv("MODEL_DIR")
-	dir := "../testdata"
+	dir := "testdata"
 
 	// Fixtures with non-zero IoU orphans (the only ones worth adjudicating).
 	stems := []string{
@@ -1063,12 +1063,12 @@ func TestWireSchemaMatchesGolden(t *testing.T) {
 	for _, c := range cases {
 		c := c
 		t.Run(c.name, func(t *testing.T) {
-			img, err := Decode(filepath.Join("..", "testdata", c.stem+".png"))
+			img, err := Decode(filepath.Join("testdata", c.stem+".png"))
 			if err != nil {
 				t.Fatalf("decode %s: %v", c.stem, err)
 			}
 			goWire := c.wire(t, img)
-			goldRaw, err := os.ReadFile(filepath.Join("..", "testdata", c.golden))
+			goldRaw, err := os.ReadFile(filepath.Join("testdata", c.golden))
 			if err != nil {
 				t.Fatalf("read golden %s: %v", c.golden, err)
 			}
@@ -1099,7 +1099,7 @@ func TestDumpGoCandidates(t *testing.T) {
 		fixture = "mp_cn_sm_p0"
 	}
 	t.Setenv("DLA_DUMP_CANDIDATES", "1")
-	imgPath := filepath.Join("..", "testdata", fixture+".png")
+	imgPath := filepath.Join("testdata", fixture+".png")
 	img, err := Decode(imgPath)
 	if err != nil {
 		t.Fatalf("decode %s: %v", imgPath, err)
@@ -1129,7 +1129,7 @@ func TestDumpStages(t *testing.T) {
 	t.Setenv("DLA_DUMP_STAGES", "1")
 	t.Setenv("DLA_DUMP_QUADS", "1")
 	t.Setenv("DLA_DUMP_CANDIDATES", "1")
-	imgPath := filepath.Join("..", "testdata", fixture+".png")
+	imgPath := filepath.Join("testdata", fixture+".png")
 	img, err := Decode(imgPath)
 	if err != nil {
 		t.Fatalf("decode %s: %v", imgPath, err)
@@ -1154,7 +1154,7 @@ func TestDumpStages(t *testing.T) {
 	t.Logf("wrote /tmp/go_pred.json, /tmp/go_quads_pre.json, /tmp/go_candidates.json, /tmp/go_final.json for %s", fixture)
 }
 
-// TestEquivalenceReport runs every dla-native recognizer against the Python
+// TestEquivalenceReport runs every native recognizer against the Python
 // reference goldens and prints one consolidated equivalence summary to the test
 // log (visible in CI). It is the human-readable counterpart to the per-task
 // integration tests: with a single command it shows that Go's det / DLA / TSR /
@@ -1170,7 +1170,7 @@ func TestEquivalenceReport(t *testing.T) {
 	// P0: refuse to produce an equivalence report against a drifted model
 	// snapshot — the goldens would be meaningless.
 	checkModelSnapshotHash(t, md)
-	dir := "../testdata"
+	dir := "testdata"
 
 	type row struct {
 		task  string
@@ -1377,7 +1377,7 @@ func TestWireVsLiveServer(t *testing.T) {
 		t.Run("dla/"+stem, func(t *testing.T) {
 			png := readFixturePNG(t, stem)
 			srv := postServer(t, "/predict/dla", "", png)
-			img, err := Decode(filepath.Join("..", "testdata", stem+".png"))
+			img, err := Decode(filepath.Join("testdata", stem+".png"))
 			if err != nil {
 				t.Fatalf("decode %s: %v", stem, err)
 			}
@@ -1397,7 +1397,7 @@ func TestWireVsLiveServer(t *testing.T) {
 		t.Run("tsr/"+stem, func(t *testing.T) {
 			png := readFixturePNG(t, stem)
 			srv := postServer(t, "/predict/tsr", "", png)
-			img, err := Decode(filepath.Join("..", "testdata", stem+".png"))
+			img, err := Decode(filepath.Join("testdata", stem+".png"))
 			if err != nil {
 				t.Fatalf("decode %s: %v", stem, err)
 			}
@@ -1416,7 +1416,7 @@ func TestWireVsLiveServer(t *testing.T) {
 		t.Run("det/"+stem, func(t *testing.T) {
 			png := readFixturePNG(t, stem)
 			srv := postServer(t, "/predict/ocr", "det", png)
-			img, err := Decode(filepath.Join("..", "testdata", stem+".png"))
+			img, err := Decode(filepath.Join("testdata", stem+".png"))
 			if err != nil {
 				t.Fatalf("decode %s: %v", stem, err)
 			}
@@ -1436,7 +1436,7 @@ func TestWireVsLiveServer(t *testing.T) {
 		t.Run("rec/"+stem, func(t *testing.T) {
 			png := readFixturePNG(t, stem)
 			srv := postServer(t, "/predict/ocr", "rec", png)
-			img, err := Decode(filepath.Join("..", "testdata", stem+".png"))
+			img, err := Decode(filepath.Join("testdata", stem+".png"))
 			if err != nil {
 				t.Fatalf("decode %s: %v", stem, err)
 			}
@@ -1452,7 +1452,7 @@ func TestWireVsLiveServer(t *testing.T) {
 
 func readFixturePNG(t *testing.T, stem string) []byte {
 	t.Helper()
-	b, err := os.ReadFile(filepath.Join("..", "testdata", stem+".png"))
+	b, err := os.ReadFile(filepath.Join("testdata", stem+".png"))
 	if err != nil {
 		t.Fatalf("read fixture %s: %v", stem, err)
 	}

@@ -311,7 +311,7 @@ func emptyPDFResult(filename string) ParseResult {
 }
 
 // nativeAnalyzerFactory, when set, supplies the local in-process DeepDoc
-// backend (registered by internal/deepdoc/parser/pdf/inference/native via
+// backend (registered by internal/deepdoc/parser/pdf/inference/native_analyzer via
 // SetNativeDocAnalyzerFactory) as the fallback used when no external DeepDoc
 // HTTP service is configured. It is nil in builds/tests that do not opt into
 // the native backend, keeping the parser's unit-test build free of the

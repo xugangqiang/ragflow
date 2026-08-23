@@ -4,7 +4,7 @@ package infnative
 
 // End-to-end raster alignment tests (reviewer gap #1 and #2).
 //
-// The dla-native proof establishes "given the same raster image bytes, Go == Python"
+// The native proof establishes "given the same raster image bytes, Go == Python"
 // (EQUIVALENCE.md Scope / "Boundary of this proof"). But in production neither
 // side receives a pre-rendered PNG: the Go server rasterizes PDF pages with
 // pdfium (pdfium.RenderPage @ 216 DPI) and the Python deepdoc pipeline
@@ -42,7 +42,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"dla-native/native"
+	"native"
 	"ragflow/internal/deepdoc/parser/pdf/inference"
 	pdfium "ragflow/internal/deepdoc/parser/pdf/pdfium"
 )
@@ -56,7 +56,7 @@ func repoRoot(t *testing.T) string {
 	if err != nil {
 		t.Fatalf("getwd: %v", err)
 	}
-	// .../internal/deepdoc/parser/pdf/inference/native -> repo root is 6 levels up.
+	// .../internal/deepdoc/parser/pdf/inference/native_analyzer -> repo root is 6 levels up.
 	root := filepath.Join(dir, "..", "..", "..", "..", "..", "..")
 	if _, err := os.Stat(filepath.Join(root, "rag", "res", "deepdoc")); err != nil {
 		t.Fatalf("repoRoot %s missing model dir: %v", root, err)
@@ -94,7 +94,7 @@ func pythonRasterOracle(t *testing.T, root, pdf string, page int, task string) m
 	if uv == "" {
 		t.Skip("uv not found; Python raster oracle unavailable")
 	}
-	script := filepath.Join(root, "internal", "deepdoc", "dla-native", "ref_raster.py")
+	script := filepath.Join(root, "internal", "deepdoc", "native", "ref_raster.py")
 	modelDir := os.Getenv("MODEL_DIR")
 	cmd := exec.Command(uv, "run", "python3", script, pdf, fmt.Sprintf("%d", page), task, modelDir)
 	cmd.Env = append(os.Environ(), "PYTHONPATH="+root)

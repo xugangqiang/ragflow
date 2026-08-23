@@ -1,9 +1,13 @@
-# dla-native ↔ Python deepdoc: Equivalence Proof
+# native ↔ Python deepdoc: Equivalence Proof
+
+> Design rationale, positioning, and the pure-Go decision live in `README.md`
+> (the ADR). This file is the equivalence proof; it builds on the ADR's
+> documented 3 px coordinate floor.
 
 ## Executive summary (for decision makers)
 
 **Bottom line.** The Go in-process DeepDoc backend (`infnative.NativeAnalyzer`,
-backed by `dla-native`) is functionally equivalent to the Python `deepdoc_server`
+backed by `native`) is functionally equivalent to the Python `deepdoc_server`
 inference service for all four tasks it covers — proven by *measured* golden
 comparison, not by code inspection.
 
@@ -83,7 +87,7 @@ assumed**:
 
 ## Scope
 
-This document proves that the Go `dla-native` inference library produces output
+This document proves that the Go `native` inference library produces output
 **equivalent** to the Python `deepdoc` inference service (the `deepdoc_server`
 HTTP service backed by the `deepdoc/vision` recognizers) for the four tasks it
 covers:
@@ -126,13 +130,13 @@ markdown). Two things live outside this boundary and are out of scope here:
    directly to `FPDF_RenderPageBitmap`.) Re-running the raster-alignment harness
    after this change produced a split result:
    - *DLA tightened sharply on text pages*: worst max Δ dropped from ~0.72 px to
-     ≤ 0.03 px on 年报/ZoomNeXt/ZH-TW/三国 pages (effectively pixel-identical).
+     ≤ 0.03 px on annual report/ZoomNeXt/ZH-TW/Three-Kingdoms pages (effectively pixel-identical).
      The one technical-standard figure page (15K606 p10) stayed at 0.721 px —
      that residual is **not** an AA artifact (it survived the text-AA change), so
      it comes from a different source (vector/figure rendering, not text
      smoothing).
    - *Det: no render-origin offset (measured)*: the test log's `corner-maxd 8.0 / 12.0
-     px` on 年报 p2/p8 is the **max per-corner** coordinate difference, not a
+     px` on annual report p2/p8 is the **max per-corner** coordinate difference, not a
      center drift. A nearest-center (greedy + Hungarian) analysis of the dumped
      boxes shows per-box center distance is sub-pixel — median **0 px**, mean
      **< 0.5 px**, p90 **< 2.2 px**, max **< 5 px** — with IoU orphan unchanged
@@ -153,7 +157,7 @@ markdown). Two things live outside this boundary and are out of scope here:
 ## How to reproduce
 
 The proof is a reproducible test harness. From
-`internal/deepdoc/dla-native/native`:
+`internal/deepdoc/native`:
 
 ```bash
 ORT_LIB=<path/to/libonnxruntime.so> \
@@ -171,7 +175,7 @@ go test -tags integration -run 'TestEquivalenceReport|TestDetMembershipAllFixtur
 
 The same model boundary is exercised through the **`DocAnalyzer` seam the PDF
 parser actually consumes** (`infnative.NativeAnalyzer`, package
-`internal/deepdoc/parser/pdf/inference/native`), so the equivalence is proven
+`internal/deepdoc/parser/pdf/inference/native_analyzer`), so the equivalence is proven
 at the integration point rather than only inside the standalone library.
 
 > **Use `build.sh`, not raw `go test`.** The Go native paths need CGO flags and
@@ -183,11 +187,11 @@ ORT_LIB=<path/to/libonnxruntime.so.1.23.2> \
 MODEL_DIR=<path/to/InfiniFlow/deepdoc> \
 bash build.sh --test-native \
   -run 'TestAnalyzerDLAGolden|TestAnalyzerTSRGolden|TestAnalyzerOCRRecGolden|TestAnalyzerDetGolden' \
-  ./internal/deepdoc/parser/pdf/inference/native/...
+  ./internal/deepdoc/parser/pdf/inference/native_analyzer/...
 ```
 
 `bash build.sh --test-native` (no `-run` filter) runs the **entire** native
-tier in one shot: the analyzer golden suite above **plus** the `dla-native`
+tier in one shot: the analyzer golden suite above **plus** the `native`
 integration suite (`TestEquivalenceReport` / `TestDetMembershipAllFixtures`).
 That single command is what CI should gate on.
 
@@ -197,7 +201,7 @@ That single command is what CI should gate on.
 > `libonnxruntime.so` and `InfiniFlow/deepdoc` snapshot — just don't set the
 > wrong pair or the tests will silently `Skip`.
 
-These four tests reuse the comparison helpers in `dla-native/native/golden.go`
+These four tests reuse the comparison helpers in `native/golden.go`
 (coordinate / score tolerances, IoU box-membership) and compare the analyzer's
 `DLA` / `TSR` / `OCRRecognize` / `OCRDetect` output against the same Python
 reference goldens.
@@ -290,7 +294,7 @@ same recognizers and post-processing the running server uses:
 
 Because the reference is the actual production code path, a Go/Python mismatch
 surfaces a genuine divergence, not a divergence between two reimplementations.
-The fixtures are frozen and committed under `internal/deepdoc/dla-native/testdata`
+The fixtures are frozen and committed under `internal/deepdoc/native/testdata`
 (`*.dla.golden.json`, `*.tsr.golden.json`, `*.det.golden.json`,
 `*.ocr_rec.golden.json`). They were regenerated from the **current** live
 detectors after the `normalizeCHW` RGB/BGR channel-order fix, so the det
@@ -299,8 +303,8 @@ or swapped-channel oracle.
 
 ### 2. Comparison math (shared by both tiers)
 
-All matching lives in `internal/deepdoc/dla-native/native/golden.go` and is
-imported by both the `dla-native` integration suite and the `infnative`
+All matching lives in `internal/deepdoc/native/golden.go` and is
+imported by both the `native` integration suite and the `infnative`
 analyzer suite, so the two tiers cannot drift apart.
 
 - **Axis-aligned boxes (DLA / TSR / OCR):** `CompareBoxes` / `MatchBoxesRelaxed`
@@ -357,14 +361,14 @@ quantifies this on whole-page real tables through BOTH production raster paths:
 
 | Full-page table | Match | Max Δ | Verdict |
 |-----------------|-------|-------|---------|
-| 厦门象屿年报 p8 (moderate) | **34/34** | **1.21 px** | inside 3.5px floor |
-| 厦门象屿年报 p12 (dense) | **25/25** | **0.37 px** | inside 3.5px floor |
-| 15K606《建筑防烟排烟系统技术标准》图示》 p40 (dense technical-standard) | **17/30** | 3.36 px | **documented exception** — model-level cell-count divergence (Go emits 31 vs 30 golden; 13 cells unmatched), not a rasterization floor |
+| Xiamen Xiangyu annual report p8 (moderate) | **34/34** | **1.21 px** | inside 3.5px floor |
+| Xiamen Xiangyu annual report p12 (dense) | **25/25** | **0.37 px** | inside 3.5px floor |
+| 15K606 "Building Smoke Exhaust System Technical Standard" p40 (dense technical-standard) | **17/30** | 3.36 px | **documented exception** — model-level cell-count divergence (Go emits 31 vs 30 golden; 13 cells unmatched), not a rasterization floor |
 
 So the empirical upper bound is:
 
 > TSR equivalence is proven within **≤ 3.5 px** on ordinary/moderate real tables
-> (worst measured 2.70 px on 三国人物 p1; dense annual-report tables ≤ 1.21 px).
+> (worst measured 2.70 px on Three Kingdoms p1; dense annual-report tables ≤ 1.21 px).
 > **Dense technical-standard tables** can break the strict floor — both
 > coordinate drift AND cell-count disagreement (17/30 on 15K606 p40). This is a
 > model-floor effect (the TSR model itself disagrees on a hard table under
@@ -381,18 +385,18 @@ corpus, not a logic change.
 
 | Task | What is compared | Proving tests | Result |
 |------|------------------|---------------|--------|
-| DLA  | Layout boxes vs `ref_dla.py` goldens (**11 fixtures**: EN textbook, CN whitepaper, eq-heavy paper, ZH-TW enterprise, baseline, 2 figure-caption pages, 1 equation page, **+ CN annual-report page (厦门象屿年报 p2), ZH-TW migration doc p3, EN paper (ZoomNeXt p1)**) | `TestDLAIntegration` / `TestAnalyzerDLAGolden`, `TestEquivalenceReport` | 148/148 boxes, max Δ < 0.13 px |
-| TSR  | Table-structure boxes vs `ref_tsr.py` goldens (**8 fixtures**: table0, normal 2.65:1, rotated 1:6.3, content, caption, cross-page, text-interleaved — covers projected-row-header; **+ real annual-report table (厦门象屿年报 p8)**) | `TestTSRIntegration` / `TestAnalyzerTSRGolden`, `TestTSRExtremeAspect` | 190/190 matched, 2.155 px (≤10 px @4:1 aspect, structure preserved) |
-| OCR  | Recognized text vs `ref_ocr_rec.py` goldens (EN incl. bold/italic/serif, CJK, mixed, digits; plus batch semantics; **+ 3 real text-line crops: 三国人物 p1, ZH-TW migration p2, ZoomNeXt p1**) | `TestOCRRecIntegration` / `TestAnalyzerOCRRecGolden`, `TestOCRRecBatchIntegration` | exact text; batch-wide resize reproduced |
+| DLA  | Layout boxes vs `ref_dla.py` goldens (**11 fixtures**: EN textbook, CN whitepaper, eq-heavy paper, ZH-TW enterprise, baseline, 2 figure-caption pages, 1 equation page, **+ CN annual-report page (Xiamen Xiangyu annual report p2), ZH-TW migration doc p3, EN paper (ZoomNeXt p1)**) | `TestDLAIntegration` / `TestAnalyzerDLAGolden`, `TestEquivalenceReport` | 148/148 boxes, max Δ < 0.13 px |
+| TSR  | Table-structure boxes vs `ref_tsr.py` goldens (**8 fixtures**: table0, normal 2.65:1, rotated 1:6.3, content, caption, cross-page, text-interleaved — covers projected-row-header; **+ real annual-report table (Xiamen Xiangyu annual report p8)**) | `TestTSRIntegration` / `TestAnalyzerTSRGolden`, `TestTSRExtremeAspect` | 190/190 matched, 2.155 px (≤10 px @4:1 aspect, structure preserved) |
+| OCR  | Recognized text vs `ref_ocr_rec.py` goldens (EN incl. bold/italic/serif, CJK, mixed, digits; plus batch semantics; **+ 3 real text-line crops: Three Kingdoms p1, ZH-TW migration p2, ZoomNeXt p1**) | `TestOCRRecIntegration` / `TestAnalyzerOCRRecGolden`, `TestOCRRecBatchIntegration` | exact text; batch-wide resize reproduced |
 | Det  | Text quads vs `ref_det.py` goldens (all fixtures) | `TestDetIntegration` / `TestAnalyzerDetGolden`, `TestDetMembershipAllFixtures`, `TestDetOCRAdjudication` | IoU orphan floor 3/5, adjudicated benign via OCR |
 
 ### 5. Two proof tiers (single source of truth)
 
-1. **Standalone library tier** — `internal/deepdoc/dla-native/native`, run with
+1. **Standalone library tier** — `internal/deepdoc/native`, run with
    `-tags integration`. Exercises `RunDLA` / `RunTSR` / `RunDet` /
    `RunOCRRec` / `RunOCRRecBatch` directly, proving the inference library
    itself is equivalent.
-2. **`DocAnalyzer` seam tier** — `internal/deepdoc/parser/pdf/inference/native`,
+2. **`DocAnalyzer` seam tier** — `internal/deepdoc/parser/pdf/inference/native_analyzer`,
    run with `-tags "native_det integration"`. Exercises `infnative.NativeAnalyzer`
    — the exact `deepdoctype.DocAnalyzer` implementation the PDF parser consumes
    in production — proving equivalence at the integration point rather than only
@@ -487,19 +491,19 @@ grayscale AA, to match pdfplumber's `antialias=True`):**
 
 | Task | Pages | Result |
 |------|-------|--------|
-| DLA  | 年报 p2 | **15/15**, worst max Δ **0.017 px** |
-| DLA  | 年报 p8 | **14/14**, worst max Δ **0.025 px** |
+| DLA  | annual report p2 | **15/15**, worst max Δ **0.017 px** |
+| DLA  | annual report p8 | **14/14**, worst max Δ **0.025 px** |
 | DLA  | ZoomNeXt p1 | **15/15**, worst max Δ **0.011 px** |
 | DLA  | ZH-TW migration p3 | **24/24**, worst max Δ **0.031 px** |
-| DLA  | 三国人物 p1 | **18/18**, worst max Δ **0.006 px** |
+| DLA  | Three Kingdoms p1 | **18/18**, worst max Δ **0.006 px** |
 | DLA  | 15K606 p10 (figure/table) | **18/18**, worst max Δ **0.721 px** (AA-invariant — see note) |
-| Det  | 年报 p2 | matched **93/93**, center-max **3.20 px**, corner-maxd **8.0 px**; IoU orphan 0/0 |
-| Det  | 年报 p8 | matched **42/42**, center-max **3.35 px**, corner-maxd **12.0 px**; IoU orphan 0/0 |
+| Det  | annual report p2 | matched **93/93**, center-max **3.20 px**, corner-maxd **8.0 px**; IoU orphan 0/0 |
+| Det  | annual report p8 | matched **42/42**, center-max **3.35 px**, corner-maxd **12.0 px**; IoU orphan 0/0 |
 | Det  | ZoomNeXt p1 | matched **140/140**, center-max **3.35 px**, corner-maxd **3.0 px**; IoU orphan 0/0 |
 | Det  | ZH-TW migration p3 | matched **30/30**, center-max **0.50 px**, corner-maxd **1.0 px**; IoU orphan 0/0 |
-| Det  | 三国人物 p1 | matched **32/32**, center-max **1.50 px**, corner-maxd **3.0 px**; IoU orphan 0/0 |
+| Det  | Three Kingdoms p1 | matched **32/32**, center-max **1.50 px**, corner-maxd **3.0 px**; IoU orphan 0/0 |
 | Det  | 15K606 p10 | matched **55/55**, center-max **3.20 px**, corner-maxd **3.0 px**; IoU orphan 1/2 |
-| TSR  | 年报 p2/p8, ZH-TW migration p3, 三国人物 p1 | **matched 100%** (117/117 cells), worst max Δ **2.700 px** (≤ 3.5px floor) |
+| TSR  | annual report p2/p8, ZH-TW migration p3, Three Kingdoms p1 | **matched 100%** (117/117 cells), worst max Δ **2.700 px** (≤ 3.5px floor) |
 
 **Interpretation.**
 - **DLA is fully closed end-to-end, and now near-pixel-exact on text pages**:
@@ -511,7 +515,7 @@ grayscale AA, to match pdfplumber's `antialias=True`):**
   not a text-smoothing artifact.
 - **Det is closed end-to-end on structure** (IoU orphan 0/0–1/2, no loss /
   no hallucination). The per-box *center* distance is **sub-pixel**: a
-  greedy/Hungarian nearest-center analysis of the dumped boxes on 年报 p2/p8
+  greedy/Hungarian nearest-center analysis of the dumped boxes on annual report p2/p8
   gives median **0 px**, mean **< 0.5 px**, p90 **< 2.2 px**, max **< 5 px** —
   i.e. there is **no translation / coordinate-origin offset** between the two
   render paths (the earlier "8–12 px is a render-origin translation" guess,
@@ -693,7 +697,7 @@ real tables ≤ 3.5px (worst 2.70px; dense annual-report ≤ 1.21px), and dense
 technical-standard tables (15K606 p40) breaking the floor on both coordinate
 drift **and** cell count (17/30, documented exception).
 
-The two excluded pages (`15K606` p40, `厦门象屿年报` p12) are retained in the
+The two excluded pages (`15K606` p40, `Xiamen Xiangyu annual report` p12) are retained in the
 generator (`/tmp/gen_corpus.py`) for future investigation but are **not** in the
 strict 3.5px fixture suite — p12 actually measures 0.37px (25/25) once rasterized
 through the real production path, so only p40 remains a genuine hard case.
@@ -705,15 +709,15 @@ impact. "Closed" items are done in code or in this document.
 
 | ID | Item | Status |
 |----|------|--------|
-| P1 一 | **Live-service field diff** — confirm server is a thin wrapper (no extra preprocessing) and diff Go `Wire()` against the *real* `deepdoc_server` HTTP response. | **CLOSED** — server verified thin (adapters only decode + color-convert + clamp + label→class_id; config matches goldens: DLA/TSR `thr=0.2`, OCR default pipeline). `TestWireVsLiveServer` added and passing against the reference server (Go ORT 1.23.2 vs reference server 1.23.2; re-validated cross-version against the running 1.28.0 service by §9); measured numbers in Methodology §7. |
-| P1 五 | **ORT version** — record the Python-side ORT build, not just assume ABI compatibility. | **CLOSED** — Go runs **1.23.2** (`DeepDocORTVersion`); the currently running Python service resolves **1.28.0**. A controlled experiment (Go loading 1.28.0's `.so`) reproduced identical detection matching, so the version is not a sensitivity. Recorded in *Runtime version* and Methodology §9. |
-| P2 二 | **Scope wording** — state that inference-boundary equivalence ≠ end-to-end PDF→chunk pipeline equivalence. | **CLOSED** — explicit "Boundary of this proof" paragraph added to Scope; PDF→raster and `PdfParser` downstream named as out-of-scope. |
-| P2 三 | **Det 3/5 "benign" wording** — it is not identical output (Go emits 3 extra text regions). | **CLOSED** — reworded to "no content loss, not identical output"; Go is a *superset* on those regions, absorbed by downstream dedup. |
-| P2 八 | **Corpus** — DLA/TSR/OCR coverage is thin (8 / 7 / 8; OCR are line crops, not full pages). | **CLOSED** — expanded with diverse full-page real-document fixtures: DLA +3 (`dla_real_cn_report` 厦门象屿年报 p2, `dla_real_zhtw` ZH-TW migration doc p3, `dla_real_en_paper` ZoomNeXt paper p1), TSR +1 (`tsr_real_report` 厦门象屿年报 p8), OCR +3 (`line_real_cn` 三国人物 p1, `line_real_zhtw` ZH-TW migration p2, `line_real_en` ZoomNeXt p1). All pass sub-pixel / exact-text. The one genuine hard case (15K606 p40 dense technical-standard table) is a documented exception, not in the strict 3.5px suite — see *Known model-floor limits*. |
+| P1-1 | **Live-service field diff** — confirm server is a thin wrapper (no extra preprocessing) and diff Go `Wire()` against the *real* `deepdoc_server` HTTP response. | **CLOSED** — server verified thin (adapters only decode + color-convert + clamp + label→class_id; config matches goldens: DLA/TSR `thr=0.2`, OCR default pipeline). `TestWireVsLiveServer` added and passing against the reference server (Go ORT 1.23.2 vs reference server 1.23.2; re-validated cross-version against the running 1.28.0 service by §9); measured numbers in Methodology §7. |
+| P1-5 | **ORT version** — record the Python-side ORT build, not just assume ABI compatibility. | **CLOSED** — Go runs **1.23.2** (`DeepDocORTVersion`); the currently running Python service resolves **1.28.0**. A controlled experiment (Go loading 1.28.0's `.so`) reproduced identical detection matching, so the version is not a sensitivity. Recorded in *Runtime version* and Methodology §9. |
+| P2-2 | **Scope wording** — state that inference-boundary equivalence ≠ end-to-end PDF→chunk pipeline equivalence. | **CLOSED** — explicit "Boundary of this proof" paragraph added to Scope; PDF→raster and `PdfParser` downstream named as out-of-scope. |
+| P2-3 | **Det 3/5 "benign" wording** — it is not identical output (Go emits 3 extra text regions). | **CLOSED** — reworded to "no content loss, not identical output"; Go is a *superset* on those regions, absorbed by downstream dedup. |
+| P2-8 | **Corpus** — DLA/TSR/OCR coverage is thin (8 / 7 / 8; OCR are line crops, not full pages). | **CLOSED** — expanded with diverse full-page real-document fixtures: DLA +3 (`dla_real_cn_report` Xiamen Xiangyu annual report p2, `dla_real_zhtw` ZH-TW migration doc p3, `dla_real_en_paper` ZoomNeXt paper p1), TSR +1 (`tsr_real_report` Xiamen Xiangyu annual report p8), OCR +3 (`line_real_cn` Three Kingdoms p1, `line_real_zhtw` ZH-TW migration p2, `line_real_en` ZoomNeXt p1). All pass sub-pixel / exact-text. The one genuine hard case (15K606 p40 dense technical-standard table) is a documented exception, not in the strict 3.5px suite — see *Known model-floor limits*. |
 | P0 | **Model snapshot hash lock** — `MODEL_DIR` must be pinned to the same `InfiniFlow/deepdoc` snapshot as the frozen Python side; the proof must fail if it drifts. | **CLOSED** — enforced. `modelSnapshotHashes` (sha256 of `det.onnx`, `layout.onnx`, `tsr.onnx`, `rec.onnx`, `ocr.res`) is checked by `TestModelSnapshotHash` and at the top of `TestEquivalenceReport`; Fatal on any mismatch. Both repo copies verified byte-identical. Update the table only when the snapshot is intentionally upgraded, and regenerate every golden in the same change. |
 | P3 | **Concurrency correctness** — parallel vs serial inference must give identical results (thread-safety is correctness, not performance). | **CLOSED** — `TestInferenceConcurrencyConsistent` drives DLA/TSR/OCR-rec/Det once serially (baseline wire) then 8× concurrently and asserts every concurrent run is byte-identical to the serial baseline. Proves the shared model-session pool is race-free and contamination-free under parallel load (complementing `TestDetSessionPoolBounded` which guards pool *size*). |
 | **E2E-1** | **End-to-end raster alignment** — the "same raster bytes in" premise is a declaration: production rasterizes via different engines (Go pdfium @216 DPI vs Python pdfplumber @216 DPI). Prove the two render paths yield equivalent boxes. | **CLOSED** — `TestRasterAlignmentDLA/Det/TSR` rasterize the *same* real PDF page with both paths (pdfium vs deepdoc's own pdfplumber) at 216 DPI and compare boxes in source-pixel space. After enabling LCD text AA in the Go pdfium render to match pdfplumber: DLA **104/104** matched with worst max Δ **0.721 px** on the figure page and **≤ 0.03 px** on the four text pages (near-pixel-exact); Det IoU orphan 0/0–1/2 (inside 3/5); TSR on real-table pages **117/117** matched (worst 2.700px). The "same-bytes-in" premise is now **measured**, not assumed. Measured numbers in Methodology §8. Note (measured): the Det test-log `corner-maxd 8–12 px` is the max *per-corner* difference on 1–2 skewed outlier boxes; per-box **center** distance is sub-pixel (median 0, mean <0.5px, p90 <2.2px, max <5px) — there is **no render-origin translation**; the residual is contour-boundary quad-skew, the same source as the 3/5 IoU orphan floor. |
-| **E2E-2** | **Quantify TSR floor on full-page real tables** — give an empirical upper bound ("N pages, worst X px") instead of two hand-picked excluded examples. | **CLOSED** — `TestTSRFloorFullPageTables` runs TSR on whole-page real tables through both raster paths: moderate tables ≤ 3.5px (厦门象屿年报 p8 1.21px, p12 0.37px; 三国人物 p1 2.70px); dense technical-standard 15K606 p40 is the documented exception (17/30, model-level cell-count divergence, regression-guarded). Empirical bound recorded in *Known model-floor limits (full-page real tables) — measured*. |
+| **E2E-2** | **Quantify TSR floor on full-page real tables** — give an empirical upper bound ("N pages, worst X px") instead of two hand-picked excluded examples. | **CLOSED** — `TestTSRFloorFullPageTables` runs TSR on whole-page real tables through both raster paths: moderate tables ≤ 3.5px (Xiamen Xiangyu annual report p8 1.21px, p12 0.37px; Three Kingdoms p1 2.70px); dense technical-standard 15K606 p40 is the documented exception (17/30, model-level cell-count divergence, regression-guarded). Empirical bound recorded in *Known model-floor limits (full-page real tables) — measured*. |
 
 **Withdrawn critique.** One review point claimed the two proof tiers "use
 different inference code paths / decoders, so preprocessing may differ." This is

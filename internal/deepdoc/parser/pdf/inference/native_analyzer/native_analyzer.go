@@ -2,8 +2,8 @@
 
 // Package infnative provides an in-process DeepDoc DocAnalyzer backend.
 //
-// It wraps the ONNX Runtime inference library in the standalone dla-native
-// module (import path dla-native/native) so the PDF parser can run DLA/TSR/OCR
+// It wraps the ONNX Runtime inference library in the standalone native
+// module (import path native) so the PDF parser can run DLA/TSR/OCR
 // locally on CPU, with no Python service in the loop. It is registered as the
 // local fallback used when no external DeepDoc HTTP service is configured
 // (DEEPDOC_URL unset); when an external service is configured the parser still
@@ -20,7 +20,7 @@ import (
 	"fmt"
 	"image"
 
-	"dla-native/native"
+	"native"
 	"ragflow/internal/common"
 	"ragflow/internal/deepdoc/parser/pdf/inference"
 	deepdoctype "ragflow/internal/deepdoc/parser/type"

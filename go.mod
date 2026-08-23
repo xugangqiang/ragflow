@@ -4,10 +4,10 @@ go 1.26.4
 
 require (
 	cloud.google.com/go/storage v1.63.0
-	// dla-native is the standalone Go port of DeepDoc's det/DLA/TSR/OCR-rec.
+	// native is the standalone Go port of DeepDoc's det/DLA/TSR/OCR-rec.
 	// It is imported only under the `native_det` build tag; the default build
-	// never compiles it. See internal/deepdoc/dla-native and HANDOFF.md §8 C1.
-	dla-native v0.0.0
+	// never compiles it. See internal/deepdoc/native/README.md (ADR).
+	native v0.0.0
 	github.com/DATA-DOG/go-sqlmock v1.5.2
 	github.com/LuxorLabs/tenki-sdk-go/sandbox v0.5.2
 	github.com/alibabacloud-go/agentrun-20250910/v5 v5.8.4
@@ -238,6 +238,6 @@ require (
 
 replace github.com/infiniflow/infinity-go-sdk => github.com/infiniflow/infinity/go v0.0.0-20260723093510-ceb4bc518010
 
-// dla-native: local standalone module (DeepDoc det/DLA/TSR/OCR-rec Go port).
+// native: local standalone module (DeepDoc det/DLA/TSR/OCR-rec Go port).
 // Only pulled in under -tags native_det.
-replace dla-native => ./internal/deepdoc/dla-native
+replace native => ./internal/deepdoc/native

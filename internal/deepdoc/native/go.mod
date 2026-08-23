@@ -1,4 +1,4 @@
-module dla-native
+module native
 
 go 1.26.4
 
