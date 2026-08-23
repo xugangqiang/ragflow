@@ -126,8 +126,8 @@ func newDocAnalyzerCacheWithStore(inner doctype.DocAnalyzer, s cacheStore, ttl t
 // image. It encodes the image to PNG (matching what the
 // inference HTTP client actually sends) and hashes the
 // resulting bytes. PNG encoding is deterministic for a given
-// image, so two DocAnalyzer calls with the same image content
-// produce the same key.
+// image, so two DocAnalyzer calls with the same
+// image content produce the same key.
 func cacheKey(method string, img image.Image) (string, error) {
 	if img == nil {
 		return "", fmt.Errorf("%s: nil image", method)

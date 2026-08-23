@@ -124,7 +124,7 @@ func TestDeepDocHTTP_OCRDetect(t *testing.T) {
 		if op := r.FormValue("operator"); op != "det" {
 			t.Errorf("operator = %q, want 'det'", op)
 		}
-		// Verify image is JPEG (not PNG).
+		// Verify image is PNG (not JPEG).
 		file, header, _ := r.FormFile("request")
 		defer file.Close()
 		if !strings.HasSuffix(header.Filename, ".png") {

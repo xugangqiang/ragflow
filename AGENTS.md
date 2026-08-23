@@ -12,7 +12,7 @@ Use this file as the local operating guide for the current codebase. Prefer the 
 
 ## Current stack
 - Backend: Python 3.13+, Quart-based API server, Peewee ORM, async workers.
-- Frontend: React + TypeScript + Vite in `web/`.
+- Frontend: React + TypeScript + Vite in `web/` (dual-backend Go/Python variant conventions: see `web/CLAUDE.md`).
 - Go: the repository also has a substantial Go module for servers, ingestion, parser/runtime, CLI, and supporting services.
 - Runtime services commonly include MySQL/PostgreSQL, Redis, MinIO, and Elasticsearch/Infinity/OpenSearch depending on configuration.
 
@@ -79,6 +79,8 @@ Rules:
 - The server binary is built with `-tags native_det` (see `build_go` in `build.sh`): this compiles the in-process DeepDoc backend into the binary. ONNX Runtime and the models are loaded at runtime — `DEEPDOC_ORT_LIB` / `DEEPDOC_MODEL_DIR` override the defaults, which fall back to `~/ragflow-native-libs/onnxruntime/...` and the `ragflow_deps/download_deps.py` snapshot. At startup the server requires at least one DeepDoc backend: an external service via `DEEPDOC_URL`, or the local in-process backend (ORT + models present). It fails fast if neither is configured. The CLI binary is built without `native_det` (no-op path).
 
 ## Working Rules
+- When reviewing documentation or code, inspect the full affected path and report all verifiable findings in one review; do not return after only a few findings and expose further issues in later rounds.
+- When handling review comments, independently verify each substantive claim against the current code or tests before accepting, rejecting, or acting on it.
 - Before editing, inspect the nearest code path that actually owns the behavior.
 - Keep changes small and local unless the task is explicitly a broader refactor.
 - Prefer one implementation path instead of preserving old and new versions side by side.

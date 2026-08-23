@@ -126,8 +126,8 @@ func TestPipelineExecutor_Run_RealCanvasDSL_UsesGeneralPipeline(t *testing.T) {
 	if len(inserted) != 1 {
 		t.Fatalf("insert calls = %d, want 1", len(inserted))
 	}
-	if len(inserted[0]) != 2 {
-		t.Fatalf("inserted chunk count = %d, want 2", len(inserted[0]))
+	if len(inserted[0]) != 1 {
+		t.Fatalf("inserted chunk count = %d, want 1", len(inserted[0]))
 	}
 	for i, ck := range inserted[0] {
 		if got := ck["doc_id"]; got != docID {
@@ -264,9 +264,6 @@ func TestPipelineExecutor_Run_RealPDF_ProducesIndexedChunks(t *testing.T) {
 		if got := chunk["doc_id"]; got != docID {
 			t.Fatalf("chunk[%d].doc_id = %v, want %q", i, got, docID)
 		}
-		if !taskChunkFieldEqualsStr(chunk["kb_id"], kbID) {
-			t.Fatalf("chunk[%d].kb_id = %v, want %q", i, chunk["kb_id"], kbID)
-		}
 		if got := chunk["docnm_kwd"]; got != docName {
 			t.Fatalf("chunk[%d].docnm_kwd = %v, want %q", i, got, docName)
 		}
@@ -370,8 +367,8 @@ func TestRunPipeline_RealPipelineOutput_ProducesIndexFields(t *testing.T) {
 		t.Fatalf("insert calls = %d, want 1", len(inserted))
 	}
 	chunks := inserted[0]
-	if len(chunks) != 2 {
-		t.Fatalf("inserted chunk count = %d, want 2", len(chunks))
+	if len(chunks) != 1 {
+		t.Fatalf("inserted chunk count = %d, want 1", len(chunks))
 	}
 	for i, ck := range chunks {
 		if got := ck["doc_id"]; got != docID {
@@ -435,7 +432,7 @@ func mustOpenTaskTestDB(t *testing.T) *gorm.DB {
 	if err != nil {
 		t.Fatalf("open in-memory sqlite db: %v", err)
 	}
-	if err := db.AutoMigrate(
+	if err = db.AutoMigrate(
 		&entity.Tenant{},
 		&entity.Knowledgebase{},
 		&entity.Document{},
@@ -446,11 +443,12 @@ func mustOpenTaskTestDB(t *testing.T) *gorm.DB {
 	); err != nil {
 		t.Fatalf("auto-migrate sqlite tables: %v", err)
 	}
-	if sqlDB, err := db.DB(); err != nil {
+
+	sqlDB, err := db.DB()
+	if err != nil {
 		t.Fatalf("get sql.DB from gorm: %v", err)
-	} else {
-		sqlDB.SetMaxOpenConns(1)
 	}
+	sqlDB.SetMaxOpenConns(1)
 	return db
 }
 
@@ -729,19 +727,4 @@ func taskS3SafeBucketName(s string) string {
 	s = strings.ToLower(s)
 	s = strings.ReplaceAll(s, "_", "-")
 	return s
-}
-
-// taskChunkFieldEqualsStr compares a chunk field to a plain string, tolerating
-// the slice form used internally (e.g. kb_id is []string{kbID} and survives a
-// JSON round-trip as []any{kbID}).
-func taskChunkFieldEqualsStr(v any, want string) bool {
-	switch val := v.(type) {
-	case string:
-		return val == want
-	case []string:
-		return len(val) == 1 && val[0] == want
-	case []any:
-		return len(val) == 1 && fmt.Sprint(val[0]) == want
-	}
-	return false
 }

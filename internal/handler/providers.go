@@ -154,7 +154,7 @@ func (h *ProviderHandler) ListModels(c *gin.Context) {
 		return
 	}
 
-	// 1. Get static models from config (may be nil when models list is empty)
+	// 1. Get static models from config (maybe nil when models list is empty)
 	staticModels, _ := dao.GetModelProviderManager().ListModels(providerName)
 	if staticModels == nil {
 		staticModels = []map[string]interface{}{}
@@ -181,7 +181,7 @@ func (h *ProviderHandler) ListModels(c *gin.Context) {
 						remoteModels = append(remoteModels, map[string]interface{}{
 							"name":        m.Name,
 							"model_types": m.ModelTypes,
-							"max_tokens":  m.MaxTokens,
+							"max_output":  m.MaxOutput,
 						})
 					}
 				}
@@ -204,15 +204,23 @@ func (h *ProviderHandler) ListModels(c *gin.Context) {
 	}
 	for _, m := range remoteModels {
 		if name, ok := m["name"].(string); ok {
+			if len(providerModelMapTypes(m)) == 0 {
+				if existing := merged[name]; len(providerModelMapTypes(existing)) > 0 {
+					m["model_types"] = existing["model_types"]
+				}
+			}
 			merged[name] = m
 		}
 	}
 
-	// 5. Sort by name
+	// 5. Fill missing model types using only the merged list.
 	result := make([]map[string]interface{}, 0, len(merged))
 	for _, m := range merged {
 		result = append(result, m)
 	}
+	fillProviderModelMapTypes(result)
+
+	// 6. Sort by name
 	sort.Slice(result, func(i, j int) bool {
 		ni, _ := result[i]["name"].(string)
 		nj, _ := result[j]["name"].(string)
@@ -220,6 +228,44 @@ func (h *ProviderHandler) ListModels(c *gin.Context) {
 	})
 
 	common.SuccessWithData(c, result, "success")
+}
+
+func fillProviderModelMapTypes(result []map[string]interface{}) {
+	list := make([]models.ListModelResponse, 0, len(result))
+	indexes := make([]int, 0, len(result))
+	for i, model := range result {
+		name, _ := model["name"].(string)
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		list = append(list, models.ListModelResponse{
+			Name:       name,
+			ModelTypes: providerModelMapTypes(model),
+		})
+		indexes = append(indexes, i)
+	}
+	list = models.FillMissingModelTypes(list)
+	for i, model := range list {
+		result[indexes[i]]["model_types"] = model.ModelTypes
+	}
+}
+
+func providerModelMapTypes(model map[string]interface{}) []string {
+	switch modelTypes := model["model_types"].(type) {
+	case []string:
+		return modelTypes
+	case []interface{}:
+		types := make([]string, 0, len(modelTypes))
+		for _, modelType := range modelTypes {
+			if s, ok := modelType.(string); ok {
+				types = append(types, s)
+			}
+		}
+		return types
+	default:
+		return nil
+	}
 }
 
 func (h *ProviderHandler) ShowModel(c *gin.Context) {
@@ -502,7 +548,6 @@ type AlterProviderInstanceRequest struct {
 	BaseURL      string                            `json:"base_url"`
 	Region       string                            `json:"region"`
 	ModelInfo    []service.CreateInstanceModelInfo `json:"model_info"`
-	Verify       *bool                             `json:"verify"`
 }
 
 func (h *ProviderHandler) AlterProviderInstance(c *gin.Context) {
@@ -531,12 +576,7 @@ func (h *ProviderHandler) AlterProviderInstance(c *gin.Context) {
 		return
 	}
 
-	verify := true
-	if req.Verify != nil {
-		verify = *req.Verify
-	}
-
-	code, err := h.modelProviderService.AlterProviderInstance(ctx, userID, providerName, instanceName, req.InstanceName, normalizeAPIKey(req.APIKey), req.BaseURL, req.Region, req.ModelInfo, verify)
+	code, err := h.modelProviderService.AlterProviderInstance(ctx, userID, providerName, instanceName, req.InstanceName, normalizeAPIKey(req.APIKey), req.BaseURL, req.Region, req.ModelInfo)
 	if err != nil {
 		common.ErrorWithCode(c, code, err.Error())
 		return
@@ -724,11 +764,6 @@ func (h *ProviderHandler) AddModel(c *gin.Context) {
 
 	if req.ModelName == "" {
 		common.ResponseWithHttpCodeData(c, http.StatusBadRequest, common.CodeBadRequest, nil, "model_name is required")
-		return
-	}
-
-	if len(req.ModelTypes) == 0 {
-		common.ResponseWithHttpCodeData(c, http.StatusBadRequest, common.CodeBadRequest, nil, "model_type is required")
 		return
 	}
 
