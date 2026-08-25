@@ -1,3 +1,5 @@
+//go:build cgo
+
 package native
 
 // det_helpers.go — small sorting / rasterization helpers for the pure-Go DB

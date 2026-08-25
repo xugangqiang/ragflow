@@ -1,3 +1,5 @@
+//go:build cgo
+
 package native
 
 // dla.go — DLA (layout detection) recognizer.

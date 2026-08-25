@@ -1,3 +1,5 @@
+//go:build cgo
+
 package native
 
 // nms.go — generic axis-aligned bounding-box nms.

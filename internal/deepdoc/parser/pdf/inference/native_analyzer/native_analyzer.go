@@ -1,16 +1,17 @@
-//go:build native_det
+//go:build cgo
 
 // Package infnative provides an in-process DeepDoc DocAnalyzer backend.
 //
 // It wraps the ONNX Runtime inference library in the standalone native
 // module (import path native) so the PDF parser can run DLA/TSR/OCR
-// locally on CPU, with no Python service in the loop. It is registered as the
-// local fallback used when no external DeepDoc HTTP service is configured
-// (DEEPDOC_URL unset); when an external service is configured the parser still
-// talks to it over HTTP and never silently falls back to this backend.
+// locally on CPU, with no Python service in the loop. It is the SOLE
+// production DeepDoc backend: the external Python HTTP service (DEEPDOC_URL)
+// has been removed entirely from both the production path and the test
+// suite, so all DeepDoc regression tests now exercise this in-process
+// backend directly.
 //
 // The package imports onnxruntime_go (cgo), so it is build-tag gated
-// (native_det) and only the server binary built with that tag opts into it.
+// (cgo) and only the server binary built with that tag opts into it.
 // The parser package itself stays free of the onnxruntime dependency for its
 // unit-test build path.
 package infnative
@@ -20,8 +21,8 @@ import (
 	"fmt"
 	"image"
 
-	"native"
 	"ragflow/internal/common"
+	"ragflow/internal/deepdoc/native"
 	"ragflow/internal/deepdoc/parser/pdf/inference"
 	deepdoctype "ragflow/internal/deepdoc/parser/type"
 	"ragflow/internal/parser/parser"
@@ -65,27 +66,20 @@ func NewAnalyzer(modelDir string, dropScore float64) (*NativeAnalyzer, error) {
 }
 
 // Register wires this backend into the parser as the local in-process
-// fallback. Call it once at process start (the server binary) after
-// resolving modelDir/ortLib. A non-empty ortLib is handed to native.InitORT;
-// if ORT is already initialized (or ortLib is empty and InitORT ran elsewhere)
-// this is a no-op for that step. The factory returns false when the backend
-// cannot serve, so the parser degrades to the empty analyzer rather than
-// crashing.
-// Register wires this backend into the parser as the local in-process
-// fallback. Call it once at process start (the server binary) after
-// resolving modelDir/ortLib/dropScore. A non-empty ortLib is handed to
-// native.InitORT; if ORT is already initialized (or ortLib is empty and
-// InitORT ran elsewhere) this is a no-op for that step. dropScore is the
-// confidence threshold used by OCRRecognize to blank low-confidence text,
-// mirroring the Python service's Recognizer.drop_score. The factory returns
-// false when the backend cannot serve, so the parser degrades to the empty
-// analyzer rather than crashing.
+// backend. Call it once at process start (the server binary) after resolving
+// modelDir/ortLib/dropScore. ortLib is accepted for API compatibility with
+// the upstream binding but is otherwise ignored: this fork links ONNX Runtime
+// statically (libonnxruntime.a), so native.InitORT always resolves ORT from
+// the running binary itself via dlopen(NULL) — no external libonnxruntime.so
+// is required. InitORT is a sync.Once, so re-entry (e.g. tests calling it
+// directly) is a no-op. dropScore is the confidence threshold used by
+// OCRRecognize to blank low-confidence text, mirroring the Python service's
+// Recognizer.drop_score. The factory returns false when the backend cannot
+// serve, so the parser degrades to the empty analyzer rather than crashing.
 func Register(modelDir, ortLib string, dropScore float64) error {
 	registeredModelDir = modelDir
-	if ortLib != "" {
-		if err := native.InitORT(ortLib); err != nil {
-			return fmt.Errorf("deepdoc native: init onnxruntime: %w", err)
-		}
+	if err := native.InitORT(ortLib); err != nil {
+		return fmt.Errorf("deepdoc native: init onnxruntime: %w", err)
 	}
 	parser.SetNativeDocAnalyzerFactory(func() (deepdoctype.DocAnalyzer, bool) {
 		a, err := NewAnalyzer(modelDir, dropScore)
@@ -202,6 +196,52 @@ func (a *NativeAnalyzer) OCRRecognize(ctx context.Context, img image.Image) ([]d
 		return []deepdoctype.OCRText{{Text: "", Confidence: float64(res.Score)}}, nil
 	}
 	return []deepdoctype.OCRText{{Text: res.Text, Confidence: float64(res.Score)}}, nil
+}
+
+// OCRRecognizeBatch recognizes text in a batch of cropped image regions with
+// a SINGLE ONNX Run, mirroring deepdoc's TextRecognizer.__call__ over a page's
+// lines. It is the batched analogue of OCRRecognize: the recognizer under the
+// hood concatenates every crop's preprocessed blob into one {N,3,48,imgW}
+// tensor and runs the model once, which is numerically identical to calling
+// OCRRecognize per crop (each line sees the same shared batch width) but
+// amortizes N forward passes into one. The drop_score contract is applied
+// per line, so callers consume an identical []OCRText per crop regardless of
+// whether batching was used.
+//
+// A degenerate batch (len(imgs) <= 1) falls back to the single-crop path so
+// callers get the exact same result as OCRRecognize (no batch-width widening).
+// This is the production fast path the caller opts into by implementing
+// batchRecognizer — strictly more efficient than N sequential OCRRecognize
+// calls and numerically identical.
+func (a *NativeAnalyzer) OCRRecognizeBatch(ctx context.Context, imgs []image.Image) ([][]deepdoctype.OCRText, error) {
+	n := len(imgs)
+	if n == 0 {
+		return nil, nil
+	}
+	if n == 1 {
+		res, err := a.OCRRecognize(ctx, imgs[0])
+		if err != nil {
+			return nil, err
+		}
+		return [][]deepdoctype.OCRText{res}, nil
+	}
+	nis, err := native.FromImages(imgs)
+	if err != nil {
+		return nil, err
+	}
+	recs, err := native.RunOCRRecBatchReal(ctx, a.modelDir, nis)
+	if err != nil {
+		return nil, err
+	}
+	out := make([][]deepdoctype.OCRText, n)
+	for i, r := range recs {
+		if float64(r.Score) < a.dropScore {
+			out[i] = []deepdoctype.OCRText{{Text: "", Confidence: float64(r.Score)}}
+			continue
+		}
+		out[i] = []deepdoctype.OCRText{{Text: r.Text, Confidence: float64(r.Score)}}
+	}
+	return out, nil
 }
 
 // Health reports whether the backend can serve from this analyzer's model

@@ -14,16 +14,19 @@
 #                          regenerated, this fails and alerts.
 #   - go-native:       runs the native model-backed integration tests
 #                          (Go vs the same golden) for DLA/TSR/OCR-rec/det on a
-#                          portable runner (ORT only, no CGO PDF static libs).
+#                          portable runner. ORT is statically linked into the
+#                          test binary and resolved via dlopen(self), so no
+#                          libonnxruntime.so is needed; the CGO PDF static libs
+#                          (office_oxide/pdfium/pdf_oxide) are NOT provisioned.
 #
 # det is exercised in go-native purely as a Golden-comparison tool
 # (RunDet vs the Python reference). The model-backed DLA/TSR/OCR-rec/det tests
-# here run against native directly (ORT only, no CGO PDF static libs) to
-# keep this portable runner fast. The production-wired path — the in-process
-# DeepDoc backend registered into the parser via SetNativeDocAnalyzerFactory
-# under the native_det build tag — is covered separately by the server smoke
-# test and the native_det integration tier, which additionally provision the
-# static PDF libs (office_oxide/pdfium/pdf_oxide) and lld.
+# here run against native directly (statically-linked ORT, no CGO PDF static
+# libs) to keep this portable runner fast. The production-wired path — the
+# in-process DeepDoc backend registered into the parser via
+# SetNativeDocAnalyzerFactory under the cgo build tag — is covered separately
+# by the server smoke test and the cgo integration tier, which additionally
+# provision the static PDF libs (office_oxide/pdfium/pdf_oxide) and lld.
 name: deepdoc-drift
 permissions:
   contents: read
@@ -140,11 +143,21 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
 
-      - name: Install ORT shared lib (CPU)
-        id: ort
+      - name: Install lld (static-link ORT)
+        run: sudo apt-get update -qq && sudo apt-get install -y lld
+
+      - name: Download ORT static archives
+        # Statically link libonnxruntime into the test binary (mirrors
+        # build.sh: ONNX_RUNTIME_STATIC_DIR). OrtGetApiBase is then resolved
+        # via dlopen(self), so no libonnxruntime.so is needed at runtime.
         run: |
-          python3 -m pip install --quiet "onnxruntime==1.23.2"  # mirrors internal/common.DeepDocORTVersion
-          echo "ORT_LIB=$(python3 -c 'import glob,onnxruntime,os;d=os.path.join(os.path.dirname(onnxruntime.__file__),"capi");c=[f for f in glob.glob(os.path.join(d,"libonnxruntime.so*")) if "providers" not in f][0];print(c)')" >> "$GITHUB_OUTPUT"
+          ORT_VERSION=1.23.2
+          URL="https://github.com/csukuangfj/onnxruntime-libs/releases/download/v${ORT_VERSION}/onnxruntime-linux-x64-static_lib-${ORT_VERSION}-glibc2_28.zip"
+          DEST="$HOME/ragflow-native-libs/onnxruntime/static_lib"
+          mkdir -p "$DEST"
+          curl -fsSL "$URL" -o /tmp/ort_static.zip
+          (cd "$DEST" && unzip -o -q /tmp/ort_static.zip)
+          echo "ORT static archives:"; find "$DEST" -name '*.a'
 
       - name: Cache DeepDoc models
         uses: actions/cache@v5
@@ -168,9 +181,16 @@ jobs:
           PY
 
       - name: Run native integration tests (Go vs pinned golden)
-        working-directory: internal/deepdoc/native
         env:
-          ORT_LIB: ${{ steps.ort.outputs.ORT_LIB }}
           MODEL_DIR: ${{ github.workspace }}/models/deepdoc
           CGO_ENABLED: '1'
-        run: go test -tags integration -count=1 ./native/
+        run: |
+          ORT_STATIC="$HOME/ragflow-native-libs/onnxruntime/static_lib"
+          # Skip GPU-only providers we never build against.
+          ORT_A=$(find "$ORT_STATIC" -type f -name '*.a' \
+                    ! -name '*cuda*' ! -name '*tensorrt*' \
+                    ! -name '*coreml*' ! -name '*dml*' ! -name '*migraphx*' \
+                    | tr '\n' ' ')
+          export CGO_LDFLAGS="-Wl,--whole-archive ${ORT_A} -Wl,--no-whole-archive -Wl,--export-dynamic -fuse-ld=lld -lstdc++"
+          echo "CGO_LDFLAGS=$CGO_LDFLAGS"
+          go test -tags "cgo integration" -count=1 ./internal/deepdoc/native/...

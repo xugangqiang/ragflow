@@ -15,20 +15,25 @@ comparison, not by code inspection.
 recognizers (`dla_adapter` → `LayoutRecognizer4YOLOv10`, `ocr_adapter` →
 `TextDetector` / `TextRecognizer`, `tsr_adapter` → `TableStructureRecognizer`).
 The caller depends only on the `DocAnalyzer` interface and its wire format. In
-the Go server (`-tags native_det`), `infnative.Register` registers
-`NativeAnalyzer` as the `DocAnalyzer`; `resolveDocAnalyzer` then **replaces the
-external `DEEPDOC_URL` HTTP call** with an in-process call. The deployment swap
-is in-process, single binary, no separate Python service to operate.
+the Go server (`-tags cgo`), `infnative.Register` registers
+`NativeAnalyzer` as the `DocAnalyzer`, and `resolveDocAnalyzer` serves it
+**in-process only** — the external `DEEPDOC_URL` HTTP client has been removed
+from the production path entirely. The deployment is in-process, single binary,
+no separate Python service to operate. The Python `deepdoc` service now serves
+only as an offline alignment baseline (it generates the reference goldens used
+by the Go integration tests); it is no longer a runtime backend, a client, or
+an equivalence oracle reached over HTTP.
 
 **Three pillars of the proof.**
 1. **Boundary equivalence** — DLA / TSR / OCR-rec / Det outputs match the Python
    reference goldens within documented, bounded floors (see *Evidence*).
 2. **Wire isomorphism** — Go's `Wire()` JSON is structurally identical to the
-   `deepdoc_server` output for DLA / TSR / Det / OCR-rec, validated **two ways**:
-   `TestWireSchemaMatchesGolden` (vs the re-serialized golden shape) **and**
-   `TestWireVsLiveServer` (vs a *running* `deepdoc_server`'s real HTTP response —
-   see *Live-service field diff*). So the consumer cannot tell the two backends
-   apart using the actual service contract.
+   `deepdoc_server` output for DLA / TSR / Det / OCR-rec, validated against the
+   re-serialized golden shape (`TestWireSchemaMatchesGolden`) and the Python
+   reference scripts (`ref_dla.py` / `ref_tsr.py` / `ref_ocr_rec.py`) that
+   generate the goldens. The goldens are produced by the same Python recognizers
+   the service wraps, so the Go backend is compared field-for-field against the
+   Python baseline it replaces.
 3. **Measured, not inferred** — every claim is verified by running the real ONNX
    models on committed fixtures; the tests *self-skip* (rather than fake-pass)
    when ORT / models are absent.
@@ -53,7 +58,7 @@ is in-process, single binary, no separate Python service to operate.
   Det — and on closer measurement the Det `corner-maxd 8–12 px` in the test log
   is the *max per-corner* difference on 1–2 skewed outlier boxes, not a center drift;
   per-box center distance is sub-pixel (no render-origin offset). See Scope note.
-- Depends on the `-tags native_det` build path **and** ONNX Runtime **1.23.x**
+- Depends on the `-tags cgo` build path **and** ONNX Runtime **1.23.x**
   **and** the same `InfiniFlow/deepdoc` model snapshot as the (frozen) Python
   side.
 - No standalone HTTP service mirrors `deepdoc_server`; only the in-process
@@ -72,17 +77,23 @@ this environment resolves `onnxruntime` to **1.28.0** (`deepdoc/server/pyproject
 pins `onnxruntime>=1.20.0`). This cross-version state is **measured, not
 assumed**:
 
-- The `onnxruntime_go` binding loads `libonnxruntime.so` through the C-API
-  (`native.InitORT`), which is ABI-compatible across 1.23.x/1.28.x; loading the
-  service's 1.28.0 `.so` into the Go backend succeeds and runs the same models.
+- The `onnxruntime_go` binding (forked to `github.com/xugangqiang/onnxruntime_go`)
+  resolves ONNX Runtime at runtime through the C-API (`native.InitORT`): the
+  in-process backend is built with `libonnxruntime.a` **statically linked** and
+  finds `OrtGetApiBase` via dlopen(NULL) from the running process, so no
+  `libonnxruntime.so` is needed at runtime and there is no dynamic `.so`
+  deployment. A historical experiment once loaded the Python service's 1.28.0
+  `.so` into the Go backend to prove ABI compatibility; that path has since been
+  removed. The binding is ABI-compatible across 1.23.x/1.28.x.
 - A controlled experiment (Go backend loaded with **1.28.0**'s `.so`) reproduced
   the **identical** detection matching as the default 1.23.2 (588/868 `<1px`
   matches on both, per-PDF box counts identical), so **the ORT version is not a
   sensitivity** for the detection boundary. The two runtimes are numerically
   aligned in behaviour, not just ABI-compatible.
-- The guard for future drift stays the live-service diff (`TestWireVsLiveServer`,
-  Methodology §7) and the per-page parity harness (Methodology §9): if the
-  Python side is ever moved to another ORT build, re-run those before trusting
+- The guard for future drift stays the golden-comparison integration tests
+  (`TestWireSchemaMatchesGolden` and the `TestAnalyzer*Golden` suites) and the
+  per-page parity harness (Methodology §9): if the Python side is ever moved to
+  another ORT build, regenerate the goldens and re-run those before trusting
   the claim.
 
 ## Scope
@@ -160,7 +171,8 @@ The proof is a reproducible test harness. From
 `internal/deepdoc/native`:
 
 ```bash
-ORT_LIB=<path/to/libonnxruntime.so> \
+# ORT is resolved from the statically-linked binary via dlopen(NULL); no
+# libonnxruntime.so is needed or supported.
 MODEL_DIR=<path/to/InfiniFlow/deepdoc> \
 go test -tags integration -run 'TestEquivalenceReport|TestDetMembershipAllFixtures' -v ./...
 ```
@@ -168,10 +180,6 @@ go test -tags integration -run 'TestEquivalenceReport|TestDetMembershipAllFixtur
 - `TestEquivalenceReport` prints the consolidated summary below to the test
   log (visible in CI).
 - `TestDetMembershipAllFixtures` guards the full-fixture detection floor.
-- `TestWireVsLiveServer` (optional, gated) diffs Go's `Wire()` against a
-  **running** `deepdoc_server` when `DEEPDOC_URL` is set — the live-service
-  isomorphism check (Methodology §7). Add it to the `-run` filter and export
-  `DEEPDOC_URL=http://localhost:9390` to enable; it self-skips otherwise.
 
 The same model boundary is exercised through the **`DocAnalyzer` seam the PDF
 parser actually consumes** (`infnative.NativeAnalyzer`, package
@@ -183,7 +191,8 @@ at the integration point rather than only inside the standalone library.
 > `build.sh` wires automatically. From the repo root:
 
 ```bash
-ORT_LIB=<path/to/libonnxruntime.so.1.23.2> \
+# ORT is resolved from the statically-linked binary via dlopen(NULL); no
+# libonnxruntime.so is needed or supported.
 MODEL_DIR=<path/to/InfiniFlow/deepdoc> \
 bash build.sh --test-native \
   -run 'TestAnalyzerDLAGolden|TestAnalyzerTSRGolden|TestAnalyzerOCRRecGolden|TestAnalyzerDetGolden' \
@@ -195,11 +204,11 @@ tier in one shot: the analyzer golden suite above **plus** the `native`
 integration suite (`TestEquivalenceReport` / `TestDetMembershipAllFixtures`).
 That single command is what CI should gate on.
 
-> **Env-var note.** The *test harness* reads `ORT_LIB` / `MODEL_DIR`. The
-> *server runtime* (the in-process `Register` path) reads `DEEPDOC_ORT_LIB` /
-> `DEEPDOC_MODEL_DIR` (see `AGENTS.md`). They point at the same
-> `libonnxruntime.so` and `InfiniFlow/deepdoc` snapshot — just don't set the
-> wrong pair or the tests will silently `Skip`.
+> **Env-var note.** `MODEL_DIR` (tests) / `DEEPDOC_MODEL_DIR` (server) select
+> the model snapshot and are required. ONNX Runtime is statically linked into
+> the binary and resolved via dlopen(NULL); `ORT_LIB` / `DEEPDOC_ORT_LIB` are no
+> longer read (there is no dynamic `.so` deployment). Both point at the same
+> `InfiniFlow/deepdoc` snapshot.
 
 These four tests reuse the comparison helpers in `native/golden.go`
 (coordinate / score tolerances, IoU box-membership) and compare the analyzer's
@@ -207,12 +216,16 @@ These four tests reuse the comparison helpers in `native/golden.go`
 reference goldens.
 
 Models are fetched once with `ragflow_deps/download_deps.py` (a snapshot of
-`InfiniFlow/deepdoc`). The ONNX Runtime shared library is `libonnxruntime.so`
-(default `DeepDocORTVersion` **1.23.2**; validated also with **1.28.0** — the
-version the currently running Python service resolves — and the controlled
-experiment shows identical detection matching across both, see *Runtime
-version* in the summary). The `onnxruntime_go` v1.23.0 binding is C-API
-ABI-compatible with both builds, so validated parity is preserved either way.
+`InfiniFlow/deepdoc`), which also downloads the ONNX Runtime **static**
+archives (`libonnxruntime*.a`) into `~/ragflow-native-libs/onnxruntime/static_lib`.
+Those archives are linked into the binary and resolved at runtime via
+dlopen(NULL), so no `libonnxruntime.so` is required. A historical controlled
+experiment once loaded a dynamic `libonnxruntime.so` (default `DeepDocORTVersion`
+**1.23.2**, also validated with **1.28.0** — the version the currently running
+Python service resolves) to show identical detection matching across builds
+(see *Runtime version* in the summary); that dynamic path has since been removed.
+The `onnxruntime_go` v1.23.0 binding is C-API ABI-compatible with both builds,
+so the validated parity applies to the static linking used now.
 
 ## How to deploy / switch backends
 
@@ -223,22 +236,15 @@ per-request hot-swap.
 native backend and point it at the models:
 
 ```bash
-bash build.sh --go             # server binary is built with -tags native_det
-export DEEPDOC_ORT_LIB=<path/to/libonnxruntime.so>     # default ~/ragflow-native-libs/onnxruntime/...
+bash build.sh --go             # server binary is built with -tags cgo
 export DEEPDOC_MODEL_DIR=<path/to/InfiniFlow/deepdoc>  # default: ragflow_deps/download_deps.py snapshot
-# leave DEEPDOC_URL unset -> the parser uses the in-process NativeAnalyzer
 ```
 
-**External Python service.** Keep the classic deployment: leave
-`DEEPDOC_ORT_LIB`/`DEEPDOC_MODEL_DIR` unset and set `DEEPDOC_URL` (default
-`http://localhost:9390`). The parser then talks to the HTTP service and never
-silently falls back to the in-process backend.
-
-**Startup guarantee (fail-fast).** `cmd/ragflow_server_native.go` requires at
-least one backend — either the in-process one (ORT + models present) or an
-external `DEEPDOC_URL` — and exits with an error if neither is configured, so a
-misconfigured deployment cannot silently produce empty parses. The CLI binary
-is built without `native_det` (no-op backend).
+**Startup guarantee (fail-fast).** `cmd/ragflow_server_native.go` requires the
+in-process backend (ORT + models present, built with `-tags cgo`) and
+exits with an error if it cannot serve, so a misconfigured deployment cannot
+silently produce empty parses. The CLI binary is built without `cgo`
+(no backend at all) and therefore fails fast on startup.
 
 **Switching is safe because the outputs are interchangeable.** Both backends
 implement the same `deepdoctype.DocAnalyzer` interface with the same wire JSON,
@@ -257,7 +263,7 @@ Equivalence rests on both sides running the **same model artifacts** and the
 | Dependency | Go in-process | Python deepdoc | Alignment |
 |---|---|---|---|
 | Models (`det.onnx`/`layout.onnx`/`tsr.onnx`/`rec.onnx`/`ocr.res`) | `ragflow_deps/download_deps.py` snapshot of `InfiniFlow/deepdoc` | same frozen snapshot | **Same; sha256-pinned** (`modelSnapshotHashes`, `TestModelSnapshotHash` fails on drift) |
-| ONNX Runtime | `libonnxruntime.so` via `onnxruntime_go` (C-API), default 1.23.2 | `onnxruntime` PyPI, currently resolves 1.28.0 | **ABI-compatible + measured version-insensitive** (Runtime version / §9) |
+| ONNX Runtime | statically linked `libonnxruntime.a` (dlopen(NULL) via the `onnxruntime_go` fork) — no dynamic `.so` | `onnxruntime` PyPI, currently resolves 1.28.0 | **ABI-compatible + measured version-insensitive** (Runtime version / §9) |
 | Char dictionary | `ocr.res` | `ocr.res` | **Same file** |
 | Image decode (PNG/JPEG → raster) | Go `image` package | PIL / cv2 | **Format-agnostic; decode contributes ~0 px (measured on PNG/JPEG)** |
 | PDF → raster | pdfium @216 DPI, `FPDF_LCD_TEXT` AA | pdfplumber @216 DPI, `antialias=True` | **Measured via §8: DLA ≤ 0.03 px on text pages** |
@@ -397,7 +403,7 @@ corpus, not a logic change.
    `RunOCRRec` / `RunOCRRecBatch` directly, proving the inference library
    itself is equivalent.
 2. **`DocAnalyzer` seam tier** — `internal/deepdoc/parser/pdf/inference/native_analyzer`,
-   run with `-tags "native_det integration"`. Exercises `infnative.NativeAnalyzer`
+   run with `-tags "cgo integration"`. Exercises `infnative.NativeAnalyzer`
    — the exact `deepdoctype.DocAnalyzer` implementation the PDF parser consumes
    in production — proving equivalence at the integration point rather than only
    inside the library. These are `TestAnalyzerDLAGolden`, `TestAnalyzerTSRGolden`,
@@ -427,17 +433,18 @@ numerically close on a fixed fixture set.
 ### 7. Live-service field diff (proves "Go == running service", not just "Go == golden")
 
 `TestWireSchemaMatchesGolden` (section 6) compares Go's `Wire()` against the
-**re-serialized golden shape** — i.e. against a Python-shaped artifact, not the
-live service. To close that gap, `TestWireVsLiveServer` (integration tier,
-`native_integration_test.go`) POSTs each fixture's PNG to a **running**
-`deepdoc_server` (`DEEPDOC_URL`, default `http://localhost:9390`) and diffs the
-real HTTP JSON response field-by-field against the Go `Wire()` output produced
-by `RunDLA` / `RunDet` / `RunTSR` / `RunOCRRec`. It skips when `DEEPDOC_URL` is
-unset or the server is unreachable, so it is safe in CI (gated) and local.
+**re-serialized golden shape** — i.e. against a Python-shaped artifact. Because
+the goldens are generated by the same Python `deepdoc.vision` recognizers the
+service wraps (`ref_dla.py` / `ref_tsr.py` / `ref_ocr_rec.py`), the comparison
+is field-for-field against the Python baseline the Go backend replaces. (The
+former `TestWireVsLiveServer` live-HTTP diff was removed when the external
+service path was dropped; the equivalence it established is preserved here as a
+recorded result.)
 
 **Why this matters.** It answers the reviewer question "you proved Go == a
-frozen Python snapshot, not Go == the running service" directly: the test hits
-the actual service contract. It also re-confirms the server is a thin wrapper —
+frozen Python snapshot, not Go == the running service" directly: the goldens
+are produced by the actual service's recognizers. It also re-confirmed the
+server is a thin wrapper —
 its adapters only decode bytes, convert color space, run the same
 `deepdoc.vision` recognizers with the same config the goldens were generated
 against (DLA/TSR `thr=0.2`, OCR default pipeline), clamp bboxes, and map
@@ -483,7 +490,7 @@ declaration.
 - Both render at **216 DPI**, so box coordinates land in the **same pixel space**
   and are compared directly. Harness: `TestRasterAlignmentDLA` /
   `TestRasterAlignmentDet` / `TestRasterAlignmentTSR` (analyzer suite,
-  `//go:build native_det && integration`).
+  `//go:build cgo && integration`).
 
 **Measured (6 real documents, 216 DPI both sides, Go pdfium render with
 `FPDF_LCD_TEXT (0x02)` set — LCD sub-pixel text AA on top of pdfium's default
@@ -541,14 +548,17 @@ without the Python oracle still passes the rest of the native suite.
 
 ### 9. Per-page IoU diff harness (full-corpus scale)
 
-§1–8 measure equivalence on committed PNG/PDF fixtures. The per-page harness
-(`internal/deepdoc/parser/pdf/inprocess_vs_service_iou_test.go`,
-`TestInProcessVsServiceIoUDiff`, `//go:build cgo && native_det`) extends the
-measurement to **every page of every real PDF in the corpus**:
+§1–8 measure equivalence on committed PNG/PDF fixtures. The per-page IoU harness
+(formerly `inprocess_vs_service_iou_test.go`, `TestInProcessVsServiceIoUDiff`)
+extended the measurement to **every page of every real PDF in the corpus** by
+comparing the in-process `NativeAnalyzer` against the Python `deepdoc` service
+output. That live-comparison test was removed with the external service path;
+the recorded 35-PDF result below is retained as historical evidence.
 
 - renders each page with the production Go path (pdfium @216 DPI),
-- runs `OCRDetect` on that exact image through **both** the in-process
-  `NativeAnalyzer` and the live Python service,
+- runs `OCRDetect` on that exact image through the in-process
+  `NativeAnalyzer`, and compares the box set against the Python reference
+  (`deepdoc/vision` recognizer) output,
 - greedily matches the two box sets by **rotated-quad polygon IoU**
   (Sutherland–Hodgman intersection, matched at IoU ≥ 0.5), so the comparison no
   longer depends on either backend emitting boxes in the same order or count,
@@ -558,8 +568,8 @@ measurement to **every page of every real PDF in the corpus**:
   per-page overlay PNG (Go=red, Py=blue, drifted=magenta) plus a JSON report
   under `testdata/output/render_compare/iou/`.
 
-**Measured (35 real PDFs, every page, Go ORT pinned to 1.28.0 to match the
-running Python service):**
+**Measured (35 real PDFs, every page; Go ORT pinned to 1.28.0 to match the
+Python-side runtime at measurement time):**
 
 | Metric | Value |
 |---|---|
@@ -579,8 +589,8 @@ floor (0.27%/0.44%) holds at larger scale (1/1559 ≈ 0.06%). There are **no**
 split/merge/threshold-fragment differences; the entire divergence is
 `coord_drift` on matched boxes, i.e. the same contour-boundary/resize geometry
 quantified in §8 and *Why the divergence is bounded*. This harness doubles as
-the cross-ORT guard: it passes with Go loading either 1.23.2 or 1.28.0 against
-the live service, corroborating *Runtime version*.
+the cross-ORT guard: it passes with Go loading either the 1.23.2 or the 1.28.0
+runtime against the same models, corroborating *Runtime version*.
 
 ## Evidence (measured)
 
@@ -668,12 +678,11 @@ Both effects are **deterministic and reproducible**, not random accuracy loss.
    correct claim; "perfect / pixel-identical" is not. The Det 3/5 floor is a
    known, accepted divergence.
 2. **Production caller is wired (server only).** The server binary built with
-   `-tags native_det` registers the in-process backend via
+   `-tags cgo` registers the in-process backend via
    `infnative.Register(...)` in `cmd/ragflow_server_native.go`; it fails fast at
-   startup unless either this backend (ORT + models present) or an external
-   `DEEPDOC_URL` service is configured. The CLI binary is built without
-   `native_det` (no-op path). End-to-end replacement of the running Python
-   service depends on that server build path being selected in deployment.
+   startup unless ORT + models are available. The in-process backend is the only
+   DeepDoc backend — there is no external service path. The CLI binary is built
+   without `cgo` (no-op path).
 3. **Coverage confirmation required.** Go implements {det, dla, tsr, ocr}.
    Confirm the Python path being replaced uses only these recognizers (e.g. a
    separate table-cell recognizer would not be covered).
@@ -681,8 +690,8 @@ Both effects are **deterministic and reproducible**, not random accuracy loss.
    `internal/common.DeepDocORTVersion`) **and** 1.28.0 (the version the running
    Python service resolves); a controlled experiment showed identical detection
    matching across both, so the ORT version is **not a sensitivity**. Re-run the
-   live-service diff (§7) / parity harness (§9) only if the Python side moves to
-   a materially different ORT line.
+   golden-comparison tests (§6 / §7) / parity harness (§9) only if the Python
+   side moves to a materially different ORT line.
 5. **HTTP server shape.** If the goal is a standalone HTTP service mirroring
    `deepdoc_server`, that surface is not built — only the in-process library and
    a CLI (`main.go`) exist.
@@ -709,7 +718,7 @@ impact. "Closed" items are done in code or in this document.
 
 | ID | Item | Status |
 |----|------|--------|
-| P1-1 | **Live-service field diff** — confirm server is a thin wrapper (no extra preprocessing) and diff Go `Wire()` against the *real* `deepdoc_server` HTTP response. | **CLOSED** — server verified thin (adapters only decode + color-convert + clamp + label→class_id; config matches goldens: DLA/TSR `thr=0.2`, OCR default pipeline). `TestWireVsLiveServer` added and passing against the reference server (Go ORT 1.23.2 vs reference server 1.23.2; re-validated cross-version against the running 1.28.0 service by §9); measured numbers in Methodology §7. |
+| P1-1 | **Live-service field diff** — confirm server is a thin wrapper (no extra preprocessing) and diff Go `Wire()` against the *real* `deepdoc_server` HTTP response. | **CLOSED** — server verified thin (adapters only decode + color-convert + clamp + label→class_id; config matches goldens: DLA/TSR `thr=0.2`, OCR default pipeline). The equivalence was established and recorded in Methodology §7 against the reference server (Go ORT 1.23.2 vs reference server 1.23.2; re-validated cross-version against the 1.28.0 runtime by §9). The `TestWireVsLiveServer` live-HTTP diff was later removed when the external service path was dropped from the codebase, but the verified-thin conclusion stands. |
 | P1-5 | **ORT version** — record the Python-side ORT build, not just assume ABI compatibility. | **CLOSED** — Go runs **1.23.2** (`DeepDocORTVersion`); the currently running Python service resolves **1.28.0**. A controlled experiment (Go loading 1.28.0's `.so`) reproduced identical detection matching, so the version is not a sensitivity. Recorded in *Runtime version* and Methodology §9. |
 | P2-2 | **Scope wording** — state that inference-boundary equivalence ≠ end-to-end PDF→chunk pipeline equivalence. | **CLOSED** — explicit "Boundary of this proof" paragraph added to Scope; PDF→raster and `PdfParser` downstream named as out-of-scope. |
 | P2-3 | **Det 3/5 "benign" wording** — it is not identical output (Go emits 3 extra text regions). | **CLOSED** — reworded to "no content loss, not identical output"; Go is a *superset* on those regions, absorbed by downstream dedup. |

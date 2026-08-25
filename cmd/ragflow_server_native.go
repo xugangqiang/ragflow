@@ -1,4 +1,4 @@
-//go:build native_det
+//go:build cgo
 
 package main
 
@@ -19,16 +19,14 @@ import (
 // (DEEPDOC_URL unset). The registration is best-effort: if ORT/lib/models are
 // unavailable the backend simply reports not-serving.
 //
-// Fail-fast contract (P0): at least one DeepDoc backend must be available at
-// startup — an external service (DEEPDOC_URL set) OR the local in-process
-// backend (ORT + models present, built with -tags native_det). There is NO
-// silent degradation to an empty analyzer: if DEEPDOC_URL is unset and the
-// in-process backend is not serving, the server aborts. This mirrors the
-// runtime resolver (deepDocAnalyzerFromEnv), which uses a configured client
-// exclusively and fails loudly when it is unreachable, only falling back to the
-// in-process backend when no client URL is set.
+// Fail-fast contract (P0): the in-process DeepDoc backend must be available at
+// startup (ORT + models present, built with -tags cgo). There is NO
+// silent degradation to an empty analyzer: if the in-process backend is not
+// serving, the server aborts. This mirrors the runtime resolver
+// (deepDocAnalyzerFromEnv), which uses the registered in-process factory
+// exclusively and fails loudly when it is unavailable.
 //
-// This file is compiled only under the native_det build tag; the default build
+// This file is compiled only under the cgo build tag; the default build
 // uses ragflow_server_nonative.go (a fail-fast no-op) so the unit-test path
 // stays free of the onnxruntime dependency.
 func registerNativeDeepDoc() {
@@ -41,25 +39,18 @@ func registerNativeDeepDoc() {
 			zap.String("reason", err.Error()))
 	}
 
-	// At least one DeepDoc backend must be available: an external service
-	// (DEEPDOC_URL) or the local in-process backend (ORT + models present).
-	// Fail fast rather than silently parsing without layout/table/OCR.
-	deepDocURL := strings.TrimSpace(common.GetEnv(common.EnvDeepDocURL))
-	if deepDocURL == "" && !infnative.Serving() {
-		common.Fatal("no DeepDoc backend configured: set DEEPDOC_URL to an external "+
-			"DeepDoc service, or provide the local ORT runtime + models and build "+
-			"with -tags native_det",
+	// The in-process (Go) DeepDoc backend is the ONLY production backend; the
+	// external Python HTTP service is no longer used. Fail fast rather than
+	// silently parsing without layout/table/OCR if the local backend cannot
+	// serve (ORT + models must be present when built with -tags cgo).
+	if !infnative.Serving() {
+		common.Fatal("no in-process DeepDoc backend serving: provide the local ORT "+
+			"runtime + models and build with -tags cgo",
 			zap.String("model_dir", modelDir),
-			zap.String("ort_lib", ortLib))
+			zap.String("ort_lib", "static (libonnxruntime.a via dlopen(NULL))"))
 	}
-
-	if infnative.Serving() {
-		common.Info("in-process DeepDoc backend registered (local fallback)",
-			zap.String("model_dir", modelDir))
-	} else {
-		common.Info("using external DeepDoc service only (in-process backend not serving)",
-			zap.String("deepdoc_url", deepDocURL))
-	}
+	common.Info("in-process DeepDoc backend registered (production backend)",
+		zap.String("model_dir", modelDir))
 }
 
 // resolveDeepDocModelDir picks the model directory: the explicit DEEPDOC_MODEL_DIR
@@ -85,20 +76,13 @@ func resolveDeepDocModelDir() string {
 	return filepath.Join(wd, "rag", "res", "deepdoc")
 }
 
-// resolveDeepDocORTLib returns the explicit DEEPDOC_ORT_LIB env, else the
-// onnxruntime shared library extracted by ragflow_deps/download_deps.py,
-// whose default location is derived from common.DeepDocORTVersion.
+// resolveDeepDocORTLib always returns "" because the in-process DeepDoc
+// backend links ONNX Runtime statically (libonnxruntime.a, resolved at
+// runtime via dlopen(NULL) from the running binary — see the onnxruntime_go
+// fork under internal/deepdoc/native/third_party/onnxruntime_go). There is no
+// dynamic .so deployment and therefore no path to resolve; native.InitORT("")
+// selects the static path.
 func resolveDeepDocORTLib() string {
-	if v := strings.TrimSpace(common.GetEnv(common.EnvDeepDocORTLib)); v != "" {
-		return v
-	}
-	if home, err := os.UserHomeDir(); err == nil {
-		if cand := common.DefaultDeepDocORTLib(home); cand != "" {
-			if _, err := os.Stat(cand); err == nil {
-				return cand
-			}
-		}
-	}
 	return ""
 }
 

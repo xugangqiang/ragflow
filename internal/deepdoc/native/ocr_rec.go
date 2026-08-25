@@ -1,3 +1,5 @@
+//go:build cgo
+
 package native
 
 // ocr_rec.go — OCR text recognition (PP-OCRv4 CTC) recognizer.
@@ -60,6 +62,14 @@ func RunOCRRec(ctx context.Context, modelDir string, img *Image) (OCRRecResult, 
 // its own ratio. This makes Go match production batch semantics, where a page's
 // lines are recognized together. Lines are recognized independently after the
 // shared resize, so order is preserved and results are deterministic per batch.
+//
+// DEPRECATED semantic-shape note: this variant still runs one ONNX Run PER
+// line (recMaxBatch=1). Prefer RunOCRRecBatchReal, which concatenates every
+// line's preprocessed blob into a single {N,3,48,imgW} tensor and performs ONE
+// ONNX Run — identical numerically (each line uses the same shared batch width)
+// but with the real throughput benefit of batched matmul. RunOCRRecBatch is
+// kept only as a reference path; it will be removed once all callers move to
+// RunOCRRecBatchReal.
 func RunOCRRecBatch(ctx context.Context, modelDir string, imgs []*Image) ([]OCRRecResult, error) {
 	chars, err := loadCharDict(filepath.Join(modelDir, "ocr.res"))
 	if err != nil {
@@ -80,6 +90,92 @@ func RunOCRRecBatch(ctx context.Context, modelDir string, imgs []*Image) ([]OCRR
 		out[i] = res
 	}
 	return out, nil
+}
+
+// RunOCRRecBatchReal recognizes a batch of cropped text-line images with a
+// SINGLE ONNX Run, mirroring deepdoc's TextRecognizer.__call__ exactly: every
+// line is resized to the batch's shared width (imgW = 48*max_wh_ratio, floored
+// at 320/48) and zero-padded on the right, all blobs are concatenated into one
+// {N,3,48,imgW} tensor, and the model runs once. The output is split back into
+// per-line sequences and CTC-decoded in order, so the result is numerically
+// identical to calling RunOCRRec on each line (each line sees the same shared
+// batch width), but amortized over one forward pass instead of N.
+//
+// The shared batch width means a line is resized against the batch max wh_ratio,
+// not its own — exactly what deepdoc does inside a batch. A standalone call to
+// RunOCRRec (maxWhRatio floored at the line's own ratio when wider) is the
+// correct single-line equivalent and remains the unit of "one crop" inference.
+func RunOCRRecBatchReal(ctx context.Context, modelDir string, imgs []*Image) ([]OCRRecResult, error) {
+	n := len(imgs)
+	if n == 0 {
+		return nil, nil
+	}
+	if n == 1 {
+		// Degenerate batch: fall back to the single-line path so callers get
+		// the exact same result as RunOCRRec (no batch-width widening).
+		res, err := RunOCRRec(ctx, modelDir, imgs[0])
+		if err != nil {
+			return nil, err
+		}
+		return []OCRRecResult{res}, nil
+	}
+	chars, err := loadCharDict(filepath.Join(modelDir, "ocr.res"))
+	if err != nil {
+		return nil, err
+	}
+	maxWhRatio := float64(recW) / float64(recH)
+	for _, img := range imgs {
+		if r := float64(img.W) / float64(img.H); r > maxWhRatio {
+			maxWhRatio = r
+		}
+	}
+	imgW := int(math.Floor(recH * maxWhRatio))
+	// Per-line resized content width (<= imgW), used to place each line's
+	// preprocessed blob into the shared concatenated tensor.
+	resizedWs := make([]int, n)
+	blobs := make([][]float32, n)
+	for i, img := range imgs {
+		resizedW := int(math.Ceil(recH * (float64(img.W) / float64(img.H))))
+		if resizedW > imgW {
+			resizedW = imgW
+		}
+		resizedWs[i] = resizedW
+		blobs[i] = ocrRecPreprocess(img, resizedW, imgW)
+	}
+	// Concatenate: layout [N, 3, 48, imgW] with each line's blob at
+	// offset i*3*recH*imgW. ocrRecPreprocess already zero-fills to imgW, so a
+	// plain copy places it correctly at the line's N-slot.
+	batch := make([]float32, n*3*recH*imgW)
+	lineStride := 3 * recH * imgW
+	for i, b := range blobs {
+		copy(batch[i*lineStride:(i+1)*lineStride], b)
+	}
+
+	// 0 → all cores, matching deepdoc's Python onnxruntime for bit-stable
+	// parity (no contour extraction in the OCR-rec Run path).
+	sess, release, err := getRecSession(filepath.Join(modelDir, "rec.onnx"), "x",
+		[]int64{int64(n), 3, recH, int64(imgW)}, "softmax_11.tmp_0", 0)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
+	out, err := sess.Run(ctx, batch)
+	if err != nil {
+		return nil, err
+	}
+	// Output layout: [N, seqLen, recVocab]; seqLen is dynamic (scales with
+	// imgW), so derive it from the tensor length.
+	seqLen := len(out) / (n * recVocab)
+	if seqLen <= 0 {
+		return nil, fmt.Errorf("recSession: unexpected batch output len %d for n=%d vocab=%d", len(out), n, recVocab)
+	}
+	results := make([]OCRRecResult, n)
+	for i := 0; i < n; i++ {
+		line := out[i*seqLen*recVocab : (i+1)*seqLen*recVocab]
+		results[i] = ocrRecCTCDecode(line, chars)
+	}
+	return results, nil
 }
 
 // recognizeLine runs the resize + session + CTC decode for one line at the

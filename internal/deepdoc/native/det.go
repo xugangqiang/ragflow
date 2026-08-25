@@ -1,3 +1,5 @@
+//go:build cgo
+
 package native
 
 // det.go — OCR text detection (DB) geometry path.

@@ -58,7 +58,7 @@ RAGFlow 的 PDF 解析依赖 DeepDoc 推理（OCR 文本检测 / 版面分析 DL
 | `shapely Polygon.area/length` | `clipper_offset.go` 内直接算多边形 area/length | 无需依赖 |
 | `numpy` | Go `[]float32` | — |
 | `pdfplumber`（PDF→栅格 @216DPI） | 生产用 Go `pdfium.RenderPage` @216 DPI + `FPDF_LCD_TEXT` | 实测 DLA ≤0.03px |
-| `litserve / python-multipart / six`（HTTP 服务） | 不迁移 | in-process 直接调用；`DEEPDOC_URL` 模式用 Go HTTP client 对接原服务 |
+| `litserve / python-multipart / six`（HTTP 服务） | 不迁移 | 已由 in-process `NativeAnalyzer` 取代，无外部 HTTP client 路径 |
 | `huggingface_hub`（模型下载） | 不迁移 | `ragflow_deps/download_deps.py` 拉同一快照，sha256 锁定 |
 
 **一句话总结**：推理相关依赖**全部迁移**——`onnxruntime`→`onnxruntime_go`，`cv2`→纯 Go 几何重实现（resize / findContours / minAreaRect / fillPoly / NMS），`pyclipper`→`clipper_offset.go`，`shapely`/`PIL`/`numpy`→Go 原生。**不迁移**的只有三类：HTTP 服务层（in-process 取代）、模型下载（Python 脚本保留）、`pdfplumber`（换成 `pdfium`，实测对齐）。

@@ -32,7 +32,6 @@ func GetEnvSmall(key string) string {
 
 // environment variables
 const (
-	EnvDeepDocURL                        = "DEEPDOC_URL"
 	EnvTensorrtDLAServer                 = "TENSORRT_DLA_SVR"
 	EnvRAGFlowTTSCacheTTLSeconds         = "RAGFLOW_TTS_CACHE_TTL_SECONDS"
 	EnvComponentExecTimeout              = "COMPONENT_EXEC_TIMEOUT"
@@ -139,7 +138,6 @@ const (
 	EnvBatchCompareFilter                = "BATCH_COMPARE_FILTER"
 	EnvBatchCompareCSV                   = "BATCH_COMPARE_CSV"
 	EnvPYOCRSuffix                       = "PY_OCR_SUFFIX"
-	EnvOSSDeepDocURL                     = "OSSDEEPDOC_URL"
 	EnvUpdateGolden                      = "UPDATE_GOLDEN"
 	EnvBatchParityFilter                 = "BATCH_PARITY_FILTER"
 	EnvBatchParityVariant                = "BATCH_PARITY_VARIANT"
@@ -213,14 +211,9 @@ const (
 	EnvSpacyModelDir                     = "SPACY_MODEL_DIR"
 
 	// EnvDeepDocModelDir points the in-process (Go) DeepDoc backend at the
-	// model snapshot (see common.DeepDocModelFiles). Used only when no external
-	// DeepDoc HTTP service is configured (DEEPDOC_URL unset); mirrors
+	// model snapshot (see common.DeepDocModelFiles); mirrors
 	// deepdoc_server.py's --model-dir (default rag/res/deepdoc).
 	EnvDeepDocModelDir = "DEEPDOC_MODEL_DIR"
-	// EnvDeepDocORTLib points the in-process backend at libonnxruntime.so.
-	// Optional: if empty but ORT was initialized elsewhere, the backend still
-	// serves; if unset and uninitialized, it degrades to the empty analyzer.
-	EnvDeepDocORTLib = "DEEPDOC_ORT_LIB"
 	// EnvDeepDocDropScore overrides the confidence threshold below which the
 	// in-process (Go) DeepDoc backend blanks recognized text while preserving
 	// the real score. It MUST match the Python inference service's
@@ -261,28 +254,16 @@ func HasModelFiles(dir string) bool {
 
 // DeepDocORTVersion is the onnxruntime native release the in-process (Go)
 // DeepDoc backend is built and tested against (e.g. "1.23.2"). It is the
-// single source for the download URL, extracted dir name, and SONAME used
-// across Go and Python. The Go binding (github.com/yalue/onnxruntime_go) and
-// the pip onnxruntime== pin must track this MINOR version: the binding uses
-// its own release numbering (v1.23.0 <-> ORT 1.23.x) but is ABI-compatible with
-// this native release on the same minor line.
+// single source for the download URL and extracted dir name used across Go
+// and Python. The Go binding (github.com/yalue/onnxruntime_go, forked to
+// github.com/xugangqiang/onnxruntime_go) and the pip onnxruntime== pin must
+// track this MINOR version: the binding uses its own release numbering
+// (v1.23.0 <-> ORT 1.23.x) but is ABI-compatible with this native release on
+// the same minor line. ONNX Runtime is linked statically (libonnxruntime.a),
+// so there is no .so / SONAME at runtime.
 //
 // To bump ORT: update DeepDocORTVersion (Go) AND ORT_VERSION in
 // ragflow_deps/download_deps.py AND the onnxruntime/onnxruntime-gpu pins in
 // pyproject.toml + .github/workflows/deepdoc-drift.yml, and refresh the
 // onnxruntime_go binding minor in go.mod.
 const DeepDocORTVersion = "1.23.2"
-
-// DefaultDeepDocORTLib returns the conventional in-process ORT shared library
-// path under ~/ragflow-native-libs, derived from DeepDocORTVersion. It lives in
-// this tag-free package so it is unit-testable in the default tier without the
-// native_det build tag or the ORT static libs. Callers must still stat the path
-// before use. Returns "" when home is empty/unresolvable.
-func DefaultDeepDocORTLib(home string) string {
-	if home == "" {
-		return ""
-	}
-	return filepath.Join(home, "ragflow-native-libs", "onnxruntime",
-		"onnxruntime-linux-x64-"+DeepDocORTVersion, "lib",
-		"libonnxruntime.so."+DeepDocORTVersion)
-}

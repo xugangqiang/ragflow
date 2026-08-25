@@ -241,3 +241,31 @@ func (c *DocAnalyzerCache) Health() bool {
 // Compile-time guarantee that DocAnalyzerCache satisfies the
 // doctype.DocAnalyzer interface.
 var _ doctype.DocAnalyzer = (*DocAnalyzerCache)(nil)
+
+// DefaultDLALabels returns the 10-class DLA taxonomy matching Python's
+// deepdoc/vision/dla_cli.py:10-21. Duplicates at indices 4, 7, 9 are
+// kept verbatim for backward compatibility with existing inference servers.
+//
+// This list is the wire contract: the in-process detector (native)
+// serialises its DLA output through these same indices, and its internal
+// yoloDlaLabels must stay element-for-element identical to this (same order,
+// same duplicate indices 4/7/9). The two live in separate modules, so they
+// cannot share one Go constant; keep them in sync by hand.
+func DefaultDLALabels() []string {
+	return []string{
+		doctype.LayoutTypeTitle, doctype.LayoutTypeText, doctype.LayoutTypeReference,
+		doctype.LayoutTypeFigure, doctype.DLALabelFigureCaption,
+		doctype.LayoutTypeTable, doctype.DLALabelTableCaption, doctype.DLALabelTableCaption,
+		doctype.LayoutTypeEquation, doctype.DLALabelFigureCaption,
+	}
+}
+
+// DefaultTSRLabels returns the 6-class TSR taxonomy matching Python's
+// deepdoc/server/adapters/tsr_adapter.py:21-26.
+func DefaultTSRLabels() []string {
+	return []string{
+		"table", "table column", "table row",
+		"table column header", "table projected row header",
+		"table spanning cell",
+	}
+}

@@ -1,3 +1,5 @@
+//go:build cgo
+
 package native
 
 // session.go — thin wrapper around onnxruntime_go.
@@ -30,9 +32,20 @@ var (
 	ortReady bool
 )
 
-// InitORT points ONNX Runtime at its shared library and initializes the
-// global environment. Safe to call multiple times; only the first takes
-// effect. Call it once at process start (the CLI does this from main).
+// InitORT initializes the process-global ONNX Runtime environment. Safe to
+// call multiple times; only the first takes effect. Call it once at process
+// start (the CLI does this from main).
+//
+// libPath is accepted for API compatibility with the upstream binding but is
+// otherwise ignored: this fork links ONNX Runtime statically (libonnxruntime.a
+// is linked into the binary with --whole-archive and exported via
+// -Wl,--export-dynamic; see build.sh: ONNX_RUNTIME_STATIC_DIR). The forked
+// onnxruntime_go binding resolves OrtGetApiBase from the running binary itself
+// via dlopen(NULL) (the process-global symbol table), so no external
+// libonnxruntime.so is needed and there is no dynamic .so deployment. Passing
+// an empty string is the canonical static-mode call; a main executable CANNOT
+// be dlopen'd by its own file path (glibc refuses), which is exactly why the
+// binding uses the NULL handle instead of a path.
 func InitORT(libPath string) error {
 	ortOnce.Do(func() {
 		ort.SetSharedLibraryPath(libPath)

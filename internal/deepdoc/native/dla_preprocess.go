@@ -1,3 +1,5 @@
+//go:build cgo
+
 package native
 
 // dla_preprocess.go — DLA preprocessing.

@@ -61,7 +61,6 @@ Go tests are classified by build tag so the default `go test ./...` run stays se
 | E2E | `e2e` | No (`-tags e2e`) | Full cross-component pipeline (ingest → index → retrieve) against real services; heavy/slow. |
 | Manual | `manual` | No (`-tags manual`) | Very slow/expensive (deepdoc render/parity/snapshot/bench). **Local opt-in ONLY — never run in CI.** |
 | Native (orthogonal) | `cgo` / `!cgo` | `cgo` auto-satisfies under CGO_ENABLED=1 | Native static libs (`office_oxide`/`pdfium`/`pdf_oxide`). Combine with tiers, e.g. `//go:build cgo && integration`. |
-| `native_det` | `native_det` (orthogonal, server-only) | No — server is built with this tag | ONNX Runtime (`libonnxruntime.so`) + the InfiniFlow/deepdoc model snapshot. Gates the in-process (Go) DeepDoc backend (`internal/deepdoc/parser/pdf/inference/native_analyzer`). The unit tier stays free of the `onnxruntime` dependency because this package is excluded unless `native_det` is set. |
 
 Run tiers locally via `build.sh`:
 ```bash
@@ -70,13 +69,11 @@ bash build.sh --test-integration ./...    # integration tier
 bash build.sh --test-e2e                  # e2e tier
 bash build.sh --test-manual               # manual tier (very slow)
 bash build.sh --test-all                  # integration + e2e (never includes manual)
-bash build.sh --test-native               # in-process DeepDoc backend (native_det && integration)
 ```
 Rules:
 - New tests that touch a real external service MUST carry `integration`/`e2e`/`manual` — do not rely on `t.Skip` + env vars to soft-isolate them in the default unit run. Keep an env guard as a harmless secondary safety net if desired.
 - `manual` is never wired into CI or any automated pipeline.
 - `unit` (no tag) must stay free of external-service dependencies so `go test ./...` passes without MySQL/MinIO/ES/Infinity/LLM. The native CGO static libraries (`office_oxide`/`pdfium`/`pdf_oxide`) are still required at build time and are wired automatically by `build.sh --test`; that is expected, not an external service.
-- The server binary is built with `-tags native_det` (see `build_go` in `build.sh`): this compiles the in-process DeepDoc backend into the binary. ONNX Runtime and the models are loaded at runtime — `DEEPDOC_ORT_LIB` / `DEEPDOC_MODEL_DIR` override the defaults, which fall back to `~/ragflow-native-libs/onnxruntime/...` and the `ragflow_deps/download_deps.py` snapshot. At startup the server requires at least one DeepDoc backend: an external service via `DEEPDOC_URL`, or the local in-process backend (ORT + models present). It fails fast if neither is configured. The CLI binary is built without `native_det` (no-op path).
 
 ## Working Rules
 - When reviewing documentation or code, inspect the full affected path and report all verifiable findings in one review; do not return after only a few findings and expose further issues in later rounds.

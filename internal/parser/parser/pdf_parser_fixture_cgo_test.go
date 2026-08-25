@@ -27,8 +27,6 @@ func useMockDocAnalyzer(t *testing.T) {
 }
 
 func TestPDFParser_ParseWithResult_CGOFixture(t *testing.T) {
-	t.Setenv("DEEPDOC_URL", "")
-	t.Setenv("OSSDEEPDOC_URL", "")
 	useMockDocAnalyzer(t)
 
 	path := filepath.Join("..", "..", "..", "test", "benchmark", "test_docs", "Doc1.pdf")
@@ -57,8 +55,6 @@ func TestPDFParser_ParseWithResult_CGOFixture(t *testing.T) {
 }
 
 func TestPDFParser_ParseWithResult_CGOFixtureMarkdown(t *testing.T) {
-	t.Setenv("DEEPDOC_URL", "")
-	t.Setenv("OSSDEEPDOC_URL", "")
 	useMockDocAnalyzer(t)
 
 	path := filepath.Join("..", "..", "..", "test", "benchmark", "test_docs", "Doc1.pdf")

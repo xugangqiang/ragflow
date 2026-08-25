@@ -23,13 +23,11 @@ import (
 	"fmt"
 	"image"
 	"log/slog"
-	"ragflow/internal/common"
 	"sort"
 	"strings"
 	"time"
 
 	deepdocpdf "ragflow/internal/deepdoc/parser/pdf"
-	"ragflow/internal/deepdoc/parser/pdf/inference"
 	pdflayout "ragflow/internal/deepdoc/parser/pdf/layout"
 	"ragflow/internal/deepdoc/parser/pdf/util"
 	deepdoctype "ragflow/internal/deepdoc/parser/type"
@@ -312,67 +310,57 @@ func emptyPDFResult(filename string) ParseResult {
 
 // nativeAnalyzerFactory, when set, supplies the local in-process DeepDoc
 // backend (registered by internal/deepdoc/parser/pdf/inference/native_analyzer via
-// SetNativeDocAnalyzerFactory) as the fallback used when no external DeepDoc
-// HTTP service is configured. It is nil in builds/tests that do not opt into
+// SetNativeDocAnalyzerFactory). It is nil in builds/tests that do not opt into
 // the native backend, keeping the parser's unit-test build free of the
 // onnxruntime dependency. The resolution policy itself lives in
 // resolveDocAnalyzer, which takes the factory as an explicit parameter so the
 // logic is unit-testable without mutating this global.
 var nativeAnalyzerFactory func() (deepdoctype.DocAnalyzer, bool)
 
-// SetNativeDocAnalyzerFactory registers the in-process DeepDoc analyzer as the
-// local fallback. The native backend calls this from its Register at process
-// start; the parser package itself never imports onnxruntime.
+// SetNativeDocAnalyzerFactory registers the in-process DeepDoc analyzer.
+// The native backend calls this from its Register at process start; the
+// parser package itself never imports onnxruntime.
 func SetNativeDocAnalyzerFactory(f func() (deepdoctype.DocAnalyzer, bool)) {
 	nativeAnalyzerFactory = f
 }
 
-// deepDocAnalyzerFromEnv resolves the configured DeepDoc analyzer from the
-// process environment. It is a thin wrapper over resolveDocAnalyzer that feeds
-// the runtime DEEPDOC_URL and the registered in-process factory.
+// deepDocAnalyzerFromEnv resolves the configured DeepDoc analyzer. It is a thin
+// wrapper over resolveDocAnalyzer that feeds the registered in-process factory
+// (production is in-process only).
 func deepDocAnalyzerFromEnv() (deepdoctype.DocAnalyzer, error) {
-	return resolveDocAnalyzer(common.GetEnv(common.EnvDeepDocURL), nativeAnalyzerFactory)
+	return resolveDocAnalyzer(nativeAnalyzerFactory)
 }
 
 // resolveDocAnalyzer applies the DeepDoc backend policy:
-//   - an external DEEPDOC_URL is used exclusively and fails loudly if
-//     unreachable (never silently falls back to the in-process backend);
-//   - otherwise the in-process factory is used as the local fallback;
-//   - if neither is available it returns an error so parsing fails loudly
+//   - the in-process factory is the ONLY production backend; it is used
+//     directly when registered (serving),
+//   - if it is unavailable it returns an error so parsing fails loudly
 //     instead of silently producing empty layout/table/OCR results.
+//
+// The external Python HTTP service (formerly selected via DEEPDOC_URL) has
+// been removed entirely from both the production path and the test suite, so
+// baseURL is kept only in the signature for compatibility with callers and is
+// ignored: production is in-process only.
 //
 // It takes its inputs explicitly (baseURL + factory) rather than reading
 // globals, so the policy is unit-testable in isolation. It never returns a
 // mock: if no backend is available it returns an error (MockDocAnalyzer is
 // test-only infrastructure and must never sit in this production path).
-func resolveDocAnalyzer(baseURL string, factory func() (deepdoctype.DocAnalyzer, bool)) (deepdoctype.DocAnalyzer, error) {
-	baseURL = strings.TrimSpace(baseURL)
-	if baseURL != "" {
-		// An external service is configured: use it and ONLY it. Even if it
-		// is unreachable we must not silently fall back to the local
-		// in-process backend (config-driven isolation).
-		client, err := inference.NewClient(baseURL)
-		if err != nil {
-			return nil, fmt.Errorf("deepdoc: cannot build client for DEEPDOC_URL %q: %w", baseURL, err)
-		}
-		if !client.Health() {
-			return nil, fmt.Errorf("deepdoc: DEEPDOC_URL %q is configured but the service is unreachable", baseURL)
-		}
-		// Wrap with Redis-backed cache (1h TTL) so repeated
-		// DLA/TSR/OCR inference on the same image is served from
-		// Redis instead of re-hitting the DeepDoc HTTP service. The
-		// wrapper is a no-op when Redis is not configured (see
-		// internal/deepdoc/parser/pdf/inference/cache.go).
-		return inference.NewDocAnalyzerCache(client, inference.DefaultCacheTTL), nil
-	}
-	// No external service configured → local in-process fallback, if the
-	// native backend registered a serving analyzer.
+func resolveDocAnalyzer(factory func() (deepdoctype.DocAnalyzer, bool)) (deepdoctype.DocAnalyzer, error) {
 	if factory != nil {
 		if a, ok := factory(); ok {
 			return a, nil
 		}
 	}
-	return nil, fmt.Errorf("deepdoc: no DeepDoc backend available: set DEEPDOC_URL to an external service or provide the local in-process backend (ORT + models)")
+	return nil, fmt.Errorf("deepdoc: no in-process DeepDoc backend available: build with -tags cgo and provide ORT + models")
+}
+
+// GetDocAnalyzer returns the configured in-process DeepDoc analyzer. It is the
+// single production entry point now that the external HTTP service is no longer
+// a backend. Callers outside the parser package (e.g. standalone image OCR in
+// the ingestion component) use this instead of constructing a client.
+func GetDocAnalyzer() (deepdoctype.DocAnalyzer, error) {
+	return deepDocAnalyzerFromEnv()
 }
 
 func pdfParseResultToJSON(filename string, parsed *deepdoctype.ParseResult) ParseResult {

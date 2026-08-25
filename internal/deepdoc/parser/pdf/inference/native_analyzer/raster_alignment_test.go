@@ -1,4 +1,4 @@
-//go:build native_det && integration
+//go:build cgo && integration
 
 package infnative
 
@@ -21,14 +21,15 @@ package infnative
 // assumption is no longer an assumption — it is measured end-to-end through the
 // actual production render paths.
 //
-// Requires ORT_LIB + MODEL_DIR (skipped otherwise) AND a working `uv run python3`
+// Requires MODEL_DIR (skipped otherwise; ONNX Runtime is statically linked via
+// dlopen(NULL)) AND a working `uv run python3`
 // with deepdoc + pdfplumber available (the Python oracle). If uv/python is
 // unavailable the alignment tests skip rather than fail, so CI without the
 // Python oracle still passes the rest of the native suite.
 //
 // Run:
 //
-//	ORT_LIB=... MODEL_DIR=... go test -tags "native_det integration" \
+//	MODEL_DIR=... go test -tags "cgo integration" \
 //	  -run 'TestRasterAlignment|TestTSRFloorFullPageTables' ./...
 import (
 	"bytes"
@@ -42,7 +43,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"native"
+	"ragflow/internal/deepdoc/native"
 	"ragflow/internal/deepdoc/parser/pdf/inference"
 	pdfium "ragflow/internal/deepdoc/parser/pdf/pdfium"
 )

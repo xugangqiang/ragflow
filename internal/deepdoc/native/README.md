@@ -14,14 +14,19 @@
   `OCR-rec`) in **pure Go + ONNX Runtime**, running on CPU.
 - It compares against the Python reference implementation (`ref_*.py`, which
   imports the repo-root `deepdoc`) to catch regressions in the port.
-- **Not wired to production**: the main module never imports `native`; the
-  production `internal/deepdoc` is only an HTTP client of the remote Python
-  service (DLA has a remote endpoint; OCR/TSR are `ErrNoRemoteEndpoint`
-  stubs) and does no local Go inference. The two have distinct
-  responsibilities, no functional overlap, no coupling.
+- **Wired into production as the sole backend**: `internal/deepdoc` no longer
+  talks to the remote Python service over HTTP — production serves DeepDoc
+  entirely in-process via `infnative.NativeAnalyzer` (built with `-tags
+  cgo`). The Python service survives only as a read-only equivalence
+  oracle in the `inprocess_vs_service_*` tests (via the test-only `PyOracle`
+  client), never as a production path. The `native` harness and the
+  production backend share the same ONNX Runtime port, so `native`'s
+  regression checks directly guard the production inference.
 
-It is a nested Go module (its own `go.mod`), which keeps the ONNX Runtime
-dependency isolated and out of the main module's build graph.
+It is a regular package inside the main module
+(`ragflow/internal/deepdoc/native`), gated by the `cgo` build tag so the
+ONNX Runtime (`onnxruntime_go`) cgo binding stays out of the default (no-cgo)
+build — the same isolation used for `office_oxide` / `pdfium` / `pdf_oxide`.
 
 ## 2. Why pure Go (P3 decision)
 
@@ -72,8 +77,10 @@ bit-exact float `minAreaRect` (which would require reintroducing OpenCV).
   (`clipper_offset_test.go` cross-checked against pyclipper at 0 px,
   `minAreaRect` cross-check, `image_test.go` decode limits); run by default
   via `go test ./native/`.
-- **integration** (`//go:build integration`, needs `ORT_LIB` + `MODEL_DIR`,
-  self-skips when absent): full-component Go-vs-golden comparison.
+- **integration** (`//go:build integration`, needs `MODEL_DIR`; ORT is always
+  resolved from the statically-linked binary via dlopen(NULL), so no `ORT_LIB`
+  is needed and self-skips only when the binary was not built with static ORT):
+  full-component Go-vs-golden comparison.
 - **decode safety**: `Decode` validates the decoded raster's size/pixel
   limits (`maxImageDim=16384`, `maxImagePixels=100MP`) to defend against
   decompression bombs. It currently runs only on fixed fixtures with no

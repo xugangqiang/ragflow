@@ -4,10 +4,6 @@ go 1.26.4
 
 require (
 	cloud.google.com/go/storage v1.63.0
-	// native is the standalone Go port of DeepDoc's det/DLA/TSR/OCR-rec.
-	// It is imported only under the `native_det` build tag; the default build
-	// never compiles it. See internal/deepdoc/native/README.md (ADR).
-	native v0.0.0
 	github.com/AkmalOt/gomsg v0.0.0-20260407083308-985c3a1a76b7
 	github.com/DATA-DOG/go-sqlmock v1.5.2
 	github.com/JohannesKaufmann/html-to-markdown v1.6.0
@@ -86,8 +82,6 @@ require (
 )
 
 require (
-	github.com/gorilla/websocket v1.5.3
-	github.com/pkg/errors v0.9.1
 	github.com/PuerkitoBio/goquery v1.9.2 // indirect
 	github.com/andybalholm/cascadia v1.3.2 // indirect
 	github.com/emersion/go-sasl v0.0.0-20241020182733-b788ff22d5a6 // indirect
@@ -220,7 +214,7 @@ require (
 	github.com/wk8/go-ordered-map/v2 v2.1.8 // indirect
 	github.com/xuri/efp v0.0.1 // indirect
 	github.com/xuri/nfp v0.0.2-0.20250530014748-2ddeb826f9a9 // indirect
-	github.com/yalue/onnxruntime_go v1.23.0 // indirect
+	github.com/yalue/onnxruntime_go v1.23.0
 	github.com/yargevad/filepathx v1.0.0 // indirect
 	github.com/yuin/gopher-lua v1.1.1 // indirect
 	go.mongodb.org/mongo-driver/v2 v2.6.0 // indirect
@@ -232,7 +226,6 @@ require (
 	go.uber.org/atomic v1.11.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
-	gocv.io/x/gocv v0.37.0 // indirect
 	golang.org/x/arch v0.27.0 // indirect
 	golang.org/x/exp v0.0.0-20231226003508-02704c960a9b // indirect
 	golang.org/x/sys v0.46.0 // indirect
@@ -251,8 +244,10 @@ require (
 
 replace github.com/infiniflow/infinity-go-sdk => github.com/infiniflow/infinity/go v0.0.0-20260806040857-d755c5ad25d9
 
-// native: local standalone module (DeepDoc det/DLA/TSR/OCR-rec Go port).
-// Only pulled in under -tags native_det.
-replace native => ./internal/deepdoc/native
-
 replace github.com/AkmalOt/gomsg => github.com/xugangqiang/gomsg v0.0.0-20260407083308-985c3a1a76b7
+
+// onnxruntime_go is forked to github.com/xugangqiang/onnxruntime_go (static-only:
+// resolves OrtGetApiBase via dlopen(NULL), no .so fallback). The fork is published at
+// that remote with tag v1.23.0; we pin a remote replace matching the gomsg pattern above
+// so the vendored tree no longer needs to live in-tree.
+replace github.com/yalue/onnxruntime_go => github.com/xugangqiang/onnxruntime_go v1.23.0

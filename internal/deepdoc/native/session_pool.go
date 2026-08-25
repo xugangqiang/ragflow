@@ -1,3 +1,5 @@
+//go:build cgo
+
 package native
 
 // session_pool.go — shared ONNX session pool for all recognizers.

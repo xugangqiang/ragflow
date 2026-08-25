@@ -1,3 +1,5 @@
+//go:build cgo
+
 package native
 
 // tsr.go — Table Structure Recognition recognizer.

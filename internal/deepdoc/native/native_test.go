@@ -1,3 +1,5 @@
+//go:build cgo
+
 package native
 
 // Unit tests for the pure (model-free) pieces of package native.

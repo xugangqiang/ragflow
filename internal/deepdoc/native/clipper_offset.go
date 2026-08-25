@@ -1,3 +1,5 @@
+//go:build cgo
+
 package native
 
 // clipper_offset.go — faithful pure-Go port of Clipper1's ClipperOffset

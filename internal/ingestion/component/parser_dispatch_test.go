@@ -413,8 +413,6 @@ func TestConfigureParserFromSetups_UsesPythonFamilySetup(t *testing.T) {
 }
 
 func TestDispatch_PDFMarkdown_UsesConfiguredOutputFormat(t *testing.T) {
-	t.Setenv("DEEPDOC_URL", "")
-	t.Setenv("OSSDEEPDOC_URL", "")
 	useMockDocAnalyzer(t)
 
 	path := filepath.Join("..", "..", "..", "test", "benchmark", "test_docs", "Doc1.pdf")

@@ -1,4 +1,4 @@
-//go:build integration
+//go:build cgo && integration
 
 package native
 
@@ -14,7 +14,7 @@ package native
 // Keeping one implementation avoids two diverging copies of the matching math.
 // This file is gated by the integration build tag (like native_integration_test.go):
 // it is compiled both when the native suite runs (-tags integration) and when
-// the infnative package imports this module (-tags "native_det integration").
+// the infnative package imports this module (-tags "cgo integration").
 
 import (
 	"encoding/json"

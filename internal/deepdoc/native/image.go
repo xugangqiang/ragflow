@@ -1,3 +1,5 @@
+//go:build cgo
+
 package native
 
 // image.go — format-agnostic image decoding shared by all recognizers.
@@ -109,6 +111,24 @@ func FromImage(img image.Image) (*Image, error) {
 		}
 	}
 	return &Image{W: w, H: h, Pix: pix}, nil
+}
+
+// FromImages converts a slice of standard library images into the RGB
+// row-major rasters the recognizers consume, in order. It is the batched
+// analogue of FromImage used by RunOCRRecBatchReal so a page's crops are
+// converted once before the single forward pass. A bounds failure on any
+// element aborts the whole batch (the recognizer cannot resize a degenerate
+// raster), matching FromImage's all-or-nothing contract.
+func FromImages(imgs []image.Image) ([]*Image, error) {
+	out := make([]*Image, len(imgs))
+	for i, img := range imgs {
+		ni, err := FromImage(img)
+		if err != nil {
+			return nil, err
+		}
+		out[i] = ni
+	}
+	return out, nil
 }
 
 // ToBGR returns a copy of the pixels with R and B channels swapped (B,G,R

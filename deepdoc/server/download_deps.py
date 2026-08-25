@@ -5,7 +5,6 @@ import os
 import sys
 
 REPO_ID = "InfiniFlow/deepdoc"
-# mirrors internal/common.DeepDocModelFiles (Go in-process backend).
 FILES = [
     "layout.onnx",
     "det.onnx",

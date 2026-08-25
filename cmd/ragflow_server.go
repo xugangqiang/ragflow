@@ -160,7 +160,7 @@ func parseArgs() (*serverArgs, error) {
 // registerNativeDeepDoc wires the in-process (Go) DeepDoc backend as the local
 // fallback used when no external DeepDoc HTTP service is configured. Its
 // implementation is build-tag split (see ragflow_server_native.go /
-// ragflow_server_nonative.go): the native_det build pulls in the ONNX Runtime
+// ragflow_server_nonative.go): the cgo build pulls in the ONNX Runtime
 // backend; the default build is a no-op so the unit-test path stays free of
 // the onnxruntime dependency.
 func printHelp(args *serverArgs) {
@@ -283,7 +283,7 @@ func main() {
 
 	// Register the in-process (Go) DeepDoc backend as the local fallback used
 	// when no external DeepDoc HTTP service is configured (DEEPDOC_URL unset).
-	// Under the default build this is a no-op; the native_det build tag pulls
+	// Under the default build this is a no-op; the cgo build tag pulls
 	// in the ONNX Runtime backend (see cmd/ragflow_server_native.go).
 	registerNativeDeepDoc()
 

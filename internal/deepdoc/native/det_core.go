@@ -1,3 +1,5 @@
+//go:build cgo
+
 package native
 
 // det_core.go — OCR text detection (DB) shared core.

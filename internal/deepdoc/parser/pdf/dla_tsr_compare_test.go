@@ -23,7 +23,7 @@ import (
 //  2. Run Python:     python3 tools/dla_tsr_compare.py
 //  3. Diff the JSON:  diff testdata/output/render_compare/go_dla.json testdata/output/render_compare/py_dla.json
 func TestDLATSRResponseCompare(t *testing.T) {
-	client := mustConnectInferenceClient(t)
+	client := mustConnectInProcessAnalyzer(t)
 	eng := mustOpenEngine(t, "06_table_content.pdf")
 	defer eng.Close()
 

@@ -3,17 +3,17 @@
 # task against its Python reference script. Proves the Go ports match the
 # Python DeepDoc pipeline on CPU via ONNX Runtime.
 #
-#   bash run.sh            # uses default ORT_LIB / MODEL_DIR below
-#   ORT_LIB=... MODEL_DIR=... bash run.sh
+#   bash run.sh            # uses default MODEL_DIR below
+#   MODEL_DIR=... bash run.sh
 set -euo pipefail
 cd "$(dirname "$0")"
 
-# Default ORT_LIB pins native onnxruntime 1.23.2 (mirrors internal/common.DeepDocORTVersion).
-ORT_LIB="${ORT_LIB:-/home/shenyushi/workspace/ragflow/.venv/lib/python3.12/site-packages/onnxruntime/capi/libonnxruntime.so.1.23.2}"
+# ONNX Runtime is statically linked (libonnxruntime.a) and resolved via
+# dlopen(NULL); no ORT_LIB is needed.
 MODEL_DIR="${MODEL_DIR:-/home/shenyushi/workspace/ragflow/rag/res/deepdoc}"
 PY="${PY:-/home/shenyushi/workspace/ragflow/.venv/bin/python}"
 PYTHONPATH="${PYTHONPATH:-/home/shenyushi/workspace/ragflow}"
-export ORT_LIB MODEL_DIR PYTHONPATH
+export MODEL_DIR PYTHONPATH
 
 compare_boxes() {
   # $1 = go json file, $2 = ref json file. Both are a list of

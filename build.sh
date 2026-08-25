@@ -37,6 +37,13 @@ PDFIUM_STATIC_VERSION="7809"
 PDF_OXIDE_PREFIX="${HOME}/ragflow-native-libs/pdf_oxide"
 PDF_OXIDE_VERSION="0.3.67"
 
+# onnxruntime native library settings — static linking for the in-process
+# (Go) DeepDoc backend. libonnxruntime*.a is linked into the server binary
+# (--whole-archive + --export-dynamic); OrtGetApiBase is then resolved via
+# dlopen(self), so no libonnxruntime.so is needed at runtime. Downloaded by
+# ragflow_deps/download_deps.py into onnxruntime/static_lib.
+ONNXRUNTIME_STATIC_PREFIX="${HOME}/ragflow-native-libs/onnxruntime/static_lib"
+
 # Copy a dependency from the system pre-seed directory to the user cache.
 # Returns 0 if the dep was copied or already exists in cache, 1 otherwise.
 _seed_from_system() {
@@ -322,7 +329,7 @@ build_go() {
 
     GOPROXY=${GOPROXY:-https://goproxy.cn,https://proxy.golang.org,direct} CGO_ENABLED=1 \
         CGO_CFLAGS="$CGO_CFLAGS" CGO_LDFLAGS="$CGO_LDFLAGS" \
-        go build -tags native_det "${strip_flags[@]}" -o "$RAGFLOW_SERVER_BINARY" \
+        go build -tags cgo "${strip_flags[@]}" -o "$RAGFLOW_SERVER_BINARY" \
         cmd/ragflow_server.go cmd/ragflow_server_native.go
 
 
@@ -400,6 +407,56 @@ setup_cgo_env() {
     esac
     export CGO_LDFLAGS="$CGO_LDFLAGS ${PDF_OXIDE_PREFIX}/lib/${pdf_oxide_subdir}/libpdf_oxide.a"
 
+    # ── onnxruntime (static, resolved via dlopen(NULL)) ────────────────
+    # Statically link libonnxruntime*.a into the binary. The forked Go binding
+    # (onnxruntime_go, github.com/xugangqiang/onnxruntime_go) resolves
+    # OrtGetApiBase with dlopen(NULL), so the symbols must (a) be pulled in
+    # wholesale with --whole-archive (ORT registers its execution providers
+    # lazily at runtime, beyond what a normal link would keep) and (b) be
+    # exported with --export-dynamic so the process-global symbol table
+    # dlopen finds them. No libonnxruntime.so is required or supported at
+    # runtime; there is no dynamic .so fallback.
+    if [ -d "$ONNXRUNTIME_STATIC_PREFIX" ]; then
+        # Collect every .a, but skip GPU-only providers we never build
+        # against (would pull in CUDA/cuDNN/TensorRT which we don't ship).
+        local ort_a=""
+        local seen_version_dir=""
+        while IFS= read -r f; do
+            case "$(basename "$f")" in
+                *cuda*|*tensorrt*|*coreml*|*dml*|*migraphx*) continue ;;
+            esac
+            # Guard against coexisting stale version dirs: if .a files span
+            # more than one onnxruntime-linux-x64-static_lib-* dir, fail fast
+            # instead of silently linking two ORT versions (duplicate symbols
+            # / wrong version). Re-run `download_deps.py` to prune stale dirs
+            # after a version bump, or remove the old dir by hand.
+            case "$f" in
+                */onnxruntime-linux-x64-static_lib-*/lib/*.a)
+                    local vdir="${f#*/onnxruntime-linux-x64-static_lib-}"
+                    vdir="${vdir%%/*}"
+                    if [ -z "$seen_version_dir" ]; then
+                        seen_version_dir="$vdir"
+                    elif [ "$seen_version_dir" != "$vdir" ]; then
+                        echo "  Error: multiple ONNX Runtime versions found under $ONNXRUNTIME_STATIC_PREFIX" >&2
+                        echo "    $seen_version_dir  AND  $vdir" >&2
+                        echo "  Remove the stale version dir (or re-run download_deps.py to prune it)." >&2
+                        return 1
+                    fi
+                    ;;
+            esac
+            ort_a="$ort_a $f"
+        done < <(find "$ONNXRUNTIME_STATIC_PREFIX" -type f -name '*.a' 2>/dev/null)
+
+        if [ -n "$ort_a" ]; then
+            export CGO_LDFLAGS="$CGO_LDFLAGS -Wl,--whole-archive$ort_a -Wl,--no-whole-archive -Wl,--export-dynamic -lstdc++"
+            echo "  onnxruntime (static) → $ONNXRUNTIME_STATIC_PREFIX"
+        else
+            echo "  onnxruntime static_lib dir has no .a files; the in-process DeepDoc backend cannot link ORT" >&2
+        fi
+    else
+        echo "  onnxruntime static_lib not found ($ONNXRUNTIME_STATIC_PREFIX); the in-process DeepDoc backend cannot link ORT" >&2
+    fi
+
     # ── platform-specific system libraries ────────────────────────────
     case "$(uname -s)" in
         Linux)
@@ -435,37 +492,58 @@ run_go_tests() {
     run_native_tests
 }
 
-# Run the unit tests of the standalone native module (DeepDoc det/DLA/TSR/
-# OCR-rec Go ports). It is a NESTED Go module (own go.mod) so the root
-# `./...` in run_go_tests never descends into it — coverage has to be invoked
-# explicitly here. The build is pure-Go geometry
-# (no external services, no OpenCV), so it belongs in the unit tier. Model-backed
-# integration tests are handled by run_native_integration_tests.
+# Run the unit tests of the native package (DeepDoc det/DLA/TSR/OCR-rec Go
+# ports), now a regular package under the MAIN module gated by the `cgo` build
+# tag (same isolation as office_oxide/pdfium). It used to be a nested Go module
+# (own go.mod) that the root `./...` never descended into; after the merge it is
+# covered by the normal module tests. The build is pure-Go geometry plus the
+# cgo onnxruntime binding, so it runs whenever CGO_ENABLED=1 (the same gate the
+# rest of the native C libs use). Model-backed integration tests are handled by
+# run_native_integration_tests.
 run_native_tests() {
-    local native_dir="$PROJECT_ROOT/internal/deepdoc/native"
-    [ -f "$native_dir/go.mod" ] || return 0
-
     print_section "Running native unit tests"
-    ( cd "$native_dir" && \
+    ( cd "$PROJECT_ROOT" && \
       GOPROXY=${GOPROXY:-https://goproxy.cn,https://proxy.golang.org,direct} \
       CGO_ENABLED=1 \
-      go test -count=1 ./... )
+      go test -tags cgo -count=1 ./internal/deepdoc/native/... )
 }
 
-# Run the model-backed integration tests of the native module. These
-# require ORT_LIB + MODEL_DIR at runtime; the tests self-skip when those are
-# unset (see native_integration_test.go skipIfNoModels). Run under the
-# `integration` tier so the model-free unit run (run_native_tests) stays
-# free of external services.
+# Run the model-backed integration tests of the native package and the
+# native_analyzer package (the DocAnalyzer the PDF parser consumes). These
+# require MODEL_DIR at runtime; ONNX Runtime is statically linked and resolved
+# via dlopen(NULL), so no ORT_LIB is needed. The tests self-skip when MODEL_DIR
+# is unset or the binary lacks static ORT (see native_integration_test.go
+# skipIfNoModels / native_analyzer_test.go analyzerWithModels). Run under the
+# `cgo integration` tier.
+#
+# -race is enabled so the concurrency tests are actually instrumented for data
+# races on the shared session pools and per-session tensors — not merely
+# "output looks identical" checks. ORT's C internals are not instrumented, but
+# all our shared mutable state (pools, globals, session in/out buffers) lives in
+# Go, which the detector covers. CGO_ENABLED=1 is required for both the build
+# and the race runtime.
+#
+# Two passes cover the full on-instance concurrency surface now that native and
+# native_analyzer live in the SAME module (no circular-dependency blocker, since
+# native never imports infnative): (1) the native package's own suite
+# (TestInferenceConcurrencyConsistent / TestInferenceConcurrencyMixedStress) for
+# the raw session pool; (2) native_analyzer's TestAnalyzerConcurrentBatchAndSingle,
+# which hammers one NativeAnalyzer from many goroutines and mixes the
+# OCRRecognizeBatch (real batch) fast path with standalone OCRRecognize on the
+# same instance — the page-parallel fan-out the PDF parser actually does.
 run_native_integration_tests() {
-    local native_dir="$PROJECT_ROOT/internal/deepdoc/native"
-    [ -f "$native_dir/go.mod" ] || return 0
-
-    print_section "Running native integration tests"
-    ( cd "$native_dir" && \
+    print_section "Running native integration tests (race detector on)"
+    ( cd "$PROJECT_ROOT" && \
       GOPROXY=${GOPROXY:-https://goproxy.cn,https://proxy.golang.org,direct} \
       CGO_ENABLED=1 \
-      go test -tags integration -count=1 ./... )
+      go test -tags "cgo integration" -race -count=1 ./internal/deepdoc/native/... )
+
+    print_section "Running native_analyzer race tests (race detector on)"
+    ( cd "$PROJECT_ROOT" && \
+      GOPROXY=${GOPROXY:-https://goproxy.cn,https://proxy.golang.org,direct} \
+      CGO_ENABLED=1 \
+      go test -tags "cgo integration" -race -count=1 \
+      ./internal/deepdoc/parser/pdf/inference/native_analyzer/... )
 }
 
 # Run Go tests gated behind a build tag (or space-separated tag list), e.g.
@@ -554,7 +632,7 @@ OPTIONS:
                     ONLY, never run in CI).
     --test-all           Run 'integration' + 'e2e' tests (excludes 'manual').
     --test-native        Run the in-process (Go) DeepDoc backend tests tagged
-                    'native_det integration' (needs libonnxruntime + the
+                    'cgo integration' (needs libonnxruntime + the
                     InfiniFlow/deepdoc model snapshot; self-skip otherwise).
                     e.g. `$0 --test-native`
     --clean, -C     Clean all build artifacts
@@ -665,7 +743,7 @@ main() {
             if [ "${#pkgs[@]}" -eq 0 ]; then
                 pkgs=(./internal/deepdoc/parser/pdf/inference/native_analyzer/...)
             fi
-            run_go_tests_tagged "native_det integration" "${pkgs[@]}"
+            run_go_tests_tagged "cgo integration" "${pkgs[@]}"
             run_native_integration_tests
             ;;
         --clean|-C)
