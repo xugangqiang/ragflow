@@ -343,8 +343,6 @@ github.com/hashicorp/hcl v1.0.0/go.mod h1:E5yfLk+7swimpb2L/Alb/PJmXilQ/rhwaUYs4T
 github.com/hpcloud/tail v1.0.0/go.mod h1:ab1qPbhIpdTxEkNHXyeSf5vhxWSCs/tWer42PpOxQnU=
 github.com/infiniflow/infinity/go v0.0.0-20260806040857-d755c5ad25d9 h1:mqPwCOTktwl0V1f3tkfCRFonGQ3XrQ43gvH+TOWec6o=
 github.com/infiniflow/infinity/go v0.0.0-20260806040857-d755c5ad25d9/go.mod h1:hw3z5AwNFsGy1cdrE0Mfjot2y9jqVHTxBufUx9VzZ+0=
-github.com/infiniflow/onnxruntime_go v1.23.0 h1:cUhSkGOyMAF7v0mOm97/V4hUhIVi5apJMm6WqKrSTwc=
-github.com/infiniflow/onnxruntime_go v1.23.0/go.mod h1:dFFL0KdgeeEDXoE9cjrg/ipQg0wEvD0tkGIg2UH0jdE=
 github.com/infiniflow/onnxruntime_go v1.23.1 h1:PvhtCkWAmnMwy16QrkohkBKUOH/EOrEZm0LO/QykIo0=
 github.com/infiniflow/onnxruntime_go v1.23.1/go.mod h1:dFFL0KdgeeEDXoE9cjrg/ipQg0wEvD0tkGIg2UH0jdE=
 github.com/jackc/pgpassfile v1.0.0 h1:/6Hmqy13Ss2zCq62VdNG8tM1wchn8zjSGOBJ6icpsIM=
@@ -588,8 +586,6 @@ github.com/yalue/onnxruntime_go v1.23.0 h1:Hin0mFphwGOeT7xEQrAIi/p2O6ngmSy4uz0yX
 github.com/yalue/onnxruntime_go v1.23.0/go.mod h1:b4X26A8pekNb1ACJ58wAXgNKeUCGEAQ9dmACut9Sm/4=
 github.com/yargevad/filepathx v1.0.0 h1:SYcT+N3tYGi+NvazubCNlvgIPbzAk7i7y2dwg3I5FYc=
 github.com/yargevad/filepathx v1.0.0/go.mod h1:BprfX/gpYNJHJfc35GjRRpVcwWXS89gGulUIU5tK3tA=
-github.com/yfedoseev/office_oxide/go v0.1.8 h1:Q6aQrrs0pN/B6fBoWN6PN95QSQ7EKGMb5HExh04mJJc=
-github.com/yfedoseev/office_oxide/go v0.1.8/go.mod h1:YLtMlKUkRCp/Q96wsy7D6yoBKDeJnP66UH+c9Bb+E+M=
 github.com/yfedoseev/office_oxide/go v0.1.9 h1:gvTMCvJDYEZNF4dKd1cdfvU+9SRDSpnbNhCpZJbZOaE=
 github.com/yfedoseev/office_oxide/go v0.1.9/go.mod h1:YLtMlKUkRCp/Q96wsy7D6yoBKDeJnP66UH+c9Bb+E+M=
 github.com/yfedoseev/pdf_oxide/go v0.3.73 h1:hRad+X4W0ILW3bCQeCvdUKcoy8yMj2TFS6/XtoMk55I=

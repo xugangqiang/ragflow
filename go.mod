@@ -91,8 +91,6 @@ require (
 )
 
 require (
-	github.com/gorilla/websocket v1.5.3
-	github.com/pkg/errors v0.9.1
 	github.com/PuerkitoBio/goquery v1.9.2 // indirect
 	github.com/andybalholm/cascadia v1.3.2 // indirect
 	github.com/apache/arrow/go/v15 v15.0.2 // indirect
@@ -177,6 +175,7 @@ require (
 	github.com/googleapis/gax-go/v2 v2.23.0 // indirect
 	github.com/goph/emperror v0.17.2 // indirect
 	github.com/hashicorp/hcl v1.0.0 // indirect
+	github.com/infiniflow/onnxruntime_go v1.23.1
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
 	github.com/jackc/pgx/v5 v5.10.0
@@ -233,7 +232,6 @@ require (
 	github.com/wk8/go-ordered-map/v2 v2.1.8 // indirect
 	github.com/xuri/efp v0.0.1 // indirect
 	github.com/xuri/nfp v0.0.2-0.20250530014748-2ddeb826f9a9 // indirect
-	github.com/infiniflow/onnxruntime_go v1.23.1
 	github.com/yargevad/filepathx v1.0.0 // indirect
 	github.com/yuin/gopher-lua v1.1.1 // indirect
 	go.mongodb.org/mongo-driver/v2 v2.6.0 // indirect
@@ -261,6 +259,8 @@ require (
 	modernc.org/memory v1.5.0 // indirect
 	modernc.org/sqlite v1.23.1 // indirect
 )
+
+require github.com/yalue/onnxruntime_go v1.23.0 // indirect
 
 replace github.com/infiniflow/infinity-go-sdk => github.com/infiniflow/infinity/go v0.0.0-20260806040857-d755c5ad25d9
 
