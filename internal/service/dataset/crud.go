@@ -47,7 +47,7 @@ func (d *DatasetService) CreateDataset(ctx context.Context, req *service.CreateD
 		}
 	}
 
-	parserID := ""
+	parserID := string(entity.ParserTypeGeneral)
 	permission := "me"
 	embeddingModel := ""
 	pipelineID := req.PipelineID
@@ -59,10 +59,11 @@ func (d *DatasetService) CreateDataset(ctx context.Context, req *service.CreateD
 		}
 	}
 	if req.ParserID != nil {
-		parserID = strings.TrimSpace(*req.ParserID)
-		if err := validateParserID(parserID); err != nil {
+		canonicalID, err := canonicalDatasetParserID(strings.TrimSpace(*req.ParserID))
+		if err != nil {
 			return nil, common.CodeDataError, err
 		}
+		parserID = canonicalID
 		pipelineID = nil
 	}
 	if req.PipelineID != nil {
@@ -71,6 +72,9 @@ func (d *DatasetService) CreateDataset(ctx context.Context, req *service.CreateD
 			return nil, common.CodeDataError, err
 		}
 		pipelineID = normalizedPipelineID
+		if pipelineID != nil && strings.TrimSpace(*pipelineID) != "" {
+			parserID = ""
+		}
 	}
 	if req.EmbeddingModel != nil {
 		embeddingModel = strings.TrimSpace(*req.EmbeddingModel)
@@ -120,6 +124,11 @@ func (d *DatasetService) CreateDataset(ctx context.Context, req *service.CreateD
 	// Mirror Python's duplicate_name: append (1), (2), ... until the name is
 	// unique within the tenant.
 	name = d.dedupeDatasetName(ctx, name, tenantID)
+
+	parserConfig = service.ApplyComponentScopedParserConfig(
+		parserConfig,
+		tenant.LLMID,
+	)
 
 	kb := &entity.Knowledgebase{
 		ID:           kbID,
@@ -256,7 +265,7 @@ func (d *DatasetService) DeleteDatasets(ctx context.Context, ids []string, delet
 	successCount := 0
 	errorsList := make([]string, 0)
 	for _, kb := range kbs {
-		if err := d.deleteDataset(tenantID, kb); err != nil {
+		if err := d.deleteDataset(ctx, tenantID, kb); err != nil {
 			errorsList = append(errorsList, err.Error())
 			common.Warn("deleteDataset failed", zap.String("kb_id", kb.ID), zap.Error(err))
 			continue
@@ -270,7 +279,7 @@ func (d *DatasetService) DeleteDatasets(ctx context.Context, ids []string, delet
 	}, common.CodeSuccess, nil
 }
 
-func (d *DatasetService) deleteDataset(tenantID string, kb *entity.Knowledgebase) error {
+func (d *DatasetService) deleteDataset(ctx context.Context, tenantID string, kb *entity.Knowledgebase) error {
 	// Collect document IDs first so engine cleanup can run before the
 	// transaction (engine ops are not transactional).
 	var documents []entity.Document
@@ -279,7 +288,7 @@ func (d *DatasetService) deleteDataset(tenantID string, kb *entity.Knowledgebase
 	}
 	docIDs := extractDocIDs(documents)
 	if len(docIDs) > 0 {
-		d.deleteDatasetEngineData(kb, docIDs)
+		d.deleteDatasetEngineData(ctx, kb, docIDs)
 	}
 
 	return dao.DB.Transaction(func(tx *gorm.DB) error {
@@ -331,7 +340,7 @@ func (d *DatasetService) deleteDataset(tenantID string, kb *entity.Knowledgebase
 func (d *DatasetService) ListDatasets(ctx context.Context, id, name string, page, pageSize int, orderby string, desc bool, keywords string, ownerIDs []string, parserID, userID string, ids []string) ([]map[string]interface{}, int64, common.ErrorCode, error) {
 	id = strings.TrimSpace(id)
 	if id != "" && len(ids) > 0 {
-		return nil, 0, common.CodeDataError, fmt.Errorf("Should not provide both 'id':%s and 'ids'%s", id, pythonStringListRepr(ids))
+		return nil, 0, common.CodeDataError, fmt.Errorf("should not provide both 'id':%s and 'ids':%s", id, pythonStringListRepr(ids))
 	}
 	if id != "" {
 		normalizedID, err := normalizeDatasetID(id)
@@ -441,7 +450,7 @@ func (d *DatasetService) ListDatasets(ctx context.Context, id, name string, page
 			}
 		}
 		if len(deniedIDs) > 0 {
-			return nil, 0, common.CodeDataError, fmt.Errorf("User '%s' lacks permission for datasets: '%s'", userID, strings.Join(deniedIDs, ", "))
+			return nil, 0, common.CodeDataError, fmt.Errorf("user '%s' lacks permission for datasets: '%s'", userID, strings.Join(deniedIDs, ", "))
 		}
 	}
 
@@ -484,7 +493,7 @@ func (d *DatasetService) ListDatasetFilters(ctx context.Context, userID string) 
 		tenantIDs = append(tenantIDs, joinedTenant.TenantID)
 	}
 
-	owners, err := d.kbDAO.GetOwnerFilter(tenantIDs, userID)
+	owners, err := d.kbDAO.GetOwnerFilter(ctx, dao.DB, tenantIDs, userID)
 	if err != nil {
 		return nil, common.CodeServerError, errors.New("database operation failed")
 	}
@@ -521,6 +530,21 @@ func stringPtrIfNotEmpty(s string) *string {
 }
 
 // extractDocIDs returns the document IDs from a slice of documents.
+// datasetIndexTaskIDs returns the deduplicated set of dataset-level index task
+// ids recorded on the KB (graphrag/raptor/mindmap legacy task fields). It is
+// used by deleteDataset to clear residual entity.Task rows when a KB is deleted.
+// Kept here because it belongs to the dataset delete lifecycle, not the retired
+// RunIndex scheduling path.
+func datasetIndexTaskIDs(kb *entity.Knowledgebase) []string {
+	taskIDs := make([]string, 0, 3)
+	for _, taskID := range []*string{kb.GraphragTaskID, kb.RaptorTaskID, kb.MindmapTaskID} {
+		if taskID != nil && *taskID != "" {
+			taskIDs = append(taskIDs, *taskID)
+		}
+	}
+	return common.Deduplicate(taskIDs)
+}
+
 func extractDocIDs(docs []entity.Document) []string {
 	ids := make([]string, 0, len(docs))
 	for _, doc := range docs {
@@ -532,11 +556,10 @@ func extractDocIDs(docs []entity.Document) []string {
 // deleteDatasetEngineData cleans up engine-level chunks and metadata for all
 // documents in a dataset being deleted. Called before the DB transaction
 // because engine operations are not transactional.
-func (d *DatasetService) deleteDatasetEngineData(kb *entity.Knowledgebase, docIDs []string) {
+func (d *DatasetService) deleteDatasetEngineData(ctx context.Context, kb *entity.Knowledgebase, docIDs []string) {
 	if d.docEngine == nil || len(docIDs) == 0 {
 		return
 	}
-	ctx := context.Background()
 	indexName := fmt.Sprintf("ragflow_%s", kb.TenantID)
 
 	if _, err := d.docEngine.DeleteChunks(ctx, map[string]interface{}{"doc_id": docIDs}, indexName, kb.ID); err != nil {

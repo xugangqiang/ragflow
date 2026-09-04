@@ -1,3 +1,19 @@
+/*
+ *  Copyright 2026 The InfiniFlow Authors. All Rights Reserved.
+ *
+ *  Licensed under the Apache License, Version 2.0 (the "License");
+ *  you may not use this file except in compliance with the License.
+ *  You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ *  Unless required by applicable law or agreed to in writing, software
+ *  distributed under the License is distributed on an "AS IS" BASIS,
+ *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ *  See the License for the specific language governing permissions and
+ *  limitations under the License.
+ */
+
 export enum KnowledgeRouteKey {
   Dataset = 'dataset',
   Testing = 'testing',
@@ -23,6 +39,16 @@ export enum RunningStatusOld {
   DONE = '3', // need to refresh
   FAIL = '4', // need to refresh
   SCHEDULE = '5',
+}
+
+export enum IngestionTaskStatus {
+  CREATED = 'CREATED',
+  SCHEDULED = 'SCHEDULED',
+  RUNNING = 'RUNNING',
+  STOPPING = 'STOPPING',
+  COMPLETED = 'COMPLETED',
+  FAILED = 'FAILED',
+  STOPPED = 'STOPPED',
 }
 
 export const RunningStatusMap = {
@@ -120,7 +146,7 @@ export enum ParseType {
 export enum ProcessingType {
   knowledgeGraph = 'Graph',
   raptor = 'RAPTOR',
-  artifact = 'Artifact',
+  artifact = 'wiki',
   skill = 'Skill',
   mindmap = 'Mindmap',
   timeline = 'Timeline',

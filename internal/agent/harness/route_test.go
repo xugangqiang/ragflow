@@ -2,6 +2,7 @@ package harness
 
 import (
 	"context"
+	"reflect"
 	"testing"
 
 	"gorm.io/gorm"
@@ -27,7 +28,7 @@ func installChat(t *testing.T, content string) {
 // strategy from the mode and the LLM's question_type.
 func TestRouteNode_Classifies(t *testing.T) {
 	installChat(t, `{"question_type":"comparative","requires_decomposition":true,"reasoning":"cmp"}`)
-	r := RouteNode(context.Background(), nil, "Compare A and B", "medium")
+	r := RouteNode(t.Context(), nil, "Compare A and B", "medium")
 	if r.QuestionType != "comparative" {
 		t.Errorf("question_type = %q, want comparative", r.QuestionType)
 	}
@@ -44,7 +45,7 @@ func TestRouteNode_Classifies(t *testing.T) {
 // even if the LLM requests it.
 func TestRouteNode_LowModeDisablesDecomposition(t *testing.T) {
 	installChat(t, `{"question_type":"analytical","requires_decomposition":true}`)
-	r := RouteNode(context.Background(), nil, "Analyze X", "low")
+	r := RouteNode(t.Context(), nil, "Analyze X", "low")
 	if r.RequiresDecomposition {
 		t.Errorf("low mode must disable decomposition, got true")
 	}
@@ -56,7 +57,7 @@ func TestRouteNode_LowModeDisablesDecomposition(t *testing.T) {
 // TestRouteNode_FencedJSON asserts think-tag/fence stripping works.
 func TestRouteNode_FencedJSON(t *testing.T) {
 	installChat(t, "Sure!\n```json\n{\"question_type\":\"factual\",\"requires_decomposition\":false}\n```")
-	r := RouteNode(context.Background(), nil, "What is X?", "medium")
+	r := RouteNode(t.Context(), nil, "What is X?", "medium")
 	if r.QuestionType != "factual" {
 		t.Errorf("question_type = %q, want factual", r.QuestionType)
 	}
@@ -68,16 +69,58 @@ func TestRouteNode_FencedJSON(t *testing.T) {
 // TestRouteNode_EmptyQuestionFallsBack asserts an empty question yields a
 // direct factual decision without calling the LLM.
 func TestRouteNode_EmptyQuestionFallsBack(t *testing.T) {
-	r := RouteNode(context.Background(), nil, "", "medium")
+	r := RouteNode(t.Context(), nil, "", "medium")
 	if r.QuestionType != "factual" || r.RequiresDecomposition {
 		t.Errorf("empty question must fall back to direct factual, got %+v", r)
+	}
+}
+
+// TestRouteNode_SuggestsCompilation asserts the route preserves a normalized
+// compiled-artifact suggestion (P5) so the production runner can prefer the wiki
+// tool.
+func TestRouteNode_SuggestsCompilation(t *testing.T) {
+	installChat(t, `{"question_type":"analytical","requires_decomposition":true,"suggests_compilation":"wiki"}`)
+	r := RouteNode(t.Context(), nil, "What does the domain say about X?", "medium")
+	if r.SuggestsCompilation != "wiki" {
+		t.Errorf("suggests_compilation = %q, want wiki", r.SuggestsCompilation)
+	}
+}
+
+// TestNormalizeCompilationSuggestion asserts free-text suggestions map to the
+// canonical keys and unknown/null collapse to "".
+func TestNormalizeCompilationSuggestion(t *testing.T) {
+	cases := map[string]string{
+		"wiki":      "wiki",
+		"WIKI":      "wiki",
+		"compiled":  "wiki",
+		"graph":     "graph",
+		"kg":        "graph",
+		"toc":       "toc",
+		"null":      "",
+		"":          "",
+		"spaghetti": "",
+	}
+	for in, want := range cases {
+		if got := normalizeCompilationSuggestion(in); got != want {
+			t.Errorf("normalizeCompilationSuggestion(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestRouteNode_WikiSuggestionSurvivesFence asserts a fenced JSON route still
+// carries the wiki suggestion through decide().
+func TestRouteNode_WikiSuggestionSurvivesFence(t *testing.T) {
+	installChat(t, "```json\n{\"question_type\":\"procedural\",\"requires_decomposition\":false,\"suggests_compilation\":\"graph\"}\n```")
+	r := RouteNode(t.Context(), nil, "How is this structured?", "medium")
+	if r.SuggestsCompilation != "graph" {
+		t.Errorf("suggests_compilation = %q, want graph", r.SuggestsCompilation)
 	}
 }
 
 // TestPlannerNode_DirectMode asserts a non-decomposed route yields one coarse
 // claim without calling the LLM.
 func TestPlannerNode_DirectMode(t *testing.T) {
-	plan := PlannerNode(context.Background(), nil, RouteDecision{
+	plan := PlannerNode(t.Context(), nil, RouteDecision{
 		Question: "What is X?", RequiresDecomposition: false,
 	}, nil)
 	if plan.PlanType != "direct" || len(plan.Claims) != 1 {
@@ -92,7 +135,7 @@ func TestPlannerNode_Decomposes(t *testing.T) {
 		{"claim_id":"c0","description":"fact one","priority":0},
 		{"claim_id":"c1","description":"fact two","priority":1}
 	]}`)
-	plan := PlannerNode(context.Background(), nil, RouteDecision{
+	plan := PlannerNode(t.Context(), nil, RouteDecision{
 		Question: "Compare A and B", QuestionType: "comparative", RequiresDecomposition: true, ThinkingMode: "medium",
 	}, nil)
 	if plan.PlanType != "comparative_decomposition" {
@@ -115,7 +158,7 @@ func TestPlannerNode_Decomposes(t *testing.T) {
 // (which would produce a degenerate plan with max_claims=0).
 func TestPlannerNode_UnknownModeFallsBack(t *testing.T) {
 	installChat(t, `{"claims":[{"claim_id":"c0","description":"fact one","priority":0}]}`)
-	plan := PlannerNode(context.Background(), nil, RouteDecision{
+	plan := PlannerNode(t.Context(), nil, RouteDecision{
 		Question: "Q", RequiresDecomposition: true, ThinkingMode: "turbo-unknown",
 	}, nil)
 	// medium maxOrchestratorCycles = 3, and claims must still be built.
@@ -131,10 +174,37 @@ func TestPlannerNode_UnknownModeFallsBack(t *testing.T) {
 // to the direct plan.
 func TestPlannerNode_BadJSONFallsBack(t *testing.T) {
 	installChat(t, "not json at all")
-	plan := PlannerNode(context.Background(), nil, RouteDecision{
+	plan := PlannerNode(t.Context(), nil, RouteDecision{
 		Question: "Q", RequiresDecomposition: true, ThinkingMode: "medium",
 	}, nil)
 	if plan.PlanType != "direct" || len(plan.Claims) != 1 {
 		t.Fatalf("fallback plan = %+v, want direct", plan)
+	}
+}
+
+// TestUnmarshalModelJSON pins unmarshalModelJSON: think preamble and Markdown
+// fences are stripped before JSON parsing, and an empty payload yields {}.
+func TestUnmarshalModelJSON(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want map[string]any
+	}{
+		{name: "plain json", in: `{"answer":"42"}`, want: map[string]any{"answer": "42"}},
+		{name: "think prefix", in: `<think>reason</think>{"answer":"42"}`, want: map[string]any{"answer": "42"}},
+		{name: "json fence", in: "```json\n{\"answer\":\"42\"}\n```", want: map[string]any{"answer": "42"}},
+		{name: "think then fence", in: "<think>r</think>```json\n{\"answer\":\"42\"}\n```", want: map[string]any{"answer": "42"}},
+		{name: "empty becomes empty object", in: "", want: map[string]any{}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var out map[string]any
+			if err := unmarshalModelJSON(tt.in, &out); err != nil {
+				t.Fatalf("unmarshalModelJSON(%q): %v", tt.in, err)
+			}
+			if !reflect.DeepEqual(out, tt.want) {
+				t.Errorf("unmarshalModelJSON(%q) = %#v, want %#v", tt.in, out, tt.want)
+			}
+		})
 	}
 }

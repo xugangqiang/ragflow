@@ -10,12 +10,11 @@ import (
 	"strings"
 	"testing"
 
+	"ragflow/internal/common"
 	"ragflow/internal/engine"
 	"ragflow/internal/engine/types"
 	"ragflow/internal/server"
 	"ragflow/internal/service/nav"
-
-	"go.uber.org/zap"
 )
 
 // repoRootOf walks up from the package directory to the repository root (the
@@ -53,7 +52,7 @@ func findNavRow(t *testing.T, tenantID, kbID, docID string) map[string]interface
 		SelectFields: []string{"available_int", "compile_kwd", "type_kwd"},
 		Limit:        10,
 	}
-	res, err := de.Search(context.Background(), req)
+	res, err := de.Search(t.Context(), req)
 	if err != nil {
 		t.Fatalf("search nav row: %v", err)
 	}
@@ -72,12 +71,14 @@ func findNavRow(t *testing.T, tenantID, kbID, docID string) map[string]interface
 //
 // Run with: bash build.sh --test-integration ./internal/service/nlp/...
 func TestDatasetNav_AvailableIntZero_Isolation(t *testing.T) {
-	server.SetLogger(zap.NewNop())
+	if err := common.InitLogger("info", common.FileOutput{}, ""); err != nil {
+		t.Fatalf("init logger: %v", err)
+	}
 	configPath := filepath.Join(repoRootOf(t), "conf", "service_conf.yaml")
 	if err := server.Init(configPath); err != nil {
 		t.Fatalf("init service config: %v", err)
 	}
-	if err := engine.Init(); err != nil {
+	if err := engine.InitDocEngine(context.Background()); err != nil {
 		t.Fatalf("init document engine: %v", err)
 	}
 	if engine.Get() == nil {
@@ -89,7 +90,7 @@ func TestDatasetNav_AvailableIntZero_Isolation(t *testing.T) {
 	docID := "navint_doc1"
 
 	ns := NewNavService(stubNavEmbedder{})
-	if err := ns.UpsertDoc(context.Background(), nav.UpsertDocInput{
+	if err := ns.UpsertDoc(t.Context(), nav.UpsertDocInput{
 		TenantID: tenantID, KbID: kbID, DocID: docID, Summary: "rocket propulsion integration evidence",
 	}); err != nil {
 		t.Fatalf("upsert nav doc: %v", err)
@@ -97,7 +98,7 @@ func TestDatasetNav_AvailableIntZero_Isolation(t *testing.T) {
 	t.Cleanup(func() { _ = ns.RemoveDoc(context.Background(), tenantID, kbID, docID) })
 
 	// NavService.Search must find the nav row (reads nav rows directly).
-	hits, err := ns.Search(context.Background(), tenantID, kbID, "rocket propulsion", nil, 5)
+	hits, err := ns.Search(t.Context(), tenantID, kbID, "rocket propulsion", nil, 5)
 	if err != nil {
 		t.Fatalf("nav search: %v", err)
 	}

@@ -1,7 +1,23 @@
+/*
+ *  Copyright 2026 The InfiniFlow Authors. All Rights Reserved.
+ *
+ *  Licensed under the Apache License, Version 2.0 (the "License");
+ *  you may not use this file except in compliance with the License.
+ *  You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ *  Unless required by applicable law or agreed to in writing, software
+ *  distributed under the License is distributed on an "AS IS" BASIS,
+ *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ *  See the License for the specific language governing permissions and
+ *  limitations under the License.
+ */
+
 /**
- * Utility functions for extracting parser and raptor config extensions.
- * These functions extract known fields from parser/raptor config objects
- * and merge unknown fields into the `ext` field for flexible configuration.
+ * Utility functions for extracting parser config extensions.
+ * These functions extract known fields from parser config objects and merge
+ * unknown fields into the `ext` field for flexible configuration.
  */
 
 /**
@@ -19,52 +35,6 @@ export const isPipelineParserConfig = (
 };
 
 /**
- * Extracts Raptor configuration with extra fields merged into ext.
- * @param raptorConfig - The raptor configuration object
- * @returns Processed raptor config with extra fields in ext
- */
-export const extractRaptorConfigExt = (
-  raptorConfig: Record<string, any> | undefined,
-) => {
-  if (!raptorConfig) return raptorConfig;
-  const {
-    use_raptor,
-    prompt,
-    max_token,
-    threshold,
-    max_cluster,
-    random_seed,
-    scope,
-    clustering_method,
-    tree_builder,
-    auto_disable_for_structured_data,
-    ext,
-    ...raptorExt
-  } = raptorConfig;
-  const extClusteringMethod = ext?.clustering_method;
-  const normalizedClusteringMethod =
-    clustering_method ?? extClusteringMethod ?? 'gmm';
-  const normalizedTreeBuilder = tree_builder ?? ext?.tree_builder ?? 'raptor';
-
-  return {
-    use_raptor,
-    prompt,
-    max_token,
-    threshold,
-    max_cluster,
-    random_seed,
-    scope,
-    auto_disable_for_structured_data,
-    ext: {
-      ...ext,
-      ...raptorExt,
-      clustering_method: normalizedClusteringMethod,
-      tree_builder: normalizedTreeBuilder,
-    },
-  };
-};
-
-/**
  * Extracts Parser configuration with extra fields merged into ext.
  * @param parserConfig - The parser configuration object
  * @returns Processed parser config with extra fields in ext
@@ -78,10 +48,8 @@ export const extractParserConfigExt = (
     auto_questions,
     chunk_token_num,
     delimiter,
-    graphrag,
     html4excel,
     layout_recognize,
-    raptor,
     tag_kb_ids,
     topn_tags,
     filename_embd_weight,
@@ -93,15 +61,15 @@ export const extractParserConfigExt = (
     ext,
     ...parserExt
   } = parserConfig;
+  delete parserExt.graphrag;
+  delete parserExt.raptor;
   return {
     auto_keywords,
     auto_questions,
     chunk_token_num,
     delimiter,
-    graphrag,
     html4excel,
     layout_recognize,
-    raptor: extractRaptorConfigExt(raptor),
     tag_kb_ids,
     topn_tags,
     filename_embd_weight,

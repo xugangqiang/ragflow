@@ -12,9 +12,24 @@ import (
 	"sync"
 	"testing"
 
+	"ragflow/internal/agent/runtime"
+	"ragflow/internal/ingestion/component/globals"
 	"ragflow/internal/ingestion/component/knowledge_compiler/common"
-	"ragflow/internal/service/nav"
+
+	"gorm.io/gorm"
 )
+
+func TestWikiActiveStateValuesAreCheckpointSafe(t *testing.T) {
+	values := wikiActiveStateValues([]common.WikiMapActiveState{{
+		Key: "state-1", TenantID: "tenant-1", DatasetID: "kb-1", DocumentID: "doc-1", Payload: []byte(`{"plan":[]}`),
+	}})
+	if len(values) != 1 || values[0]["payload"] != `{"plan":[]}` {
+		t.Fatalf("checkpoint values = %#v", values)
+	}
+	if _, err := json.Marshal(map[string]any{"wiki_active_map_states": values}); err != nil {
+		t.Fatalf("marshal checkpoint-safe active states: %v", err)
+	}
+}
 
 // mockChat answers the structure variant's three LLM call shapes under the
 // Python-aligned items contract: node extraction (entity items), edge
@@ -171,7 +186,7 @@ func TestKnowledgeCompiler_Structure_EndToEnd(t *testing.T) {
 	installMockDeps(t)
 	installVariantTemplateResolver(t, "structure")
 
-	c, err := NewKnowledgeCompilerComponent("KnowledgeCompiler", map[string]any{
+	c, err := NewKnowledgeCompilerComponent("Compiler", map[string]any{
 		"compilation_template_id": "tpl-structure", "llm_id": "llm1", "embedding_model": "emb1",
 	})
 	if err != nil {
@@ -230,7 +245,7 @@ func TestKnowledgeCompiler_Structure_EndToEnd(t *testing.T) {
 }
 
 func TestKnowledgeCompiler_UnknownVariant(t *testing.T) {
-	c, err := NewKnowledgeCompilerComponent("KnowledgeCompiler", map[string]any{"compilation_template_id": "nope"})
+	c, err := NewKnowledgeCompilerComponent("Compiler", map[string]any{"compilation_template_id": "nope"})
 	if err != nil {
 		t.Fatalf("NewKnowledgeCompilerComponent: %v", err)
 	}
@@ -254,129 +269,11 @@ func TestKnowledgeCompiler_Datasetnav_NoVariant(t *testing.T) {
 	}
 }
 
-// fakeNavSvc records the most recent UpsertDoc call so a test can assert the
-// tree by-product hook feeds the nav service the root document summary.
-type fakeNavSvc struct {
-	mu      sync.Mutex
-	called  bool
-	summary string
-	docID   string
-	kbID    string
-}
-
-func (f *fakeNavSvc) UpsertDoc(_ context.Context, in nav.UpsertDocInput) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.called = true
-	f.summary = in.Summary
-	f.docID = in.DocID
-	f.kbID = in.KbID
-	return nil
-}
-func (f *fakeNavSvc) RemoveDoc(context.Context, string, string, string) error { return nil }
-func (f *fakeNavSvc) Search(context.Context, string, string, string, []float32, int) ([]nav.NavHit, error) {
-	return nil, nil
-}
-func (f *fakeNavSvc) ListClusters(context.Context, string, string, int, int) ([]nav.NavNode, int64, error) {
-	return nil, 0, nil
-}
-func (f *fakeNavSvc) ListChildren(context.Context, string, string, string, int, int) ([]nav.NavNode, int64, error) {
-	return nil, 0, nil
-}
-
-// TestKnowledgeCompiler_TreeNavByProduct asserts the tree compile-complete hook
-// writes the dataset-nav by-product: after tree.Run produces a root product,
-// upsertTreeNav calls NavService.UpsertDoc with the root summary and the
-// doc/dataset context, and never aborts on failure.
-func TestKnowledgeCompiler_TreeNavByProduct(t *testing.T) {
-	fake := &fakeNavSvc{}
-	nav.SetNavService(fake)
-	t.Cleanup(func() { nav.SetNavService(nil) })
-
-	deps := common.Deps{
-		TenantID:  "t1",
-		DatasetID: "kb1",
-		Chat:      proseChat{},
-		Embed:     mockEmbedder{dim: 8},
-	}
-	products := []common.Product{
-		{Content: "section one body", Meta: map[string]any{"kind": "summary", "level": 0}},
-		{Content: "overall doc theme root summary", Vector: []float32{0.1, 0.2}, Meta: map[string]any{"kind": "root", "level": -1}},
-	}
-	upsertTreeNav(context.Background(), deps, "d1", products)
-
-	fake.mu.Lock()
-	defer fake.mu.Unlock()
-	if !fake.called {
-		t.Fatal("upsertTreeNav did not call NavService.UpsertDoc")
-	}
-	if fake.docID != "d1" {
-		t.Errorf("doc_id = %q, want d1", fake.docID)
-	}
-	if fake.kbID != "kb1" {
-		t.Errorf("kb_id = %q, want kb1", fake.kbID)
-	}
-	if !strings.Contains(fake.summary, "overall doc theme root summary") {
-		t.Errorf("summary = %q, want the tree root summary", fake.summary)
-	}
-}
-
-// TestKnowledgeCompiler_TreeNavByProduct_NilServiceDoesNotAbort asserts the
-// by-product hook tolerates a missing NavService without erroring (nav is a
-// derived artifact; its absence must never abort compilation).
-func TestKnowledgeCompiler_TreeNavByProduct_NilServiceDoesNotAbort(t *testing.T) {
-	nav.SetNavService(nil)
-	t.Cleanup(func() { nav.SetNavService(nil) })
-	// Should not panic and must return normally.
-	upsertTreeNav(context.Background(), common.Deps{}, "d1",
-		[]common.Product{{Content: "x", Meta: map[string]any{"kind": "root"}}})
-}
-
-// TestKnowledgeCompiler_StructureNavByProduct asserts the structure/page_index
-// by-product hook summarizes the graph product entities and feeds NavService.
-func TestKnowledgeCompiler_StructureNavByProduct(t *testing.T) {
-	fake := &fakeNavSvc{}
-	nav.SetNavService(fake)
-	t.Cleanup(func() { nav.SetNavService(nil) })
-
-	graphJSON := `{"entities":[{"name":"Engine","description":"a propulsion device"},{"name":"Fuel","description":"combustion source"}]}`
-	products := []common.Product{
-		{Content: graphJSON, Vector: []float32{0.1, 0.2}, Meta: map[string]any{"kind": "graph", "compile_kwd": "page_index"}},
-	}
-	// The by-product embeds the SUMMARY (not the graph JSON vector), so an
-	// embedder must be present.
-	upsertStructureNav(context.Background(), common.Deps{TenantID: "t1", DatasetID: "kb1", Embed: mockEmbedder{dim: 8}}, "d1", products)
-
-	fake.mu.Lock()
-	defer fake.mu.Unlock()
-	if !fake.called {
-		t.Fatal("upsertStructureNav did not call NavService.UpsertDoc")
-	}
-	if fake.docID != "d1" {
-		t.Errorf("doc_id = %q, want d1", fake.docID)
-	}
-	if !strings.Contains(fake.summary, "Engine: a propulsion device") {
-		t.Errorf("summary = %q, want entity descriptions", fake.summary)
-	}
-}
-
-// TestPageIndexSummary asserts entity descriptions are concatenated into a
-// document summary.
-func TestPageIndexSummary(t *testing.T) {
-	got := pageIndexSummary(`{"entities":[{"name":"A","description":"one  thing"},{"name":"B","description":""}]}`)
-	if !strings.Contains(got, "A: one thing") {
-		t.Errorf("summary = %q, want entity A", got)
-	}
-	if strings.Contains(got, "B") {
-		t.Errorf("summary should skip empty-description entity, got %q", got)
-	}
-}
-
 func TestKnowledgeCompiler_Alias_Mindmap(t *testing.T) {
 	installMockDeps(t)
 	// "mind_map" is the deprecated alias for "mindmap"; both resolve to the
 	// implemented mindmap variant and must run (not ErrUnknownVariant / stub).
-	c, err := NewKnowledgeCompilerComponent("KnowledgeCompiler", map[string]any{
+	c, err := NewKnowledgeCompilerComponent("Compiler", map[string]any{
 		"compilation_template_id": "mind_map", "llm_id": "llm1", "embedding_model": "emb1",
 	})
 	if err != nil {
@@ -406,7 +303,7 @@ func runVariant(t *testing.T, variant string, extra map[string]any) []map[string
 	for k, v := range extra {
 		params[k] = v
 	}
-	c, err := NewKnowledgeCompilerComponent("KnowledgeCompiler", params)
+	c, err := NewKnowledgeCompilerComponent("Compiler", params)
 	if err != nil {
 		t.Fatalf("NewKnowledgeCompilerComponent(%s): %v", variant, err)
 	}
@@ -470,6 +367,174 @@ func TestKnowledgeCompiler_Wiki_EndToEnd(t *testing.T) {
 	}
 }
 
+// strictScopeWikiMapVersions mimics the production DocStore-backed Wiki MAP
+// version cache (knowledge_compile.wikiMapVersionStore): any access with an
+// empty tenant or dataset scope fails loudly instead of degrading. It also
+// records which entry points a run exercised, so tests can prove the versioned
+// path was taken (or fully skipped) and that every persisted write carries
+// both scope ids.
+type strictScopeWikiMapVersions struct {
+	mu   sync.Mutex
+	gets int
+	puts []common.WikiMapVersion
+}
+
+func (s *strictScopeWikiMapVersions) GetWikiMapVersions(_ context.Context, tenantID, datasetID string, _ []string) (map[string][]byte, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.gets++
+	if strings.TrimSpace(tenantID) == "" || strings.TrimSpace(datasetID) == "" {
+		return nil, errors.New("load Wiki MAP versions: tenant_id and dataset_id are required")
+	}
+	return map[string][]byte{}, nil
+}
+
+func (s *strictScopeWikiMapVersions) PutWikiMapVersions(_ context.Context, versions []common.WikiMapVersion) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.puts = append(s.puts, versions...)
+	for _, version := range versions {
+		if version.TenantID == "" || version.DatasetID == "" {
+			return errors.New("save Wiki MAP version: key, tenant_id, and dataset_id are required")
+		}
+	}
+	return nil
+}
+
+func (s *strictScopeWikiMapVersions) storeAccess() (gets, puts int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.gets, len(s.puts)
+}
+
+// invokeWikiCompiler runs one Compiler/wiki invocation over the prose fixture
+// shared by the scope-guard tests below and returns the emitted chunk maps.
+func invokeWikiCompiler(t *testing.T, inputs map[string]any) []map[string]any {
+	t.Helper()
+	c, err := NewKnowledgeCompilerComponent("Compiler", map[string]any{
+		"compilation_template_id": "tpl-wiki", "llm_id": "llm1", "embedding_model": "emb1",
+	})
+	if err != nil {
+		t.Fatalf("NewKnowledgeCompilerComponent: %v", err)
+	}
+	out, err := c.Invoke(context.Background(), nil, inputs)
+	if err != nil {
+		t.Fatalf("Invoke: %v", err)
+	}
+	raw, ok := out["chunks"].([]any)
+	if !ok {
+		t.Fatalf("chunks = %T, want []any", out["chunks"])
+	}
+	chunks := make([]map[string]any, 0, len(raw))
+	for _, r := range raw {
+		if cm, ok := r.(map[string]any); ok {
+			chunks = append(chunks, cm)
+		}
+	}
+	return chunks
+}
+
+func hasWikiPageChunk(chunks []map[string]any) bool {
+	for _, cm := range chunks {
+		if kind, _ := cm["kc_kind"].(string); kind == "page" {
+			return true
+		}
+	}
+	return false
+}
+
+func wikiScopeFixtureChunks() []any {
+	return []any{
+		map[string]any{"id": "c1", "text": "The quick brown fox jumps over the lazy dog near the river bank."},
+		map[string]any{"id": "c2", "text": "A red fox and a lazy dog rest beside a calm river at dawn."},
+	}
+}
+
+func installStrictScopeWikiDeps(t *testing.T, store *strictScopeWikiMapVersions) {
+	t.Helper()
+	common.SetDepsResolver(func(tenantID, _, _ string) (common.Deps, error) {
+		return common.Deps{
+			Chat:            proseChat{},
+			Embed:           mockEmbedder{dim: 8},
+			WikiMapVersions: store,
+			TenantID:        tenantID,
+		}, nil
+	})
+	t.Cleanup(func() { common.SetDepsResolver(nil) })
+	installVariantTemplateResolver(t, "wiki")
+}
+
+// TestKnowledgeCompiler_Wiki_DebugRunWithoutDataset reproduces the canvas
+// debug (dry-run) scenario from the field report: a dataflow canvas run
+// (File → Parser → Chunker → Compiler/wiki) executes with tenant_id but no
+// kb_id, because the debug TaskContext deliberately carries no KB. The wiki
+// variant must run cache-less there instead of failing on the DocStore-backed
+// MAP version cache, keeping debug runs side-effect free (same contract as
+// the tokenizer skipping embedding and the executor skipping persistence).
+// Both guard variants are covered: tenant without dataset (the field report)
+// and neither scope at all. In both, the strict-scope store must never be
+// touched — any access would fail the run (the pre-fix behavior).
+func TestKnowledgeCompiler_Wiki_DebugRunWithoutDataset(t *testing.T) {
+	store := &strictScopeWikiMapVersions{}
+	installStrictScopeWikiDeps(t, store)
+
+	// Inputs mirror a canvas debug run: tenant_id present, no dataset_id/kb_id.
+	chunks := invokeWikiCompiler(t, map[string]any{
+		"chunks":    wikiScopeFixtureChunks(),
+		"doc_id":    "d1",
+		"tenant_id": "t1",
+	})
+	if !hasWikiPageChunk(chunks) {
+		t.Fatalf("debug wiki run (tenant, no dataset): no 'page' chunk; got %d chunks", len(chunks))
+	}
+	if gets, puts := store.storeAccess(); gets != 0 || puts != 0 {
+		t.Fatalf("debug wiki run (tenant, no dataset) touched the version cache: gets=%d puts=%d, want 0/0", gets, puts)
+	}
+
+	// Neither scope present must also stay on the cache-less path.
+	chunks = invokeWikiCompiler(t, map[string]any{
+		"chunks": wikiScopeFixtureChunks(),
+		"doc_id": "d1",
+	})
+	if !hasWikiPageChunk(chunks) {
+		t.Fatalf("debug wiki run (no scope): no 'page' chunk; got %d chunks", len(chunks))
+	}
+	if gets, puts := store.storeAccess(); gets != 0 || puts != 0 {
+		t.Fatalf("debug wiki run (no scope) touched the version cache: gets=%d puts=%d, want 0/0", gets, puts)
+	}
+}
+
+// TestKnowledgeCompiler_Wiki_VersionedMapWritesAreScoped covers the other
+// branch of the runMap scope guard: a production-shaped run (tenant_id and
+// dataset_id both present) takes the versioned MAP path, and every MAP version
+// it persists carries both scope ids — the strict-scope invariant the
+// DocStore-backed store enforces on real writes.
+func TestKnowledgeCompiler_Wiki_VersionedMapWritesAreScoped(t *testing.T) {
+	store := &strictScopeWikiMapVersions{}
+	installStrictScopeWikiDeps(t, store)
+
+	chunks := invokeWikiCompiler(t, map[string]any{
+		"chunks":     wikiScopeFixtureChunks(),
+		"doc_id":     "d1",
+		"tenant_id":  "t1",
+		"dataset_id": "kb1",
+	})
+	if !hasWikiPageChunk(chunks) {
+		t.Fatalf("versioned wiki run: no 'page' chunk; got %d chunks", len(chunks))
+	}
+	if gets, _ := store.storeAccess(); gets == 0 {
+		t.Fatal("versioned wiki run never read the MAP version cache; the versioned path was not taken")
+	}
+	if _, puts := store.storeAccess(); puts == 0 {
+		t.Fatal("versioned wiki run persisted no MAP versions")
+	}
+	for _, version := range store.puts {
+		if version.TenantID != "t1" || version.DatasetID != "kb1" {
+			t.Fatalf("MAP version write missing scope: tenant=%q dataset=%q, want t1/kb1", version.TenantID, version.DatasetID)
+		}
+	}
+}
+
 func TestKnowledgeCompiler_Tree_EndToEnd(t *testing.T) {
 	installProseDeps(t)
 	// watershed (default tree_order): zero external clustering dependency.
@@ -503,21 +568,27 @@ func TestKnowledgeCompiler_Tree_EndToEnd(t *testing.T) {
 
 func TestKnowledgeCompiler_Mindmap_EndToEnd(t *testing.T) {
 	installProseDeps(t)
-	// The proseChat reply is flat text; parseOutline still yields a root + the
-	// reply as a child node, so chunks are non-empty and parent-linked.
+	// The proseChat reply is flat text; ShapeTree yields a bare root (no parsed
+	// children). Mindmap now emits entity/relation rows (plan §1.2): every node
+	// is an entity, every parent→child edge a relation. With a flat reply there
+	// is at least one entity (the root) and it must carry name_kwd +
+	// knowledge_graph_kwd="entity" (the structure-graph storage contract).
 	chunks := runVariant(t, "mindmap", nil)
-	// Root chunk must have empty parent_kwd and kind "root".
-	var root map[string]any
+	entityCount := 0
 	for _, c := range chunks {
-		if kind, _ := c["kc_kind"].(string); kind == "root" {
-			root = c
+		kind, _ := c["kc_kind"].(string)
+		if kind == "entity" {
+			entityCount++
+			if _, ok := c["name_kwd"]; !ok {
+				t.Fatalf("mindmap entity chunk missing name_kwd: %+v", c)
+			}
+			if kg, _ := c["knowledge_graph_kwd"].(string); kg != "entity" {
+				t.Fatalf("mindmap entity chunk knowledge_graph_kwd = %q, want entity", kg)
+			}
 		}
 	}
-	if root == nil {
-		t.Fatalf("mindmap: no root chunk")
-	}
-	if pid, _ := root["parent_kwd"].(string); pid != "" {
-		t.Fatalf("mindmap: root parent_kwd = %q, want empty", pid)
+	if entityCount == 0 {
+		t.Fatalf("mindmap: no entity chunks; got %d chunks", len(chunks))
 	}
 }
 
@@ -529,7 +600,7 @@ func TestKnowledgeCompiler_EmitsChunks(t *testing.T) {
 	installMockDeps(t)
 	installVariantTemplateResolver(t, "structure")
 
-	c, err := NewKnowledgeCompilerComponent("KnowledgeCompiler", map[string]any{
+	c, err := NewKnowledgeCompilerComponent("Compiler", map[string]any{
 		"compilation_template_id": "tpl-structure", "llm_id": "llm1", "embedding_model": "emb1",
 	})
 	if err != nil {
@@ -586,7 +657,7 @@ func TestKnowledgeCompiler_TemplateIDsAndProvenance(t *testing.T) {
 	installMockDeps(t)
 	installVariantTemplateResolver(t, "structure")
 
-	c, err := NewKnowledgeCompilerComponent("KnowledgeCompiler", map[string]any{
+	c, err := NewKnowledgeCompilerComponent("Compiler", map[string]any{
 		"compilation_template_id": "tpl-structure",
 		"llm_id":                  "llm1",
 		"embedding_model":         "emb1",
@@ -670,7 +741,7 @@ func (m constEmbedder) Encode(_ context.Context, texts []string) ([][]float32, e
 func TestKnowledgeCompiler_Tree_DegenerateNoInfiniteLoop(t *testing.T) {
 	installProseDeps(t)
 	installVariantTemplateResolver(t, "tree")
-	c, err := NewKnowledgeCompilerComponent("KnowledgeCompiler", map[string]any{
+	c, err := NewKnowledgeCompilerComponent("Compiler", map[string]any{
 		"compilation_template_id": "tpl-tree", "llm_id": "llm1", "embedding_model": "emb1",
 		"extra": map[string]any{"tree_order": 4},
 	})
@@ -725,8 +796,8 @@ func TestKnowledgeCompiler_Wiki_HistoricalDedupDropsDuplicates(t *testing.T) {
 	t.Cleanup(func() { common.SetDepsResolver(nil) })
 
 	installVariantTemplateResolver(t, "wiki")
-	c, err := NewKnowledgeCompilerComponent("KnowledgeCompiler", map[string]any{
-		"compilation_template_id": "tpl-wiki", "llm_id": "llm1", "embedding_model": "emb1",
+	c, err := NewKnowledgeCompilerComponent("Compiler", map[string]any{
+		"compilation_template_id": "tpl-wiki", "llm_id": "llm1", "embedding_model": "emb1", "plan": true,
 	})
 	if err != nil {
 		t.Fatalf("NewKnowledgeCompilerComponent: %v", err)
@@ -770,7 +841,7 @@ func TestKnowledgeCompiler_Wiki_UpdateMergesExistingPage(t *testing.T) {
 			TenantID: tenantID,
 			WikiPages: wikiStoreTestStub{page: &common.WikiPageCandidate{
 				ID:           "existing-1",
-				Slug:         "entity/alpha",
+				Slug:         "entity/person/alpha",
 				Title:        "Alpha",
 				PageType:     "entity",
 				Topic:        "Alpha",
@@ -784,8 +855,8 @@ func TestKnowledgeCompiler_Wiki_UpdateMergesExistingPage(t *testing.T) {
 	t.Cleanup(func() { common.SetDepsResolver(nil) })
 
 	installVariantTemplateResolver(t, "wiki")
-	c, err := NewKnowledgeCompilerComponent("KnowledgeCompiler", map[string]any{
-		"compilation_template_id": "tpl-wiki", "llm_id": "llm1", "embedding_model": "emb1",
+	c, err := NewKnowledgeCompilerComponent("Compiler", map[string]any{
+		"compilation_template_id": "tpl-wiki", "llm_id": "llm1", "embedding_model": "emb1", "plan": true,
 	})
 	if err != nil {
 		t.Fatalf("NewKnowledgeCompilerComponent: %v", err)
@@ -811,7 +882,7 @@ func TestKnowledgeCompiler_Wiki_UpdateMergesExistingPage(t *testing.T) {
 		if !ok {
 			continue
 		}
-		if cm["compile_kwd"] == "artifact_page" && cm["kc_kind"] == "page" && cm["slug_kwd"] == "entity/alpha" {
+		if cm["compile_kwd"] == "wiki_page" && cm["kc_kind"] == "page" && cm["slug_kwd"] == "entity/person/alpha" {
 			page = cm
 			break
 		}
@@ -865,7 +936,7 @@ func TestKnowledgeCompiler_Wiki_HistoricalDedupScopedByDataset(t *testing.T) {
 	t.Cleanup(func() { common.SetDepsResolver(nil) })
 
 	installVariantTemplateResolver(t, "wiki")
-	c, err := NewKnowledgeCompilerComponent("KnowledgeCompiler", map[string]any{
+	c, err := NewKnowledgeCompilerComponent("Compiler", map[string]any{
 		"compilation_template_id": "tpl-wiki", "llm_id": "llm1", "embedding_model": "emb1",
 		"enable_historical_dedup": true,
 	})
@@ -937,7 +1008,7 @@ func (wikiUpdateChat) Chat(_ context.Context, req common.ChatRequest) (*common.C
 }`}, nil
 	case req.JSONMode && strings.Contains(req.UserPrompt, "Return a JSON compilation plan"):
 		return &common.ChatResponse{Content: `{
-  "pages":[{"action":"CREATE","slug":"entity/alpha","title":"Alpha","page_type":"entity","topic":"Alpha","entity_names":["Alpha"],"related_kb_pages":[],"priority":1,"lead":"Alpha overview","sections":[{"heading":"Overview","points":["Alpha overview"]}]}],
+  "pages":[{"action":"CREATE","slug":"entity/person/alpha","title":"Alpha","page_type":"entity","topic":"Alpha","entity_names":["Alpha"],"related_kb_pages":[],"priority":1,"lead":"Alpha overview","sections":[{"heading":"Overview","points":["Alpha overview"]}]}],
   "estimated_page_count":1,
   "compilation_notes":"ok"
 }`}, nil
@@ -946,7 +1017,7 @@ func (wikiUpdateChat) Chat(_ context.Context, req common.ChatRequest) (*common.C
 	case strings.Contains(req.UserPrompt, "Existing page content"):
 		return &common.ChatResponse{Content: "# Alpha\n\nAlpha launched a new process in 2026.\n\n## See also\n\n[[concept/alpha-protocol|Alpha Protocol]]"}, nil
 	default:
-		return &common.ChatResponse{Content: `{"action":"UPDATE","slug":"entity/alpha","reason":"same entity"}`}, nil
+		return &common.ChatResponse{Content: `{"action":"UPDATE","slug":"entity/person/alpha","reason":"same entity"}`}, nil
 	}
 }
 
@@ -980,7 +1051,7 @@ func TestKnowledgeCompiler_Structure_FencedJSONNotDropped(t *testing.T) {
 	t.Cleanup(func() { common.SetDepsResolver(nil) })
 
 	installVariantTemplateResolver(t, "structure")
-	c, err := NewKnowledgeCompilerComponent("KnowledgeCompiler", map[string]any{
+	c, err := NewKnowledgeCompilerComponent("Compiler", map[string]any{
 		"compilation_template_id": "tpl-structure", "llm_id": "llm1", "embedding_model": "emb1",
 	})
 	if err != nil {
@@ -1020,7 +1091,7 @@ func TestKnowledgeCompiler_Structure_MalformedJSONFailsLoud(t *testing.T) {
 	t.Cleanup(func() { common.SetDepsResolver(nil) })
 
 	installVariantTemplateResolver(t, "structure")
-	c, err := NewKnowledgeCompilerComponent("KnowledgeCompiler", map[string]any{
+	c, err := NewKnowledgeCompilerComponent("Compiler", map[string]any{
 		"compilation_template_id": "tpl-structure", "llm_id": "llm1", "embedding_model": "emb1",
 	})
 	if err != nil {
@@ -1046,7 +1117,7 @@ func TestKnowledgeCompiler_PassThroughEnvelope(t *testing.T) {
 	installMockDeps(t)
 	installVariantTemplateResolver(t, "structure")
 
-	c, err := NewKnowledgeCompilerComponent("KnowledgeCompiler", map[string]any{
+	c, err := NewKnowledgeCompilerComponent("Compiler", map[string]any{
 		"compilation_template_id": "tpl-structure", "llm_id": "llm1", "embedding_model": "emb1",
 	})
 	if err != nil {
@@ -1082,7 +1153,7 @@ func TestKnowledgeCompiler_PassThroughEnvelope(t *testing.T) {
 
 // groupResolverStub maps every requested group id to a fixed pair of template
 // ids, standing in for the production DB-backed group service.
-func groupResolverStub(_ context.Context, _ string, groupIDs []string) ([]string, error) {
+func groupResolverStub(_ context.Context, _ *gorm.DB, _ string, groupIDs []string) ([]string, error) {
 	var out []string
 	for _, g := range groupIDs {
 		out = append(out, "tpl-"+g+"-a", "tpl-"+g+"-b")
@@ -1099,8 +1170,8 @@ func TestKnowledgeCompiler_GroupIDsResolvedToTemplateIDs(t *testing.T) {
 	installMockDeps(t)
 	// The group resolves to two concrete template ids; each is compiled as its
 	// own spec, so the TemplateResolver must return a valid kind for them.
-	// Override the package stub and restore it afterwards.
-	common.SetTemplateResolver(func(ctx context.Context, tenantID, templateID string) (common.TemplateInfo, error) {
+	// Override the package stub and restore it afterward.
+	common.SetTemplateResolver(func(ctx context.Context, db *gorm.DB, tenantID, templateID string) (common.TemplateInfo, error) {
 		kind := templateID
 		if strings.HasPrefix(templateID, "tpl-grp1") {
 			kind = "structure"
@@ -1114,7 +1185,7 @@ func TestKnowledgeCompiler_GroupIDsResolvedToTemplateIDs(t *testing.T) {
 
 	// compilation_template_group_id (not the obsolete plural list) selects the
 	// group; compilation_template_id is absent so the group path is taken.
-	c, err := NewKnowledgeCompilerComponent("KnowledgeCompiler", map[string]any{
+	c, err := NewKnowledgeCompilerComponent("Compiler", map[string]any{
 		"compilation_template_group_id": "grp1",
 		"llm_id":                        "llm1",
 		"embedding_model":               "emb1",
@@ -1175,7 +1246,7 @@ func TestKnowledgeCompiler_GroupIDsWithoutResolverFailsLoud(t *testing.T) {
 	installMockDeps(t)
 	common.SetGroupResolver(nil) // ensure no resolver is installed
 
-	c, err := NewKnowledgeCompilerComponent("KnowledgeCompiler", map[string]any{
+	c, err := NewKnowledgeCompilerComponent("Compiler", map[string]any{
 		"compilation_template_group_id": "grp1",
 		"llm_id":                        "llm1",
 		"embedding_model":               "emb1",
@@ -1204,7 +1275,7 @@ func TestKnowledgeCompiler_GroupIDsWithoutResolverFailsLoud(t *testing.T) {
 // register a synthetic "tpl-<variant>" id that maps to the desired kind.
 // Production wiring installs the real DB-backed resolvers (see
 // internal/ingestion/task/knowledge_compiler_wiring.go).
-var testTemplateResolver common.TemplateResolver = func(ctx context.Context, tenantID, templateID string) (common.TemplateInfo, error) {
+var testTemplateResolver common.TemplateResolver = func(ctx context.Context, db *gorm.DB, tenantID, templateID string) (common.TemplateInfo, error) {
 	return common.TemplateInfo{ID: templateID, Kind: templateID, Config: map[string]any{}}, nil
 }
 
@@ -1217,17 +1288,206 @@ var testTemplateResolver common.TemplateResolver = func(ctx context.Context, ten
 func installVariantTemplateResolver(t *testing.T, variant string) {
 	t.Helper()
 	prev := testTemplateResolver
-	common.SetTemplateResolver(func(ctx context.Context, tenantID, templateID string) (common.TemplateInfo, error) {
+	common.SetTemplateResolver(func(ctx context.Context, db *gorm.DB, tenantID, templateID string) (common.TemplateInfo, error) {
 		if templateID == "tpl-"+variant {
 			return common.TemplateInfo{ID: templateID, Kind: variant, Config: map[string]any{}}, nil
 		}
-		return prev(ctx, tenantID, templateID)
+		return prev(ctx, db, tenantID, templateID)
 	})
 	t.Cleanup(func() { common.SetTemplateResolver(testTemplateResolver) })
 }
 
-var testGroupResolver common.GroupResolver = func(ctx context.Context, tenantID string, groupIDs []string) ([]string, error) {
+var testGroupResolver common.GroupResolver = func(ctx context.Context, db *gorm.DB, tenantID string, groupIDs []string) ([]string, error) {
 	return groupIDs, nil
+}
+
+// TestKnowledgeCompiler_RegistryResolvesUnifiedName locks the unified-name
+// contract: the knowledge-compilation node is registered under "Compiler"
+// (matching the Python side rag/flow/compiler/compiler.py component_name), so
+// both a Python-saved canvas and Go's built-in ingestion templates resolve to
+// the same KnowledgeCompilerComponent through runtime.DefaultRegistry.
+func TestKnowledgeCompiler_RegistryResolvesUnifiedName(t *testing.T) {
+	factory, category, _, ok := runtime.DefaultRegistry.Lookup("Compiler")
+	if !ok {
+		t.Fatal("runtime registry has no component \"Compiler\"; the Python canvas and Go templates both use this name")
+	}
+	if category != runtime.CategoryIngestion {
+		t.Fatalf("component \"Compiler\" category = %q, want %q", category, runtime.CategoryIngestion)
+	}
+	c, err := factory("Compiler", map[string]any{"compilation_template_id": "tree", "llm_id": "llm1", "embedding_model": "emb1"})
+	if err != nil {
+		t.Fatalf("factory(\"Compiler\"): %v", err)
+	}
+	if _, ok := c.(*KnowledgeCompilerComponent); !ok {
+		t.Fatalf("factory(\"Compiler\") produced %T, want *KnowledgeCompilerComponent", c)
+	}
+}
+
+// TestKnowledgeCompiler_TenantFromGlobals locks the tenant-resolution contract:
+// in the production canvas run the run-level tenant_id lives in the shared
+// CanvasState.Globals bag (seeded by the pipeline at run start), not necessarily
+// in the KnowledgeCompiler's own input map. The component must resolve it through
+// globals.GlobalOrInput; otherwise the template/group lookup gets an empty tenant
+// and fails with "compilation_template_group ... not found for tenant".
+func TestKnowledgeCompiler_TenantFromGlobals(t *testing.T) {
+	// Attach a CanvasState to the context and seed the run-level tenant id into
+	// the global bag, as the pipeline does at run start.
+	ctx := runtime.WithState(context.Background(), runtime.NewCanvasState("run-id", "sess-id"))
+	globals.SeedIngestionGlobals(ctx, map[string]any{"tenant_id": "tenant-from-globals"})
+
+	// Install a template resolver that records the tenant id it is called with.
+	var gotTenant string
+	prev := testTemplateResolver
+	common.SetTemplateResolver(func(ctx context.Context, db *gorm.DB, tenantID, templateID string) (common.TemplateInfo, error) {
+		gotTenant = tenantID
+		return common.TemplateInfo{ID: templateID, Kind: "structure", Config: map[string]any{}}, nil
+	})
+	t.Cleanup(func() { common.SetTemplateResolver(prev) })
+
+	c, err := NewKnowledgeCompilerComponent("Compiler", map[string]any{"compilation_template_id": "tpl-x"})
+	if err != nil {
+		t.Fatalf("construct: %v", err)
+	}
+
+	// Invoke without tenant_id in the input map; the tenant must come from the
+	// global bag. The template resolution (and thus gotTenant) happens early in
+	// Invoke, before the variant's LLM/embedding deps are exercised — which is
+	// all this test needs to assert.
+	_, _ = c.Invoke(ctx, nil, map[string]any{
+		"llm_id":          "llm1",
+		"chunks":          []any{map[string]any{"id": "c1", "content_with_weight": "alpha beta", "text": "alpha beta"}},
+		"embedding_model": "emb1",
+	})
+	if gotTenant != "tenant-from-globals" {
+		t.Fatalf("template resolver saw tenant %q, want %q (tenant_id must be read from CanvasState.Globals)", gotTenant, "tenant-from-globals")
+	}
+}
+
+func TestOverlayTemplateConfigPlanPrecedence(t *testing.T) {
+	boolPtr := func(value bool) *bool { return &value }
+
+	cases := []struct {
+		name    string
+		initial *bool
+		cfg     map[string]any
+		want    bool
+	}{
+		{
+			name: "unset_uses_template_plan",
+			cfg:  map[string]any{"plan": true},
+			want: true,
+		},
+		{
+			name: "no_plan_disables_plan",
+			cfg:  map[string]any{"no_plan": true, "plan": true},
+			want: false,
+		},
+		{
+			name:    "explicit_dsl_false_overrides_template",
+			initial: boolPtr(false),
+			cfg:     map[string]any{"plan": true},
+			want:    false,
+		},
+		{
+			name:    "explicit_dsl_true_overrides_no_plan",
+			initial: boolPtr(true),
+			cfg:     map[string]any{"no_plan": true},
+			want:    true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			param := common.Param{Plan: tc.initial}
+			overlayTemplateConfig(&param, tc.cfg)
+			if param.Plan == nil {
+				t.Fatal("Plan = nil after template config")
+			}
+			if *param.Plan != tc.want {
+				t.Errorf("Plan = %t, want %t", *param.Plan, tc.want)
+			}
+		})
+	}
+}
+
+// TestKnowledgeCompiler_BuildInputsAcceptsMapSliceChunks locks the chunk-carrier
+// contract: the upstream chunker hands chunks over as []map[string]any (see the
+// chunk map shape {"id","text","ck_type","doc_type_kwd","tk_nums"} observed from
+// the running pipeline), not as []any of map. buildInputs must accept both
+// shapes; a strict []any assertion alone would silently drop every chunk and
+// leave the knowledge compiler with empty input (compiling nothing yet still
+// reporting success).
+func TestKnowledgeCompiler_BuildInputsAcceptsMapSliceChunks(t *testing.T) {
+	in, err := buildInputs(map[string]any{
+		"chunks": []map[string]any{
+			{"id": "c1", "text": "《三国演义》", "ck_type": "text"},
+			{"id": "c2", "text": "滚滚长江东逝水", "ck_type": "text"},
+		},
+	}, common.Param{})
+	if err != nil {
+		t.Fatalf("buildInputs: %v", err)
+	}
+	if len(in.Chunks) != 2 {
+		t.Fatalf("buildInputs produced %d chunks, want 2 (upstream sends []map[string]any)", len(in.Chunks))
+	}
+	if in.Chunks[0].ID != "c1" || in.Chunks[0].Text != "《三国演义》" {
+		t.Fatalf("chunk[0] = %+v, want id=c1 text=《三国演义》", in.Chunks[0])
+	}
+
+	// The legacy []any-of-map shape must still work.
+	in2, err := buildInputs(map[string]any{
+		"chunks": []any{map[string]any{"id": "x", "text": "t"}},
+	}, common.Param{})
+	if err != nil {
+		t.Fatalf("buildInputs ([]any): %v", err)
+	}
+	if len(in2.Chunks) != 1 || in2.Chunks[0].ID != "x" {
+		t.Fatalf("buildInputs ([]any) produced %+v, want 1 chunk id=x", in2.Chunks)
+	}
+}
+
+// TestProductsToChunkDocs_PageVsSectionCompileKWD locks the page/section
+// discriminator: a wiki page product is stamped compile_kwd="wiki_page" and a
+// wiki section product compile_kwd="wiki_section", so a page search on
+// compile_kwd="wiki_page" (engine_service / kcWikiPageStore) returns pages only.
+func TestProductsToChunkDocs_PageVsSectionCompileKWD(t *testing.T) {
+	page := common.Product{
+		ID: "page-id", DocID: "d1", TenantID: "t1", Variant: common.VariantWiki,
+		Content: "# Alpha\n\nBody", ParentID: "",
+		Meta: map[string]any{"kind": "page", "slug": "entity/alpha", "title": "Alpha", "page_type": "entity", "source_chunk_ids": []string{"c1"}},
+	}
+	section := common.Product{
+		ID: "section-id", DocID: "d1", TenantID: "t1", Variant: common.VariantWiki,
+		Content: "Section body", ParentID: "page-id",
+		Meta: map[string]any{"kind": "section", "slug": "overview", "page_slug": "entity/alpha", "section_level": 1, "source_chunk_ids": []string{"c1"}},
+	}
+	docs, err := productsToChunkDocs([]common.Product{page, section})
+	if err != nil {
+		t.Fatalf("productsToChunkDocs: %v", err)
+	}
+	var pageKWD, sectionKWD string
+	var sectionParent string
+	for _, d := range docs {
+		// Product.Meta is preserved under the kc_* round-trip keys; the page/
+		// section kind lives at "kc_kind".
+		kind, _ := d.GetExtraString("kc_kind")
+		if kind == "page" {
+			pageKWD, _ = d.GetExtraString("compile_kwd")
+		}
+		if kind == "section" {
+			sectionKWD, _ = d.GetExtraString("compile_kwd")
+			sectionParent, _ = d.GetExtraString("parent_kwd")
+		}
+	}
+	if pageKWD != "wiki_page" {
+		t.Errorf("page compile_kwd = %q, want wiki_page", pageKWD)
+	}
+	if sectionKWD != "wiki_section" {
+		t.Errorf("section compile_kwd = %q, want wiki_section (schema-backed page/section discriminator)", sectionKWD)
+	}
+	if sectionParent != "page-id" {
+		t.Errorf("section parent_kwd = %q, want page-id", sectionParent)
+	}
 }
 
 // TestMain installs the stub resolvers for the variant unit tests.

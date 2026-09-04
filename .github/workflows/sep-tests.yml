@@ -30,18 +30,30 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}${{ github.event.action == 'labeled' && github.event.label.name != 'ci' && format('-ignore-{0}', github.run_id) || '' }}
   cancel-in-progress: true
 
+# infiniflow/onnxruntime_go is a fresh org mirror that is not yet present in the
+# public Go checksum database / proxy. Mark it private so Go skips the proxy and
+# sumdb for this path and resolves it directly from GitHub (Go's default
+# GOPROXY keeps the ",direct" fallback). Required for the in-process DeepDoc
+# backend to build against github.com/infiniflow/onnxruntime_go.
+env:
+  GOPRIVATE: github.com/infiniflow/onnxruntime_go
+
 jobs:
   ragflow_preflight:
     name: ragflow_preflight
     # https://docs.github.com/en/actions/using-jobs/using-conditions-to-control-job-execution
     # https://github.com/orgs/community/discussions/26261
     if: ${{ github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || (github.event.pull_request.draft == false && contains(github.event.pull_request.labels.*.name, 'ci') && (github.event.action != 'labeled' || github.event.label.name == 'ci')) }}
+    permissions:
+      actions: write
+      contents: read
     runs-on: [ "self-hosted", "ragflow-test" ]
     outputs:
       http_api_test_level: ${{ steps.test_level.outputs.http_api_test_level }}
       has_go_changes: ${{ steps.detect_changes.outputs.has_go_changes }}
       has_python_changes: ${{ steps.detect_changes.outputs.has_python_changes }}
       has_web_changes: ${{ steps.detect_changes.outputs.has_web_changes }}
+      has_native_deepdoc_changes: ${{ steps.detect_changes.outputs.has_native_deepdoc_changes }}
       api_proxy_schemes: ${{ steps.detect_changes.outputs.api_proxy_schemes }}
     steps:
       - name: Ensure workspace ownership
@@ -131,6 +143,13 @@ jobs:
 #            fi
 #          fi
 
+      # lefthook's web-checks hook resolves oxlint/oxfmt through
+      # tools/hooks/web_tools.sh, which needs node and npm on PATH.
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
       - name: Run Lefthook on changed files
         run: |
           set -euo pipefail
@@ -155,6 +174,10 @@ jobs:
             # applying --fix or `git add`, so CI only checks and reports
             # failures instead of rewriting the working tree.
             LEFTHOOK_CHECK_ONLY=1 lefthook run pre-commit --files-from-stdin --no-auto-install < "$changed_files"
+            # web-checks is a separate hook because it is not wired into local
+            # commits: it installs a Node toolchain that only CI has a reason to
+            # pay for. It is always check-only, so it needs no CHECK_ONLY flag.
+            lefthook run web-checks --files-from-stdin --no-auto-install < "$changed_files"
           fi
 
       - name: Set test level
@@ -176,11 +199,13 @@ jobs:
           has_go=false
           has_python=false
           has_web=false
+          has_native_deepdoc=false
 
           if [[ "${GITHUB_EVENT_NAME}" == "schedule" ]]; then
             has_go=true
             has_python=true
             has_web=true
+            has_native_deepdoc=true
           else
             if [[ "${GITHUB_EVENT_NAME}" == "pull_request" || "${GITHUB_EVENT_NAME}" == "pull_request_target" ]]; then
               CHANGED_FILES=$(git diff --name-only ${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }})
@@ -196,9 +221,11 @@ jobs:
             while IFS= read -r file; do
               case "$file" in
                 # Docker, test, SDK, and workflow changes can alter either server path.
-                Dockerfile|docker/**|.github/workflows/**|sdk/**)
+                # build.sh also controls the C++/native build, so it must trigger native backend.
+                Dockerfile|Dockerfile_ci|docker/**|.github/workflows/**|sdk/**|build.sh)
                   has_go=true
                   has_python=true
+                  has_native_deepdoc=true
                   ;;
                 test/unit_test/**)
                   has_python=true
@@ -207,7 +234,14 @@ jobs:
                   has_go=true
                   has_python=true
                   ;;
-                *.go|go.mod|go.sum|build.sh)              has_go=true ;;
+                # DeepDoc native backend (Go inference layer, C++ static lib, pinned testdata).
+                # Must come BEFORE the generic "*.go"/"*.py" rules, otherwise deepdoc/*.go
+                # would be caught by "*.go" first and never set has_native_deepdoc.
+                internal/deepdoc/**|internal/binding/cpp/**|internal/deepdoc/native/testdata.ref)
+                  has_go=true
+                  has_native_deepdoc=true
+                  ;;
+                *.go|go.mod|go.sum)                       has_go=true ;;
                 *.py|pyproject.toml|requirements*.txt)    has_python=true ;;
                 web/*)                                    has_web=true ;;
               esac
@@ -217,6 +251,7 @@ jobs:
               has_go=true
               has_python=true
               has_web=true
+              has_native_deepdoc=true
             fi
           fi
 
@@ -235,8 +270,9 @@ jobs:
           echo "has_go_changes=${has_go}"        >> $GITHUB_OUTPUT
           echo "has_python_changes=${has_python}" >> $GITHUB_OUTPUT
           echo "has_web_changes=${has_web}"       >> $GITHUB_OUTPUT
+          echo "has_native_deepdoc_changes=${has_native_deepdoc}" >> $GITHUB_OUTPUT
           echo "api_proxy_schemes=${api_proxy_schemes}" >> $GITHUB_OUTPUT
-          echo "Go: ${has_go}, Python: ${has_python}, Web: ${has_web}, proxy schemes: ${api_proxy_schemes}"
+          echo "Go: ${has_go}, Python: ${has_python}, Web: ${has_web}, Native DeepDoc: ${has_native_deepdoc}, proxy schemes: ${api_proxy_schemes}"
 
       - name: Prepare Python test environment
         if: steps.detect_changes.outputs.has_python_changes == 'true'
@@ -320,20 +356,76 @@ jobs:
         #
         # Excludes packages whose tests fail for environmental reasons
         # unrelated to the diff:
-        #   - internal/tokenizer: tests need /usr/share/infinity/resource
-        #     dict files, only mounted inside the docker builder, not
-        #     in the Go test environment.
+        #   - internal/tokenizer is split: the pure-Go BPE loader tests
+        #     (bpe_loader_test.go) run in the default tier; the C++ binding /
+        #     dict-dependent tests (tokenizer_test.go,
+        #     tokenizer_concurrent_test.go) and the on-disk anchor test
+        #     (bpe_loader_anchors_test.go) are tagged `manual` and need the
+        #     docker builder's /usr/share/infinity/resource, so they stay out
+        #     of the default run.
         run: |
           set -euo pipefail
+
+          # Provide the cl100k BPE table for the offline tokenizer loader.
+          # The loader reads <repo>/ragflow_deps/cl100k_base.tiktoken (or
+          # TIKTOKEN_CACHE_DIR). Try to fetch it directly from the upstream
+          # openai blob first (small ~1.6MB, reachable from the CI runner — the
+          # pre-PR code downloaded it on the fly, so the network path is known
+          # good). If the direct fetch fails (e.g. GFW), fall back to extracting
+          # it from the local infiniflow/ragflow_deps image *if already present*
+          # on the runner (no `docker pull`, since that huge image is first
+          # fetched at the later "Build ragflow:nightly" step). Best-effort: if
+          # neither source works, the loader still fails loudly (no silent
+          # 0-token degradation).
+          # tiktoken is already installed in runner
+          mkdir -p ragflow_deps
+          cp /opt/ragflow_deps/cl100k_base.tiktoken ragflow_deps/cl100k_base.tiktoken || true
+          if [ ! -f ragflow_deps/cl100k_base.tiktoken ]; then
+            mkdir -p ragflow_deps
+            if command -v curl >/dev/null 2>&1; then
+              if curl -fsSL -o ragflow_deps/cl100k_base.tiktoken \
+                https://openaipublic.blob.core.windows.net/encodings/cl100k_base.tiktoken; then
+                echo "tiktoken: cl100k table fetched via curl from openai blob"
+              else
+                echo "tiktoken: curl fetch failed (network/GFW); will try cached image"
+              fi
+            fi
+            if [ ! -f ragflow_deps/cl100k_base.tiktoken ] && docker image inspect infiniflow/ragflow_deps:latest >/dev/null 2>&1; then
+              CID=$(docker create infiniflow/ragflow_deps:latest true) || true
+              if [ -n "${CID:-}" ]; then
+                if docker cp "$CID":/cl100k_base.tiktoken ragflow_deps/cl100k_base.tiktoken 2>/dev/null; then
+                  echo "tiktoken: cl100k table copied from cached infiniflow/ragflow_deps image"
+                fi
+                docker rm -f "$CID" >/dev/null 2>&1 || true
+              fi
+            fi
+          fi
+          if [ -f ragflow_deps/cl100k_base.tiktoken ]; then
+            echo "tiktoken: cl100k table provisioned ($(wc -c < ragflow_deps/cl100k_base.tiktoken) bytes)"
+          else
+            echo "tiktoken: cl100k table NOT provisioned — offline loader will fail loudly"
+          fi
+
           PKGS=$(go list ./... 2>/dev/null \
             | grep -v '/internal/storage$' \
-            | grep -v '/internal/tokenizer$' \
             | grep -v '/internal/handler$' || true)
           if [ -z "$PKGS" ]; then
             ./build.sh --test
           else
             ./build.sh --test -- $PKGS
           fi
+
+      - name: Run ORT deps-download regression guard
+        if: env.API_PROXY_SCHEME == 'go'
+        # Pure-Python, local, needs no API keys or model downloads; guards the
+        # ONNX Runtime extraction logic the in-process (Go) DeepDoc backend build
+        # depends on (notably the version-bump path C2 hardened). Run it in
+        # isolation so the test/testcases conftest (which requires
+        # SILICONFLOW_API_KEY) cannot fail the collection.
+        run: |
+          set -euo pipefail
+          uv sync --python 3.13 --group test --frozen
+          uv run pytest ragflow_deps/test_download_go_deps.py -q
 
       - name: Build ragflow:nightly
         run: |
@@ -349,7 +441,7 @@ jobs:
             flock -w 10800 9 || { echo "Timed out waiting for the shared Docker build slot" >&2; exit 1; }
             echo "Acquired Docker build slot for ${DOC_ENGINE}/${API_PROXY_SCHEME}"
             ##sudo docker pull ubuntu:24.04
-            sudo DOCKER_BUILDKIT=1 docker build --build-arg NEED_MIRROR=1 --build-arg HTTPS_PROXY=${HTTPS_PROXY} --build-arg HTTP_PROXY=${HTTP_PROXY} --secret id=gitee_token,src=${GITEE_TOKEN_FILE} -f Dockerfile -t ${RAGFLOW_IMAGE} .
+            sudo DOCKER_BUILDKIT=1 docker build --build-arg NEED_MIRROR=1 --build-arg HTTPS_PROXY=${HTTPS_PROXY} --build-arg HTTP_PROXY=${HTTP_PROXY} --secret id=gitee_token,src=${GITEE_TOKEN_FILE} -f Dockerfile_ci -t ${RAGFLOW_IMAGE} .
           ) 9>"${BUILD_LOCK_FILE}"
           rm -f "${GITEE_TOKEN_FILE}"
 
@@ -364,9 +456,9 @@ jobs:
         working-directory: docker
         run: |
           set -euo pipefail
-          # install ss
           sudo chmod 1777 /tmp
-          sudo apt update && sudo apt install -y iproute2
+          ## ss already installed
+          ##sudo apt update && sudo apt install -y iproute2
           RUNNER_WORKSPACE_PREFIX=${RUNNER_WORKSPACE_PREFIX:-${HOME}}
           COMPOSE_PROJECT_NAME="${GITHUB_RUN_ID}-${DOC_ENGINE}-${API_PROXY_SCHEME}"
           echo "COMPOSE_PROJECT_NAME=${COMPOSE_PROJECT_NAME}" >> ${GITHUB_ENV}
@@ -576,7 +668,7 @@ jobs:
                  echo "SANDBOX_EXECUTOR_MANAGER_PORT=${SANDBOX_EXECUTOR_MANAGER_PORT}"
                  echo "SVR_WEB_HTTP_PORT=${SVR_WEB_HTTP_PORT}"
                  echo "SVR_WEB_HTTPS_PORT=${SVR_WEB_HTTPS_PORT}"
-                 echo "COMPOSE_PROFILES=${DOC_ENGINE},cpu,ragflow-go,tei-cpu,deepdoc"
+                 echo "COMPOSE_PROFILES=${DOC_ENGINE},cpu,ragflow-go,tei-cpu,deepdoc,metadata-mysql"
                  echo "TEI_MODEL=BAAI/bge-small-en-v1.5"
                  echo "RAGFLOW_IMAGE=${RAGFLOW_IMAGE}"
                  echo "DOC_ENGINE=${DOC_ENGINE}"
@@ -895,20 +987,76 @@ jobs:
         #
         # Excludes packages whose tests fail for environmental reasons
         # unrelated to the diff:
-        #   - internal/tokenizer: tests need /usr/share/infinity/resource
-        #     dict files, only mounted inside the docker builder, not
-        #     in the Go test environment.
+        #   - internal/tokenizer is split: the pure-Go BPE loader tests
+        #     (bpe_loader_test.go) run in the default tier; the C++ binding /
+        #     dict-dependent tests (tokenizer_test.go,
+        #     tokenizer_concurrent_test.go) and the on-disk anchor test
+        #     (bpe_loader_anchors_test.go) are tagged `manual` and need the
+        #     docker builder's /usr/share/infinity/resource, so they stay out
+        #     of the default run.
         run: |
           set -euo pipefail
+
+          # Provide the cl100k BPE table for the offline tokenizer loader.
+          # The loader reads <repo>/ragflow_deps/cl100k_base.tiktoken (or
+          # TIKTOKEN_CACHE_DIR). Try to fetch it directly from the upstream
+          # openai blob first (small ~1.6MB, reachable from the CI runner — the
+          # pre-PR code downloaded it on the fly, so the network path is known
+          # good). If the direct fetch fails (e.g. GFW), fall back to extracting
+          # it from the local infiniflow/ragflow_deps image *if already present*
+          # on the runner (no `docker pull`, since that huge image is first
+          # fetched at the later "Build ragflow:nightly" step). Best-effort: if
+          # neither source works, the loader still fails loudly (no silent
+          # 0-token degradation).
+          # tiktoken is already installed in runner
+          mkdir -p ragflow_deps
+          cp /opt/ragflow_deps/cl100k_base.tiktoken ragflow_deps/cl100k_base.tiktoken || true
+          if [ ! -f ragflow_deps/cl100k_base.tiktoken ]; then
+            mkdir -p ragflow_deps
+            if command -v curl >/dev/null 2>&1; then
+              if curl -fsSL -o ragflow_deps/cl100k_base.tiktoken \
+                https://openaipublic.blob.core.windows.net/encodings/cl100k_base.tiktoken; then
+                echo "tiktoken: cl100k table fetched via curl from openai blob"
+              else
+                echo "tiktoken: curl fetch failed (network/GFW); will try cached image"
+              fi
+            fi
+            if [ ! -f ragflow_deps/cl100k_base.tiktoken ] && docker image inspect infiniflow/ragflow_deps:latest >/dev/null 2>&1; then
+              CID=$(docker create infiniflow/ragflow_deps:latest true) || true
+              if [ -n "${CID:-}" ]; then
+                if docker cp "$CID":/cl100k_base.tiktoken ragflow_deps/cl100k_base.tiktoken 2>/dev/null; then
+                  echo "tiktoken: cl100k table copied from cached infiniflow/ragflow_deps image"
+                fi
+                docker rm -f "$CID" >/dev/null 2>&1 || true
+              fi
+            fi
+          fi
+          if [ -f ragflow_deps/cl100k_base.tiktoken ]; then
+            echo "tiktoken: cl100k table provisioned ($(wc -c < ragflow_deps/cl100k_base.tiktoken) bytes)"
+          else
+            echo "tiktoken: cl100k table NOT provisioned — offline loader will fail loudly"
+          fi
+
           PKGS=$(go list ./... 2>/dev/null \
             | grep -v '/internal/storage$' \
-            | grep -v '/internal/tokenizer$' \
             | grep -v '/internal/handler$' || true)
           if [ -z "$PKGS" ]; then
             ./build.sh --test
           else
             ./build.sh --test -- $PKGS
           fi
+
+      - name: Run ORT deps-download regression guard
+        if: env.API_PROXY_SCHEME == 'go'
+        # Pure-Python, local, needs no API keys or model downloads; guards the
+        # ONNX Runtime extraction logic the in-process (Go) DeepDoc backend build
+        # depends on (notably the version-bump path C2 hardened). Run it in
+        # isolation so the test/testcases conftest (which requires
+        # SILICONFLOW_API_KEY) cannot fail the collection.
+        run: |
+          set -euo pipefail
+          uv sync --python 3.13 --group test --frozen
+          uv run pytest ragflow_deps/test_download_go_deps.py -q
 
       - name: Build ragflow:nightly
         run: |
@@ -924,7 +1072,7 @@ jobs:
             flock -w 10800 9 || { echo "Timed out waiting for the shared Docker build slot" >&2; exit 1; }
             echo "Acquired Docker build slot for ${DOC_ENGINE}/${API_PROXY_SCHEME}"
             ##sudo docker pull ubuntu:24.04
-            sudo DOCKER_BUILDKIT=1 docker build --build-arg NEED_MIRROR=1 --build-arg HTTPS_PROXY=${HTTPS_PROXY} --build-arg HTTP_PROXY=${HTTP_PROXY} --secret id=gitee_token,src=${GITEE_TOKEN_FILE} -f Dockerfile -t ${RAGFLOW_IMAGE} .
+            sudo DOCKER_BUILDKIT=1 docker build --build-arg NEED_MIRROR=1 --build-arg HTTPS_PROXY=${HTTPS_PROXY} --build-arg HTTP_PROXY=${HTTP_PROXY} --secret id=gitee_token,src=${GITEE_TOKEN_FILE} -f Dockerfile_ci -t ${RAGFLOW_IMAGE} .
           ) 9>"${BUILD_LOCK_FILE}"
           rm -f "${GITEE_TOKEN_FILE}"
 
@@ -939,9 +1087,9 @@ jobs:
         working-directory: docker
         run: |
           set -euo pipefail
-          # install ss
           sudo chmod 1777 /tmp
-          sudo apt update && sudo apt install -y iproute2
+          ## ss already installed
+          ##sudo apt update && sudo apt install -y iproute2
           RUNNER_WORKSPACE_PREFIX=${RUNNER_WORKSPACE_PREFIX:-${HOME}}
           COMPOSE_PROJECT_NAME="${GITHUB_RUN_ID}-${DOC_ENGINE}-${API_PROXY_SCHEME}"
           echo "COMPOSE_PROJECT_NAME=${COMPOSE_PROJECT_NAME}" >> ${GITHUB_ENV}
@@ -1151,7 +1299,7 @@ jobs:
                  echo "SANDBOX_EXECUTOR_MANAGER_PORT=${SANDBOX_EXECUTOR_MANAGER_PORT}"
                  echo "SVR_WEB_HTTP_PORT=${SVR_WEB_HTTP_PORT}"
                  echo "SVR_WEB_HTTPS_PORT=${SVR_WEB_HTTPS_PORT}"
-                 echo "COMPOSE_PROFILES=${DOC_ENGINE},cpu,ragflow-go,tei-cpu,deepdoc"
+                 echo "COMPOSE_PROFILES=${DOC_ENGINE},cpu,ragflow-go,tei-cpu,deepdoc,metadata-mysql"
                  echo "TEI_MODEL=BAAI/bge-small-en-v1.5"
                  echo "RAGFLOW_IMAGE=${RAGFLOW_IMAGE}"
                  echo "DOC_ENGINE=${DOC_ENGINE}"
@@ -1397,3 +1545,86 @@ jobs:
               sudo docker network rm "${guard}" >/dev/null 2>&1 || true
             done
           fi
+
+  ragflow_native_backend:
+    name: ragflow_native_backend
+    # Runs AFTER both per-engine go jobs (which contain the doc-engine-specific
+    # server build + Python RESTFUL correctness runs). The DeepDoc native
+    # backend is doc-engine-independent, so running it ONCE here — instead of
+    # duplicated (and memory-competing) inside each go job — removes the
+    # redundant second -race pass and the concurrent -race OOM risk. Running it
+    # last also keeps a flaky -race OOM from ever obscuring the functional
+    # verdict produced by the go jobs.
+    needs: [ragflow_tests_infinity, ragflow_tests_elasticsearch]
+    # Skip unless DeepDoc native backend code/build/testdata actually changed.
+    if: ${{ (github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || (github.event.pull_request.draft == false && contains(github.event.pull_request.labels.*.name, 'ci') && (github.event.action != 'labeled' || github.event.label.name == 'ci'))) && needs.ragflow_preflight.outputs.has_native_deepdoc_changes == 'true' }}
+    runs-on: [ "self-hosted", "ragflow-test" ]
+    steps:
+      - name: Ensure workspace ownership
+        run: |
+          echo "Workflow triggered by ${{ github.event_name }}"
+          echo "chown -R ${USER} ${GITHUB_WORKSPACE}" && sudo chown -R ${USER} ${GITHUB_WORKSPACE}
+
+      - name: Check out code
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && format('refs/pull/{0}/merge', github.event.pull_request.number) || github.sha }}
+          fetch-depth: 0
+          fetch-tags: true
+          allow-unsafe-pr-checkout: true
+
+      - name: Build C++ static library (ragflow native backend)
+        # Produces librag_tokenizer_c_api.a with the re2 symbols renamed into
+        # the ragtokre2_ namespace (so it no longer collides with onnxruntime's
+        # bundled re2 copy at link time). Only the .a is needed for the native
+        # integration tests; the per-engine go jobs build the full server.
+        run: |
+          set -euo pipefail
+          BUILDER_CONTAINER=ragflow_build_${GITHUB_RUN_ID}_native_$(od -An -N4 -tx4 /dev/urandom | tr -d ' ')
+          cleanup_builder() {
+            if [[ -n "${BUILDER_CONTAINER:-}" ]]; then
+              sudo docker rm -f -v "${BUILDER_CONTAINER}" >/dev/null 2>&1 || true
+            fi
+          }
+          trap cleanup_builder EXIT
+
+          TZ=${TZ:-$(readlink -f /etc/localtime | awk -F '/zoneinfo/' '{print $2}')}
+          sudo docker run --privileged -d --name "${BUILDER_CONTAINER}" \
+            -e TZ="${TZ}" \
+            -e UV_INDEX=https://mirrors.aliyun.com/pypi/simple \
+            -v "${PWD}:/ragflow" \
+            -v "${PWD}/internal/binding/cpp/resource:/usr/share/infinity/resource" \
+            infiniflow/infinity_builder:ubuntu22_clang20
+          sudo docker exec "${BUILDER_CONTAINER}" bash -c 'git config --global safe.directory "*" && cd /ragflow && ./build.sh --cpp'
+
+      - name: Cache external DeepDoc testdata
+        # The native backend tests fetch pinned test assets from
+        # infiniflow/ragflow-testdata (see scripts/fetch_deepdoc_testdata.sh).
+        # Cache them across runs, keyed by the pinned ref recorded in
+        # internal/deepdoc/native/testdata.ref so a ref bump invalidates the cache.
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.cache/ragflow-testdata
+          key: deepdoc-testdata-${{ hashFiles('internal/deepdoc/native/testdata.ref') }}
+
+      - name: Run in-process DeepDoc backend integration tests (correctness + race)
+        # Doc-engine-independent: the same native backend (det/layout/tsr/rec
+        # ONNX models + onnxruntime) is exercised regardless of DOC_ENGINE, so
+        # it is run ONCE here instead of duplicated inside each go job.
+        #
+        # Inside build.sh, the golden/comparison tests run WITHOUT -race (no
+        # race-detection value, ~10x memory tax) and only the concurrency
+        # correctness tests run WITH -race (see run_native_integration_tests).
+        #
+        # XDG_CACHE_HOME is pinned to a workspace path so the test fetch script
+        # and this job's actions/cache step agree on a single, deterministic
+        # location (the self-hosted runner's $HOME is not stable across steps).
+        env:
+          MODEL_DIR: /opt/ragflow-deepdoc-models
+          CGO_ENABLED: '1'
+          DEEPDOC_NATIVE_REQUIRED: '1'
+          XDG_CACHE_HOME: ${{ github.workspace }}/.cache
+        run: |
+          set -euo pipefail
+          ./build.sh --test-native
+

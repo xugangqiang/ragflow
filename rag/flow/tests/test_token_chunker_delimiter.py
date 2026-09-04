@@ -18,10 +18,13 @@ because of the ``""`` passed at token_chunker.py:326; forwarding
 ``"".join(self._param.delimiters)`` to ``naive_merge`` (or at least
 ``"\\n。；！？"``) makes it pass and aligns Python with the Go side.
 
-Note: the test needs a live tiktoken encoder. ``common.token_utils`` returns 0 on
-any encoder failure, which would make every token budget "never exceeded" and
-hide the bug behind a single-chunk baseline. We skip rather than pass under a
-dead tokenizer, mirroring ``capture_golden.py::_assert_tokenizer_alive``.
+Note: the test needs a live tiktoken encoder. ``common.token_utils`` builds it on
+first use, so an unavailable BPE table raises out of ``num_tokens_from_string``,
+while a failure to encode a valid string is reported as 0. Only the zero produces
+the false "budget never exceeded" baseline that would hide the bug behind a single
+chunk; the raise just makes the test unable to run at all. Neither leaves a usable
+token budget, so we treat both as a dead tokenizer and skip rather than pass,
+mirroring ``capture_golden.py::_assert_tokenizer_alive``.
 """
 
 import asyncio
@@ -64,13 +67,25 @@ def _make_sentences(n: int) -> list[str]:
     return [f"Sentence number {i}. alpha beta gamma delta epsilon zeta eta theta iota kappa" for i in range(n)]
 
 
+def _tokenizer_is_alive() -> bool:
+    """True only when the real encoder counts tokens.
+
+    An unavailable BPE table raises out of ``num_tokens_from_string``; a failed
+    encode of a valid string returns 0. Both mean the token budget is useless here.
+    """
+    try:
+        return num_tokens_from_string("alive tokenizer probe sentence") > 0
+    except Exception:
+        return False
+
+
 def test_token_chunker_token_size_mode_does_not_split_sentences():
     # Guard: a dead tokenizer would collapse everything to one chunk and hide
     # the bug. Skip instead of recording a poisoned pass.
-    if num_tokens_from_string("alive tokenizer probe sentence") <= 0:
+    if not _tokenizer_is_alive():
         import pytest
 
-        pytest.skip("tiktoken encoder unavailable; num_tokens_from_string returned 0")
+        pytest.skip("tiktoken encoder unavailable")
 
     sentences = _make_sentences(30)
     payload = "\n".join(sentences)
@@ -92,15 +107,17 @@ def test_token_chunker_token_size_mode_does_not_split_sentences():
     )
 
 
-def test_naive_merge_empty_delimiter_ignores_newline_break():
-    """Root-cause check: naive_merge('') can cut mid-sentence; naive_merge('\\n') cannot.
+def test_naive_merge_empty_delimiter_keeps_unit_whole():
+    """Empty delimiter -> no split; the whole payload is one chunk (no
+    atom-split). A '\\n' delimiter still honours the newline boundary.
 
-    Documents why forwarding the configured delimiters fixes the TokenChunker bug.
+    Documents the new contract: without a delimiter there is nothing to split
+    on, so the unit is kept whole and the model layer truncates it.
     """
-    if num_tokens_from_string("alive tokenizer probe sentence") <= 0:
+    if not _tokenizer_is_alive():
         import pytest
 
-        pytest.skip("tiktoken encoder unavailable; num_tokens_from_string returned 0")
+        pytest.skip("tiktoken encoder unavailable")
 
     sentences = _make_sentences(30)
     payload = "\n".join(sentences)
@@ -108,10 +125,7 @@ def test_naive_merge_empty_delimiter_ignores_newline_break():
     chunks_empty = naive_merge(payload, 128, "")
     chunks_nl = naive_merge(payload, 128, "\n")
 
-    split_empty = [s for s in sentences if not any(s in t for t in chunks_empty)]
+    # Empty delimiter no longer cuts (no atom-split): everything stays in one chunk.
+    assert len(chunks_empty) == 1
     split_nl = [s for s in sentences if not any(s in t for t in chunks_nl)]
-
-    # The empty-delimiter call is the one that cuts sentences; the '\\n' call
-    # pre-splits on newline and keeps each sentence whole.
-    assert split_empty, "expected naive_merge('') to cut at least one sentence mid-stream"
     assert not split_nl, "naive_merge('\\n') should preserve every sentence boundary"
