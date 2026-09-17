@@ -300,7 +300,7 @@ type recSession struct {
 	poisoned bool
 }
 
-func newRecSession(modelPath, inName string, inShape []int64, outName string) (*recSession, error) {
+func newRecSession(modelPath, inName string, inShape []int64, outName string, weights *weightSet) (*recSession, error) {
 	in := make([]float32, prod(inShape))
 	inT, err := ort.NewTensor(ort.NewShape(inShape...), in)
 	if err != nil {
@@ -311,7 +311,7 @@ func newRecSession(modelPath, inName string, inShape []int64, outName string) (*
 		inT.Destroy()
 		return nil, err
 	}
-	// One intra-op thread per session, matching NewSession: see the
+	// One intra-op thread per session by default, matching NewSession: see the
 	// intraOpThreads constant in session.go.
 	if err := opts.SetIntraOpNumThreads(intraOpThreads); err != nil {
 		opts.Destroy()
@@ -327,6 +327,16 @@ func newRecSession(modelPath, inName string, inShape []int64, outName string) (*
 		opts.Destroy()
 		inT.Destroy()
 		return nil, err
+	}
+	if weights != nil {
+		for i, v := range weights.vals {
+			if err := opts.AddInitializer(weights.names[i], v); err != nil {
+				opts.Destroy()
+				inT.Destroy()
+				return nil, fmt.Errorf("inject shared initializer %q: %w",
+					weights.names[i], err)
+			}
+		}
 	}
 	sess, err := ort.NewDynamicAdvancedSession(modelPath,
 		[]string{inName}, []string{outName}, opts)

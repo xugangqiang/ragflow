@@ -17,6 +17,7 @@ package native
 import (
 	"context"
 	"fmt"
+	"log"
 	"sync"
 
 	ort "github.com/infiniflow/onnxruntime_go"
@@ -91,11 +92,31 @@ type session struct {
 
 // NewSession opens modelPath. inShape/outShape describe the fixed tensor
 // dimensions; outSize is the total element count of the output tensor. The
-// session runs intraOpThreads intra-op threads (see the constant): one thread
-// per Run, with the process-wide ceiling owned by the inference budget the
-// process owner registers (see inference_limit.go). InitORT must have been
+// session runs intraOpThreads intra-op threads (see the constant in session.go):
+// one thread per Run, with the process-wide ceiling owned by the inference budget
+// the process owner registers (see inference_limit.go). Weight sharing is applied
+// transparently: the model's constant initializers are extracted once per
+// modelPath and injected into the session options, so every session of the
+// same model shares a single copy of the weight buffers. InitORT must have been
 // called first.
 func NewSession(modelPath, inName string, inShape []int64, outName string, outShape []int64) (*session, error) {
+	weights, werr := sharedWeights(modelPath, inName, inShape, outName)
+	if werr != nil {
+		// Degrade gracefully: a model still loads and runs correctly without
+		// sharing; it just deserializes its own weight copy.
+		log.Printf("deepdoc/native: weight sharing unavailable for %s: %v",
+			modelPath, werr)
+		weights = nil
+	}
+	return newRawSession(modelPath, inName, inShape, outName, outShape, weights)
+}
+
+// newRawSession opens modelPath with no weight sharing unless weights != nil,
+// in which case each shared initializer is injected into the session options
+// before the model is loaded. It is the single point where the ORT session is
+// actually created, so both NewSession and the one-shot extraction source used
+// by sharedWeights funnel through it.
+func newRawSession(modelPath, inName string, inShape []int64, outName string, outShape []int64, weights *weightSet) (*session, error) {
 	in := make([]float32, prod(inShape))
 	out := make([]float32, prod(outShape))
 	inT, err := ort.NewTensor(ort.NewShape(inShape...), in)
@@ -135,6 +156,17 @@ func NewSession(modelPath, inName string, inShape []int64, outName string, outSh
 		outT.Destroy()
 		return nil, err
 	}
+	if weights != nil {
+		for i, v := range weights.vals {
+			if err := opts.AddInitializer(weights.names[i], v); err != nil {
+				opts.Destroy()
+				inT.Destroy()
+				outT.Destroy()
+				return nil, fmt.Errorf("inject shared initializer %q: %w",
+					weights.names[i], err)
+			}
+		}
+	}
 	sess, err := ort.NewAdvancedSession(modelPath,
 		[]string{inName}, []string{outName},
 		[]ort.Value{inT}, []ort.Value{outT}, opts)
@@ -149,6 +181,75 @@ func NewSession(modelPath, inName string, inShape []int64, outName string, outSh
 		outSize: prod(outShape),
 		sess:    sess, in: inT, out: outT,
 	}, nil
+}
+
+// weightSet holds the shared, user-owned constant-initializer buffers extracted
+// once per model. Every session opened for the same modelPath injects these
+// buffers (via SessionOptions.AddInitializer) so the weights live in memory a
+// single time instead of being deserialized into every session. The buffers
+// are owned by this package and must outlive every consumer session; they are
+// cached for the process lifetime (freed only at process exit, alongside the
+// process-global ORT environment).
+type weightSet struct {
+	names []string
+	vals  []*ort.SharedInitializer
+}
+
+var (
+	weightMu    sync.Mutex
+	weightCache = map[string]*weightSet{}
+)
+
+// sharedWeights returns the (lazily extracted and cached) shared initializers
+// for modelPath. The source session used for extraction is destroyed before
+// returning; the extracted buffers are independent user-owned copies that
+// outlive it, so the source session's own weight copy can be released.
+func sharedWeights(modelPath, inName string, inShape []int64, outName string) (*weightSet, error) {
+	weightMu.Lock()
+	defer weightMu.Unlock()
+	if ws, ok := weightCache[modelPath]; ok {
+		return ws, nil
+	}
+	// Load a source session purely to read its constant initializers. The
+	// output shape is irrelevant for extraction, so a dummy is used.
+	src, err := newRawSession(modelPath, inName, inShape, outName, []int64{1}, nil)
+	if err != nil {
+		return nil, fmt.Errorf("load source session for extraction: %w", err)
+	}
+	ws := &weightSet{}
+	count, err := src.sess.GetInitializerCount()
+	if err != nil {
+		src.Destroy()
+		return nil, fmt.Errorf("GetInitializerCount: %w", err)
+	}
+	if count > 0 {
+		ws.names = make([]string, 0, count)
+		ws.vals = make([]*ort.SharedInitializer, 0, count)
+		for i := 0; i < count; i++ {
+			name, e := src.sess.GetInitializerName(i)
+			if e != nil {
+				err = fmt.Errorf("GetInitializerName(%d): %w", i, e)
+				break
+			}
+			val, e := src.sess.GetInitializer(name)
+			if e != nil {
+				err = fmt.Errorf("GetInitializer(%q): %w", name, e)
+				break
+			}
+			ws.names = append(ws.names, name)
+			ws.vals = append(ws.vals, val)
+		}
+		if err != nil {
+			for _, v := range ws.vals {
+				v.Destroy()
+			}
+			src.Destroy()
+			return nil, err
+		}
+	}
+	src.Destroy()
+	weightCache[modelPath] = ws
+	return ws, nil
 }
 
 // Run copies input into the input tensor, executes, and returns the output

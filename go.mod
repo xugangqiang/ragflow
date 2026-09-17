@@ -175,7 +175,7 @@ require (
 	github.com/googleapis/gax-go/v2 v2.23.0 // indirect
 	github.com/goph/emperror v0.17.2 // indirect
 	github.com/hashicorp/hcl v1.0.0 // indirect
-	github.com/infiniflow/onnxruntime_go v1.23.1
+	github.com/infiniflow/onnxruntime_go v1.29.0
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
 	github.com/jackc/pgx/v5 v5.10.0
@@ -263,6 +263,11 @@ require (
 replace github.com/infiniflow/infinity-go-sdk => github.com/infiniflow/infinity/go v0.0.0-20260806040857-d755c5ad25d9
 
 replace github.com/AkmalOt/gomsg => github.com/xugangqiang/gomsg v0.0.0-20260407083308-985c3a1a76b7
+
+// Local override while developing the shared-initializer feature: point the
+// binding at the worktree that carries the AddInitializer / SessionGetInitializer*
+// APIs (tagged v1.29.0). Remove this once v1.29.0 is available from the proxy.
+replace github.com/infiniflow/onnxruntime_go => /home/shenyushi/codex-workspace/onnxruntime_go_wt
 
 // onnxruntime_go is mirrored to github.com/infiniflow/onnxruntime_go (org-owned
 // fork of yalue/onnxruntime_go at v1.23.0) so the in-process DeepDoc backend no
