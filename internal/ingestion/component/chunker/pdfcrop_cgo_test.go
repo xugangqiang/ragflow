@@ -8,8 +8,11 @@ import (
 	"fmt"
 	"image"
 	"strings"
+	"sync"
 	"testing"
 
+	"ragflow/internal/agent/runtime"
+	"ragflow/internal/common"
 	deepdoctype "ragflow/internal/deepdoc/parser/type"
 	"ragflow/internal/ingestion/component/schema"
 )
@@ -260,5 +263,254 @@ func TestCropImageChunks_RenderFailureSkipsChunk(t *testing.T) {
 	// mockCropEngine renders successfully, so a non-empty crop is expected.
 	if !strings.HasPrefix(out[0].Image, "data:image/png;base64,") {
 		t.Errorf("chunk image = %q, want data:image/png;base64, prefix", out[0].Image)
+	}
+}
+
+// recordingUploader captures every upload invocation so tests can assert on
+// the streaming-upload behavior of cropImageChunks.
+type recordingUploader struct {
+	mu    sync.Mutex
+	calls []uploadCall
+}
+
+type uploadCall struct {
+	kbID    string
+	chunkID string
+	dataLen int
+}
+
+func (r *recordingUploader) upload(ctx context.Context, kbID, chunkID string, data []byte) (string, error) {
+	r.mu.Lock()
+	r.calls = append(r.calls, uploadCall{kbID: kbID, chunkID: chunkID, dataLen: len(data)})
+	r.mu.Unlock()
+	// Mirror the production key format used by imageUploadDecorator so the
+	// test can confirm cropImageChunks produces the same reference.
+	return kbID + "-" + chunkID, nil
+}
+
+// withIngestionGlobals returns a ctx carrying kb_id / doc_id in the run-level
+// CanvasState.Globals bag, exactly as the production ingestion pipeline
+// seeds them via SeedIngestionGlobals before the chunker runs.
+func withIngestionGlobals(t *testing.T, kbID, docID string) context.Context {
+	t.Helper()
+	st := runtime.NewCanvasState("test-run", "test-session")
+	st.SetGlobal("kb_id", kbID)
+	st.SetGlobal("doc_id", docID)
+	return runtime.WithState(context.Background(), st)
+}
+
+// TestCropImageChunks_StreamingUpload verifies that, when a KB is present,
+// cropImageChunks uploads each freshly cropped preview immediately and drops
+// the in-memory base64, instead of holding every chunk's image until the
+// later batch upload pass. This is the memory fix: peak Go-heap retention
+// during the chunker stage of a large PDF collapses from "whole document" to
+// "one chunk".
+func TestCropImageChunks_StreamingUpload(t *testing.T) {
+	ctx := withIngestionGlobals(t, "kb1", "doc1")
+
+	rec := &recordingUploader{}
+	orig := ChunkImageUploader
+	ChunkImageUploader = rec.upload
+	t.Cleanup(func() { ChunkImageUploader = orig })
+
+	eng := mockCropEngine{}
+	pos := jsonPositions(t, []float64{1, 10, 100, 10, 100})
+	chunks := []schema.ChunkDoc{
+		{CKType: "image", Text: "img-chunk", PDFPositions: pos},
+		{CKType: "table", Text: "tbl-chunk", PDFPositions: pos},
+		{CKType: "text", Text: "txt-chunk", PDFPositions: pos},
+	}
+	out := cropImageChunks(ctx, eng, chunks)
+	if len(out) != len(chunks) {
+		t.Fatalf("len(out) = %d, want %d", len(out), len(chunks))
+	}
+
+	for i, ck := range out {
+		if ck.ImgID == "" {
+			t.Errorf("chunk %d (%s): ImgID empty, want uploaded id", i, ck.CKType)
+		}
+		if ck.Image != "" {
+			t.Errorf("chunk %d (%s): Image = %q, want cleared after upload", i, ck.CKType, ck.Image)
+		}
+	}
+	if len(rec.calls) != len(chunks) {
+		t.Fatalf("upload calls = %d, want %d", len(rec.calls), len(chunks))
+	}
+	// Parallel cropping means uploads complete in completion order, not input
+	// order. The streaming memory fix is preserved (each goroutine uploads its
+	// own freshly cropped preview and drops the base64 immediately); only the
+	// ordering is no longer deterministic, so assert on the set of uploaded
+	// chunk ids and on each chunk's own ImgID/Image fields.
+	wantIDs := make(map[string]bool, len(chunks))
+	for _, ck := range chunks {
+		wantIDs[common.ChunkID("doc1", ck.Text)] = true
+	}
+	for _, c := range rec.calls {
+		if c.dataLen == 0 {
+			t.Errorf("uploaded empty bytes for chunk %q", c.chunkID)
+		}
+		if !wantIDs[c.chunkID] {
+			t.Errorf("unexpected upload for chunk %q", c.chunkID)
+		}
+	}
+	for i, ck := range out {
+		// cropImageChunks passes the bare chunk id (hash of docID+text); the
+		// uploader composes the img_id as "<kb_id>-<chunkID>".
+		wantID := common.ChunkID("doc1", chunks[i].Text)
+		wantImgID := "kb1-" + wantID
+		if ck.ImgID != wantImgID {
+			t.Errorf("chunk %d: ImgID = %q, want %q", i, ck.ImgID, wantImgID)
+		}
+	}
+}
+
+// TestCropImageChunks_NoUploadWhenKBAbsent locks the canvas-debug (dry-run)
+// path: with no CanvasState (and thus no kb_id), cropImageChunks must NOT
+// upload and must retain the base64 preview in memory — the decorator's
+// debug branch is responsible for dropping it, and no persist stage will run.
+func TestCropImageChunks_NoUploadWhenKBAbsent(t *testing.T) {
+	ctx := context.Background() // no CanvasState → kb_id == ""
+
+	rec := &recordingUploader{}
+	orig := ChunkImageUploader
+	ChunkImageUploader = rec.upload
+	t.Cleanup(func() { ChunkImageUploader = orig })
+
+	eng := mockCropEngine{}
+	pos := jsonPositions(t, []float64{1, 10, 100, 10, 100})
+	chunks := []schema.ChunkDoc{{CKType: "image", PDFPositions: pos}}
+	out := cropImageChunks(ctx, eng, chunks)
+
+	if len(rec.calls) != 0 {
+		t.Fatalf("upload calls = %d, want 0 (kb_id absent)", len(rec.calls))
+	}
+	if !strings.HasPrefix(out[0].Image, "data:image/png;base64,") {
+		t.Errorf("Image not retained: %q", out[0].Image)
+	}
+	if out[0].ImgID != "" {
+		t.Errorf("ImgID = %q, want empty", out[0].ImgID)
+	}
+}
+
+// TestCropImageChunks_UploadFailureFallsThroughToBatchPass verifies that a
+// failed streaming upload keeps the base64 preview so the later idempotent
+// batch upload pass (imageUploadDecorator) can retry it.
+func TestCropImageChunks_UploadFailureFallsThroughToBatchPass(t *testing.T) {
+	ctx := withIngestionGlobals(t, "kb1", "doc1")
+
+	orig := ChunkImageUploader
+	ChunkImageUploader = func(_ context.Context, _, _ string, _ []byte) (string, error) {
+		return "", fmt.Errorf("boom")
+	}
+	t.Cleanup(func() { ChunkImageUploader = orig })
+
+	eng := mockCropEngine{}
+	pos := jsonPositions(t, []float64{1, 10, 100, 10, 100})
+	chunks := []schema.ChunkDoc{{CKType: "image", Text: "img-chunk", PDFPositions: pos}}
+	out := cropImageChunks(ctx, eng, chunks)
+
+	if out[0].ImgID != "" {
+		t.Errorf("ImgID = %q, want empty after failed upload", out[0].ImgID)
+	}
+	if !strings.HasPrefix(out[0].Image, "data:image/png;base64,") {
+		t.Errorf("Image not retained after failed upload: %q", out[0].Image)
+	}
+}
+
+// TestCropImageChunks_StreamingUploadUsesFinalizedText verifies that the
+// streaming upload keys the image under the chunk's FINALIZED text — after
+// removeTag + context fold — rather than the raw pre-finalization text. This
+// is what makes the stored img_id match the canonical chunk id that
+// imageUploadDecorator assigns later (register.go) and Python's convention.
+// Without this, media chunks whose text changes during finalization (context
+// folding or position-tag stripping) would be stored under a different key
+// than their canonical id.
+func TestCropImageChunks_StreamingUploadUsesFinalizedText(t *testing.T) {
+	ctx := withIngestionGlobals(t, "kb1", "doc1")
+
+	rec := &recordingUploader{}
+	orig := ChunkImageUploader
+	ChunkImageUploader = rec.upload
+	t.Cleanup(func() { ChunkImageUploader = orig })
+
+	eng := mockCropEngine{}
+	pos := jsonPositions(t, []float64{1, 10, 100, 10, 100})
+	// ContextAbove is folded into the body by materializeMediaContext, so the
+	// finalized text differs from the raw Text.
+	chunks := []schema.ChunkDoc{
+		{CKType: "image", Text: "body", ContextAbove: "ABOVE ", PDFPositions: pos},
+	}
+	out := cropImageChunks(ctx, eng, chunks)
+
+	if len(out) != 1 {
+		t.Fatalf("len(out) = %d, want 1", len(out))
+	}
+	if len(rec.calls) != 1 {
+		t.Fatalf("upload calls = %d, want 1", len(rec.calls))
+	}
+
+	// Finalized text = removeTag(ContextAbove + removeTag(Text) + ContextBelow)
+	//                 = "ABOVE body".
+	wantID := common.ChunkID("doc1", "ABOVE body")
+	rawID := common.ChunkID("doc1", "body")
+
+	if rec.calls[0].chunkID == rawID {
+		t.Errorf("upload keyed by raw text %q; want finalized-text key %q", rawID, wantID)
+	}
+	if rec.calls[0].chunkID != wantID {
+		t.Errorf("upload chunkID = %q, want %q", rec.calls[0].chunkID, wantID)
+	}
+	if out[0].ImgID != "kb1-"+wantID {
+		t.Errorf("ImgID = %q, want %q", out[0].ImgID, "kb1-"+wantID)
+	}
+}
+
+// TestCropImageChunks_StreamingUploadStripsPositionTagForCanonicalID is the
+// regression test for the most common chunk shape: an image/table chunk whose
+// Text still carries parser position tags (@@x\t y##) but has NO media
+// context (ContextAbove/Below empty). For that shape materializeMediaContext
+// short-circuits, but canonicalChunkText still strips the position tag, so the
+// canonical chunk id that imageUploadDecorator assigns later (register.go) is
+// keyed on the TAG-STRIPPED text. The streamed upload key must therefore ALSO
+// be keyed on the tag-stripped text — matching canonicalChunkID. Keying on the
+// raw tagged text is exactly the divergence this test catches: it would store
+// the object under a key that never matches the canonical id the retrieval
+// path looks up by.
+func TestCropImageChunks_StreamingUploadStripsPositionTagForCanonicalID(t *testing.T) {
+	ctx := withIngestionGlobals(t, "kb1", "doc1")
+
+	rec := &recordingUploader{}
+	orig := ChunkImageUploader
+	ChunkImageUploader = rec.upload
+	t.Cleanup(func() { ChunkImageUploader = orig })
+
+	eng := mockCropEngine{}
+	pos := jsonPositions(t, []float64{1, 10, 100, 10, 100})
+	// Text carries a parser position tag (@@x\t y##), no media context.
+	in := schema.ChunkDoc{CKType: "image", Text: "abc@@1\t2##", PDFPositions: pos}
+	out := cropImageChunks(ctx, eng, []schema.ChunkDoc{in})
+
+	if len(out) != 1 {
+		t.Fatalf("len(out) = %d, want 1", len(out))
+	}
+	if len(rec.calls) != 1 {
+		t.Fatalf("upload calls = %d, want 1", len(rec.calls))
+	}
+
+	// The canonical id (and thus the streamed upload key) is derived from
+	// canonicalChunkText, which strips the position tag for a no-context chunk.
+	wantID := canonicalChunkID("doc1", in)
+	// The buggy key kept the tag, which would NOT match the decorator's
+	// (tag-stripped) canonical id.
+	buggyID := common.ChunkID("doc1", materializeMediaContext(in).Text)
+
+	if rec.calls[0].chunkID == buggyID {
+		t.Errorf("upload keyed by tagged text %q; canonical id is %q (tag stripped)", buggyID, wantID)
+	}
+	if rec.calls[0].chunkID != wantID {
+		t.Errorf("upload chunkID = %q, want canonical %q (canonicalChunkText strips the tag)", rec.calls[0].chunkID, wantID)
+	}
+	if out[0].ImgID != "kb1-"+wantID {
+		t.Errorf("ImgID = %q, want %q", out[0].ImgID, "kb1-"+wantID)
 	}
 }

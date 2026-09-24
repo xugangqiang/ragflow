@@ -93,6 +93,15 @@ func (d *imageUploadDecorator) Invoke(ctx context.Context, db *gorm.DB, inputs m
 	// can read ck["id"] without deriving it itself. Downstream, the persist
 	// stage reuses the same formula as a fallback when ck["id"] is absent.
 	for _, ck := range chunks {
+		// Reuse a chunk id already stamped by the streamed crop-upload
+		// path, which keys MinIO by the canonical id. The two routes
+		// normalize the text through canonicalChunkText, so the crop-time
+		// key and this id are identical and cannot diverge. For chunks that
+		// bypassed crop, fall back to deriving it here from the
+		// already-finalized text.
+		if id, ok := ck["id"]; ok && id != "" {
+			continue
+		}
 		text, err := requireChunkText(ck)
 		if err != nil {
 			return nil, err
