@@ -100,6 +100,20 @@ func (d *imageUploadDecorator) Invoke(ctx context.Context, db *gorm.DB, inputs m
 		ck["id"] = common.ChunkID(docID, text)
 	}
 
+	// Dev-only debug gate: when RAGFLOW_DEBUG_CRASH_AFTER_CHUNKER=1 (or the
+	// matching CanvasState.Globals flag) is set, crash the process right after
+	// the chunker has produced its full output but before image upload / the
+	// tokenizer starts. common.Fatal terminates the process (os.Exit(1)).
+	// This lets a developer restart the run and re-test the Chunker against the
+	// cached Parser result (RAGFLOW_CACHE_PARSER=1) without re-running the
+	// expensive Parser. Unset the env to let the pipeline run to completion.
+	// Placed before the image-upload branch on purpose so a crash loop never
+	// spews partial images into MinIO.
+	if globals.DebugCrashAfterChunker(ctx) {
+		common.Fatal("debug crash after chunker: Chunker output is complete; " +
+			"unset RAGFLOW_DEBUG_CRASH_AFTER_CHUNKER to let the pipeline continue")
+	}
+
 	// kb_id is empty only in canvas debug (dry-run) mode; production ingestion
 	// always supplies a KB, so kb_id == "" never occurs in normal operation.
 	// Image bytes are uploaded to MinIO only when a KB is present (i.e. a

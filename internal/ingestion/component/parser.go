@@ -453,6 +453,21 @@ func (c *ParserComponent) Invoke(ctx context.Context, db *gorm.DB, inputs map[st
 	//
 	fileTypeExt := fileTypeFromInputs(inputs)
 
+	// Parser-result cache (kvrocks-backed, dev-only via RAGFLOW_CACHE_PARSER=1):
+	// a hit skips the expensive parse entirely so a restarting ingestion run can
+	// re-test the Chunker without re-running the Parser. The Chunker re-encodes
+	// the output map to JSON before decoding, so the cached shape is accepted as
+	// is. Only doc_id-keyed runs are cached (no doc_id → no stable key).
+	if docID != "" {
+		if cached, hit, cerr := tryLoadParserCache(ctx, parserCacheKey(docID, string(fileTypeExt))); cerr != nil {
+			common.Warn("parser cache load failed", zap.Error(cerr))
+		} else if hit {
+			common.Info("parser cache hit — skipping parse", zap.String("doc_id", docID))
+			globals.PublishGlobals(ctx, cached)
+			return cached, nil
+		}
+	}
+
 	dispatched, handledVision, visionErr := maybeDispatchPDFVision(ctx, db, fileTypeExt, filename, binary, inputs, setups)
 	if visionErr != nil {
 		return nil, visionErr
@@ -530,6 +545,14 @@ func (c *ParserComponent) Invoke(ctx context.Context, db *gorm.DB, inputs map[st
 	globals.PublishGlobals(ctx, out)
 	items, _ := out["json"].([]map[string]any)
 	logParserOutput(dispatched, items)
+	// Parser-result cache (kvrocks-backed, dev-only via RAGFLOW_CACHE_PARSER=1).
+	// Persist the resolved output so a subsequent run for the same doc_id can
+	// skip the parse. Chunker always re-runs, so only the Parser is memoised.
+	if docID != "" {
+		if err := saveParserCache(ctx, parserCacheKey(docID, string(fileTypeExt)), out); err != nil {
+			common.Warn("parser cache save failed", zap.Error(err))
+		}
+	}
 	// Progress (_created_time / _elapsed_time stamping, start/done
 	// callbacks) is owned by the canvas framework (realComponentBody),
 	// not by this component, so we return the work result directly.

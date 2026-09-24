@@ -26,6 +26,8 @@ package globals
 
 import (
 	"context"
+	"os"
+	"strings"
 
 	"ragflow/internal/agent/runtime"
 )
@@ -72,6 +74,12 @@ var GlobalMetadataKeys = []string{
 	// / PublishGlobals only ever propagate it in a debug run — where the
 	// chunker decorator reads it to limit preview chunks.
 	DebugChunkCapKey,
+	// debug_crash_after_chunker is dev-only. When set (env
+	// RAGFLOW_DEBUG_CRASH_AFTER_CHUNKER=1 or this global), the chunker
+	// decorator deliberately crashes the process after the chunker completes
+	// but before the tokenizer starts, so a developer can restart and re-test
+	// the Chunker against a cached Parser result without re-parsing.
+	DebugCrashAfterChunkerKey,
 }
 
 // taskIDKey is the CanvasState.Globals slot carrying the ingestion task id of
@@ -114,6 +122,11 @@ func TaskID(ctx context.Context) string {
 // debug branch of runPipelineWithDSL.
 const DebugChunkCapKey = "debug_chunk_cap"
 
+// DebugCrashAfterChunkerKey is the run-input / globals key carrying the
+// dev-only "crash after chunker" flag. The chunker decorator reads it via
+// DebugCrashAfterChunker; it is never set by production inputs.
+const DebugCrashAfterChunkerKey = "debug_crash_after_chunker"
+
 // DebugChunkCap reads the canvas-debug chunk cap from CanvasState.Globals.
 // Returns 0 when no cap is set (no debug run, no chunker node, or cap
 // disabled). The stored value is normally an int (Go-side default); a
@@ -132,6 +145,30 @@ func DebugChunkCap(ctx context.Context) int {
 		}
 	}
 	return 0
+}
+
+// DebugCrashAfterChunker reports whether the dev-only "crash after chunker"
+// switch is on. The environment variable RAGFLOW_DEBUG_CRASH_AFTER_CHUNKER
+// takes priority (set to "1" or "true"); otherwise a CanvasState.Globals bool
+// is consulted. Used by the chunker decorator to os.Exit(1) after the chunker
+// completes but before the tokenizer starts, so a restart can re-test the
+// Chunker against a cached Parser result.
+func DebugCrashAfterChunker(ctx context.Context) bool {
+	// The environment variable is authoritative when present: "1"/"true" turns
+	// the gate on, any other value (incl. "0"/"false") turns it off. Only when
+	// the env is unset do we fall back to the CanvasState.Globals bool, which
+	// lets a single run opt in via run input without touching the shell.
+	if v, ok := os.LookupEnv("RAGFLOW_DEBUG_CRASH_AFTER_CHUNKER"); ok {
+		return v == "1" || strings.EqualFold(v, "true")
+	}
+	if st := canvasStateFromContext(ctx); st != nil {
+		if v, ok := st.GetGlobal(DebugCrashAfterChunkerKey); ok {
+			if b, ok := v.(bool); ok {
+				return b
+			}
+		}
+	}
+	return false
 }
 
 // SeedIngestionGlobals copies the whitelisted run-level metadata from `in`
