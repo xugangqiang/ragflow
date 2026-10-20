@@ -10,12 +10,28 @@ import (
 	"strings"
 	"time"
 
+	"ragflow/internal/dao"
 	"ragflow/internal/entity"
 	modelModule "ragflow/internal/entity/models"
 	"ragflow/internal/service"
 )
 
-func datasetListItemToMap(kb *entity.KnowledgebaseListItem) map[string]interface{} {
+// pipelineVersionOutdated reports whether a dataset pinned pipeline version is
+// still the latest of its canvas (design section 6.3 D1/D2/D3). It is purely
+// informational: a non-latest version remains fully usable. BuiltIn datasets or
+// datasets without a pinned version are never outdated.
+func pipelineVersionOutdated(ctx context.Context, pipelineID, versionID *string) bool {
+	if pipelineID == nil || strings.TrimSpace(*pipelineID) == "" || versionID == nil {
+		return false
+	}
+	latest, err := dao.NewUserCanvasVersionDAO().GetLatest(ctx, dao.DB, strings.TrimSpace(*pipelineID))
+	if err != nil || latest == nil {
+		return false
+	}
+	return latest.ID != *versionID
+}
+
+func datasetListItemToMap(ctx context.Context, kb *entity.KnowledgebaseListItem) map[string]interface{} {
 	// avatar/language/description keys are always present (null when unset),
 	// matching Python's full-row dict response.
 	item := map[string]interface{}{
@@ -43,10 +59,19 @@ func datasetListItemToMap(kb *entity.KnowledgebaseListItem) map[string]interface
 	if kb.UpdateTime != nil {
 		item["update_time"] = *kb.UpdateTime
 	}
+	if kb.PipelineID != nil {
+		item["pipeline_id"] = *kb.PipelineID
+	}
+	if kb.PipelineVersionID != nil {
+		item["pipeline_version_id"] = *kb.PipelineVersionID
+	}
+	// Design section 6.3 (! indicator): true when a pinned version is no longer
+	// the latest of its canvas. Purely informational; never blocks parsing.
+	item["pipeline_version_outdated"] = pipelineVersionOutdated(ctx, kb.PipelineID, kb.PipelineVersionID)
 	return item
 }
 
-func datasetToMap(kb *entity.Knowledgebase) map[string]interface{} {
+func datasetToMap(ctx context.Context, kb *entity.Knowledgebase) map[string]interface{} {
 	item := map[string]interface{}{
 		"id":                         kb.ID,
 		"tenant_id":                  kb.TenantID,
@@ -76,6 +101,12 @@ func datasetToMap(kb *entity.Knowledgebase) map[string]interface{} {
 	if kb.PipelineID != nil {
 		item["pipeline_id"] = *kb.PipelineID
 	}
+	if kb.PipelineVersionID != nil {
+		item["pipeline_version_id"] = *kb.PipelineVersionID
+	}
+	// Design section 6.3 (! indicator): true when a pinned version is no longer
+	// the latest of its canvas. Purely informational; never blocks parsing.
+	item["pipeline_version_outdated"] = pipelineVersionOutdated(ctx, kb.PipelineID, kb.PipelineVersionID)
 	if kb.GraphragTaskID != nil {
 		item["graphrag_task_id"] = *kb.GraphragTaskID
 	}

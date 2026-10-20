@@ -283,6 +283,8 @@ type KnowledgebaseListItem struct {
 	Nickname               string  `json:"nickname"`
 	TenantAvatar           *string `json:"tenant_avatar,omitempty"`
 	UpdateTime             *int64  `json:"update_time,omitempty"`
+	PipelineID             *string `json:"pipeline_id,omitempty"`
+	PipelineVersionID      *string `json:"pipeline_version_id,omitempty"`
 }
 
 // DatasetOwnerFilter represents an owner option in dataset filter responses.

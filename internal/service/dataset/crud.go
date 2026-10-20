@@ -278,7 +278,7 @@ func (d *DatasetService) CreateDataset(ctx context.Context, req *service.CreateD
 		return nil, common.CodeServerError, errors.New("dataset created failed")
 	}
 
-	return datasetToMap(createdKB), common.CodeSuccess, nil
+	return datasetToMap(ctx, createdKB), common.CodeSuccess, nil
 }
 
 // dedupeDatasetName returns a non-colliding dataset name within the tenant,
@@ -315,7 +315,7 @@ func (d *DatasetService) GetDataset(ctx context.Context, datasetID, userID strin
 		return nil, code, permissionErr
 	}
 
-	data := datasetToMap(kb)
+	data := datasetToMap(ctx, kb)
 
 	size, err := d.documentDAO.SumSizeByDatasetID(ctx, dao.DB, datasetID)
 	if err != nil {
@@ -669,7 +669,7 @@ func (d *DatasetService) ListDatasets(ctx context.Context, id, name string, page
 		if kb == nil {
 			continue
 		}
-		item := datasetListItemToMap(kb)
+		item := datasetListItemToMap(ctx, kb)
 		// Mirror the memory list: surface the concrete model display name
 		// (modelName@instance@provider) instead of a raw tenant_model ID.
 		tenantEmbdID := ptrStringValue(kb.TenantEmbdID)

@@ -322,3 +322,31 @@ func TestUpdateDataset_RebindsExplicitVersion(t *testing.T) {
 		t.Fatalf("PipelineVersionID = %v, want re-pinned %s", kb.PipelineVersionID, verNew)
 	}
 }
+
+// T14: pipelineVersionOutdated (! indicator) is true only when a pinned version
+// is not the latest of its canvas (design section 6.3).
+func TestPipelineVersionOutdated_ComputesFromLatest(t *testing.T) {
+	db := setupServiceTestDB(t)
+	pushServiceDB(t, db)
+
+	canvasID := "0123456789abcdef0123456789abcdef"
+	verOld := "version0000000000000000000000aa"
+	verNew := "version0000000000000000000000bb"
+	seedDataflowCanvas(t, db, canvasID)
+	seedCanvasVersion(t, db, canvasID, verOld, 0)
+	seedCanvasVersion(t, db, canvasID, verNew, 1000)
+
+	ctx := t.Context()
+	if pipelineVersionOutdated(ctx, &canvasID, &verNew) {
+		t.Fatalf("pinned latest version should not be outdated")
+	}
+	if !pipelineVersionOutdated(ctx, &canvasID, &verOld) {
+		t.Fatalf("pinned older version should be outdated")
+	}
+	if pipelineVersionOutdated(ctx, nil, &verOld) {
+		t.Fatalf("no pipeline should never be outdated")
+	}
+	if pipelineVersionOutdated(ctx, &canvasID, nil) {
+		t.Fatalf("no pinned version should never be outdated")
+	}
+}

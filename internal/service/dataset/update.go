@@ -442,7 +442,7 @@ func (d *DatasetService) UpdateDataset(ctx context.Context, datasetID, userID st
 		}
 	}
 
-	data := datasetToMap(updatedKB)
+	data := datasetToMap(ctx, updatedKB)
 	data["connectors"] = datasetConnectorsOrEmpty(linkedConnectors)
 	return data, common.CodeSuccess, nil
 }

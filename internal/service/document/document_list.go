@@ -13,6 +13,20 @@ import (
 	"ragflow/internal/service"
 )
 
+// documentPipelineVersionOutdated reports whether a document pinned pipeline version
+// is still the latest of its canvas (design section 6.3). Informational only;
+// a non-latest version remains usable. Returns false with no pinned pipeline.
+func documentPipelineVersionOutdated(ctx context.Context, pipelineID, versionID *string) bool {
+	if pipelineID == nil || strings.TrimSpace(*pipelineID) == "" || versionID == nil {
+		return false
+	}
+	latest, err := dao.NewUserCanvasVersionDAO().GetLatest(ctx, dao.DB, strings.TrimSpace(*pipelineID))
+	if err != nil || latest == nil {
+		return false
+	}
+	return latest.ID != *versionID
+}
+
 // escapeSQLLikePattern escapes the SQL LIKE wildcards ('%', '_') and
 // the escape character itself ('!') so a literal user-supplied
 // filename can be safely interpolated into a `LIKE ? ESCAPE '!'`
@@ -60,7 +74,7 @@ func (s *DocumentService) ListDocuments(ctx context.Context, page, pageSize int)
 			task = taskMap[doc.ID]
 			latestEvent = latestEventsByDocument[doc.ID]
 		}
-		responses[i] = s.toResponseWithTask(doc, task, latestEvent)
+		responses[i] = s.toResponseWithTask(ctx, doc, task, latestEvent)
 	}
 
 	return responses, total, nil
@@ -221,7 +235,7 @@ func (s *DocumentService) GetDocumentsByAuthorID(ctx context.Context, authorID, 
 			task = taskMap[doc.ID]
 			latestEvent = latestEventsByDocument[doc.ID]
 		}
-		responses[i] = s.toResponseWithTask(doc, task, latestEvent)
+		responses[i] = s.toResponseWithTask(ctx, doc, task, latestEvent)
 	}
 
 	return responses, total, nil
@@ -230,7 +244,7 @@ func (s *DocumentService) GetDocumentsByAuthorID(ctx context.Context, authorID, 
 // toResponse convert model.Document to DocumentResponse
 func (s *DocumentService) toResponse(ctx context.Context, doc *entity.Document) (*DocumentResponse, error) {
 	if s.ingestionTaskDAO == nil || doc == nil || doc.ID == "" {
-		return s.toResponseWithTask(doc, nil, nil), nil
+		return s.toResponseWithTask(ctx, doc, nil, nil), nil
 	}
 	task, err := s.ingestionTaskDAO.GetByDocumentID(ctx, dao.DB, doc.ID)
 	if err != nil {
@@ -241,7 +255,7 @@ func (s *DocumentService) toResponse(ctx context.Context, doc *entity.Document) 
 		common.Warn(fmt.Sprintf("get latest ingestion event for document %s: %v", doc.ID, err))
 		latestEventsByDocument = make(map[string]*service.IngestionEventItem)
 	}
-	return s.toResponseWithTask(doc, task, latestEventsByDocument[doc.ID]), nil
+	return s.toResponseWithTask(ctx, doc, task, latestEventsByDocument[doc.ID]), nil
 }
 
 func (s *DocumentService) latestIngestionEventsByDocument(ctx context.Context, tasksByDocument map[string]*entity.IngestionTask) (map[string]*service.IngestionEventItem, error) {
@@ -295,7 +309,7 @@ func (s *DocumentService) LatestIngestionEventsByPipelineLogIDs(ctx context.Cont
 	return items, nil
 }
 
-func (s *DocumentService) toResponseWithTask(doc *entity.Document, task *entity.IngestionTask, latestEvent *service.IngestionEventItem) *DocumentResponse {
+func (s *DocumentService) toResponseWithTask(ctx context.Context, doc *entity.Document, task *entity.IngestionTask, latestEvent *service.IngestionEventItem) *DocumentResponse {
 	if doc == nil {
 		return nil
 	}
@@ -325,27 +339,31 @@ func (s *DocumentService) toResponseWithTask(doc *entity.Document, task *entity.
 		ingestionStatus = task.Status
 	}
 	return &DocumentResponse{
-		ID:                   doc.ID,
-		Name:                 doc.Name,
-		KbID:                 doc.KbID,
-		ParserID:             doc.ParserID,
-		PipelineID:           doc.PipelineID,
-		Type:                 doc.Type,
-		SourceType:           doc.SourceType,
-		CreatedBy:            doc.CreatedBy,
-		Location:             doc.Location,
-		Size:                 doc.Size,
-		TokenNum:             doc.TokenNum,
-		ChunkNum:             doc.ChunkNum,
-		Progress:             doc.Progress,
-		ProgressMsg:          doc.ProgressMsg,
-		LatestIngestionEvent: latestEvent,
-		ProcessBeginAt:       doc.ProcessBeginAt,
-		ProcessDuration:      doc.ProcessDuration,
-		Suffix:               doc.Suffix,
-		IngestionStatus:      ingestionStatus,
-		Status:               doc.Status,
-		CreatedAt:            createdAt,
-		UpdatedAt:            updatedAt,
+		ID:                doc.ID,
+		Name:              doc.Name,
+		KbID:              doc.KbID,
+		ParserID:          doc.ParserID,
+		PipelineID:        doc.PipelineID,
+		PipelineVersionID: doc.PipelineVersionID,
+		// Design section 6.3 (! indicator): true when the pinned version is no
+		// longer the latest of its canvas. Informational only; never blocks parse.
+		PipelineVersionOutdated: documentPipelineVersionOutdated(ctx, doc.PipelineID, doc.PipelineVersionID),
+		Type:                    doc.Type,
+		SourceType:              doc.SourceType,
+		CreatedBy:               doc.CreatedBy,
+		Location:                doc.Location,
+		Size:                    doc.Size,
+		TokenNum:                doc.TokenNum,
+		ChunkNum:                doc.ChunkNum,
+		Progress:                doc.Progress,
+		ProgressMsg:             doc.ProgressMsg,
+		LatestIngestionEvent:    latestEvent,
+		ProcessBeginAt:          doc.ProcessBeginAt,
+		ProcessDuration:         doc.ProcessDuration,
+		Suffix:                  doc.Suffix,
+		IngestionStatus:         ingestionStatus,
+		Status:                  doc.Status,
+		CreatedAt:               createdAt,
+		UpdatedAt:               updatedAt,
 	}
 }
