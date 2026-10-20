@@ -213,19 +213,30 @@ func (d *DatasetService) CreateDataset(ctx context.Context, req *service.CreateD
 		tenant.LLMID,
 	)
 
+	// Slice 3: bind the latest pipeline version when creating in Pipeline mode
+	// (design §5 sticky snapshot). The version is resolved from the bound canvas;
+	// built-in mode leaves it nil.
+	var pipelineVersionID *string
+	if sel.IsPipeline() && pipelineID != nil && strings.TrimSpace(*pipelineID) != "" {
+		if v, gerr := dao.NewUserCanvasVersionDAO().GetLatest(ctx, dao.DB, strings.TrimSpace(*pipelineID)); gerr == nil && v != nil {
+			pipelineVersionID = &v.ID
+		}
+	}
+
 	kb := &entity.Knowledgebase{
-		ID:           kbID,
-		Name:         name,
-		TenantID:     tenantID,
-		CreatedBy:    userID,
-		ParserID:     parserID,
-		PipelineID:   pipelineID,
-		ParserConfig: entity.JSONMap(parserConfigMap),
-		Permission:   permission,
-		Language:     language,
-		EmbdID:       embdID,
-		TenantEmbdID: stringPtrIfNotEmpty(tenantEmbdID),
-		Status:       &status,
+		ID:                kbID,
+		PipelineVersionID: pipelineVersionID,
+		Name:              name,
+		TenantID:          tenantID,
+		CreatedBy:         userID,
+		ParserID:          parserID,
+		PipelineID:        pipelineID,
+		ParserConfig:      entity.JSONMap(parserConfigMap),
+		Permission:        permission,
+		Language:          language,
+		EmbdID:            embdID,
+		TenantEmbdID:      stringPtrIfNotEmpty(tenantEmbdID),
+		Status:            &status,
 	}
 
 	if err = d.kbDAO.Create(ctx, dao.DB, kb); err != nil {
