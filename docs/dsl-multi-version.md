@@ -1,0 +1,221 @@
+# DSL 多版本设计（Ingestion Pipeline / Dataflow Canvas）
+
+> 状态：v5（设计完全锁定，进入 TDD 实现）
+> 约束：单 PR、严格 TDD、迁移为幂等 Go 函数、Missing 运行时校验不加字段、版本归属校验禁止悬空。
+
+---
+
+## 1. 目标与范围
+
+为 ingestion pipeline（画布类别 `dataflow_canvas`）的 DSL 增加**多版本**能力：
+
+- **A1** DSL 变更在数据库增量写入，版本号即时间（`user_canvas_version` 已存在的基础设施）。
+- **A2** 新增版本别名 `alias`（后端仅存储，前端过滤，不涉及后端逻辑）。
+- **B1** 画布可查看多版本；**B2/B2.1** 删除版本需弹窗二次确认（告知可能导致 File 解析不可用）；**B3** 改 DSL → 生成新版本；**B4** 画布修改**不向下传播**到已绑定的 dataset/file（粘性快照）。
+- **C1** dataset/file 配置可选版本；**C2** 默认绑定“选择时刻最新具体版本”（锁定非浮动），可手动选；**C3** 切版本 → 参数重置为该版本 default。
+- **C4** 版本删除 → 引用方 Missing，file 不可解析；**D1/D2/D3** 非最新显示 `!`，点击仅提示不引导升级；**E1** 列表新→老；**F1** 别名前端过滤。
+
+**不在范围**：agent（画布类别 `agent`）的发布语义、built-in parser（`parse_type=1`）的版本化、Python 端（按 AGENTS.md 正在移除）。
+
+---
+
+## 2. 当前状态核查（已核实，非臆测）
+
+### 2.1 版本化基础设施已存在
+- 表 `user_canvas_version`，实体 `entity.UserCanvasVersion`：`ID, UserCanvasID, Title, Description, Release bool, DSL, BaseModel`。**需加 `Alias *string`**。
+- `internal/dao/user_canvas_version.go`：
+  - `SaveOrReplaceLatestTx`：DSL 变更才建新版本；同 DSL 且 `!latest.Release || opts.Release` 时就地更新最新行（对 dataflow 即同 DSL 重复保存不新建版本）。
+  - `ListByCanvasID`：`ORDER BY create_time DESC` —— 满足 E1（新→老）。
+  - `GetLatest`：`create_time DESC` 取最新版本。
+  - `GetLatestReleased`：仅 `release = true` 的版本。
+  - `DeleteTx` / `DeleteByCanvasIDTx` 已存在。
+
+### 2.2 发布动作的真相（关键修正）
+- `web/.../index.tsx:350` 无条件挂载 `<PublishConfirmDialog>`，但 `publish-confirm-dialog.tsx` 内部有 `if (isPipeline) { return null; }`（`isPipeline` 由 `useIsPipeline()` 判定 URL 分类为 `DataflowCanvas`）。**结论：发布按钮是 agent 专用，ingestion pipeline（dataflow）没有发布动作。**
+- `use-save-graph.ts` 带 `release=true` 的 `saveGraph(...,true)` 仅来自 `onPublish`，而该回调在 pipeline 下永不触发；dataflow 所有保存（含 20s 自动保存）`release` 均为 `undefined`。
+- 后端 `SaveOrReplaceLatestTx` 对 dataflow 写入的版本 `Release` 恒为 `false`。
+- 因此 **`GetLatestReleased` 对 dataflow 永远返回未找到** → dataflow 无 draft/published 双态，**所有版本都是草稿**。
+
+### 2.3 DSL 加载的两个真相源（版本化要改的核心）
+- API 侧：`internal/service/pipeline_params.go` 的 `loadCanvasDSLJSON(ctx, canvasID)` 读 `user_canvas.dsl`（永远最新），被 `LoadPipelineDSL` 与 `ResolveComponentParamsDefaults` 复用。
+- 运行时：`internal/ingestion/task/pipeline_executor.go` 的 `loadDSLFromCanvas(ctx, canvasID)`（~L1010）读 `user_canvas.dsl`（永远最新），返回 `(dsl, canvasID, err)`。其类型 `loadDSLFunc` 签名仅 `(ctx, canvasID)`，**破坏性变更需加版本**。
+
+### 2.4 绑定落库路径（写入粘性快照的落点）
+- dataset：`internal/service/dataset/crud.go` `CreateDataset`、`internal/service/dataset/update.go` `UpdateDataset`。
+  - `service.FromRequest(parseType, parserID, pipelineID)` 构建 `ParserSelection`；`sel.IsBuiltIn()` 时 `req.PipelineID = nil`（清掉）；Pipeline 模式下 `pipelineID` 是 `user_canvas.id`（经 `normalizeDatasetPipelineID` 校验 32 hex）。
+  - `update.go` 中 `service.LoadPipelineDSL(ctx, isPipeline, effParserID, effPipelineID)` 加载 DSL；`pipelineChanged := pipelineID != nil && (lockedKB.PipelineID == nil || *pipelineID != *lockedKB.PipelineID)`。
+- document（文件级）：`internal/service/document/file2document.go` 写入 `PipelineID`；`document.go` 有 `PipelineID *string`。单个文件可单独改 pipeline（已确认）。
+
+### 2.5 运行时上下文
+- `internal/ingestion/task/task_context.go` 的 `TaskContext` 仅有 `PipelineID string`；`resolvePipelineID` 需加 `resolvePipelineVersionID`。
+- ad-hoc/调试路径（`pipeline_executor.go` ~L885-916，`input.PipelineID`）也需走版本校验（见 §12 A7）。
+
+---
+
+## 3. 锁定决策
+
+1. **迁移 = 幂等 Go 迁移函数**（`internal/dao/migration.go` 的 `RunMigrations` 集中调用），参考先例 `migrateKnowledgebaseParserConfig`（FindInBatches + 版本标记）。**不**用独立 SQL 脚本。
+2. **Missing = 运行时校验**，不额外增加字段、不查“是否最新”。仅当绑定版本 `pipeline_version_id` 指向的 `user_canvas_version` 不存在（或被删）时 → Missing。
+3. **版本归属校验**：禁止悬空版本号。`pipeline_version_id` 必须属于绑定 `pipeline_id` 对应的 `user_canvas`（且类别为 `dataflow_canvas`）；否则视为无效。
+
+### H12 修订（v4 修正）
+- 因 dataflow 无发布语义，`!`（非最新）基线改用 **`GetLatest`**（按 `create_time DESC`），**不**用 `GetLatestReleased`。
+- `backfillDSLVersionBindings` 对每个绑定了 dataflow-canvas pipeline 的 dataset/file，取 **`GetLatest(canvasID).ID`** 写入 `pipeline_version_id`；`GetLatest` 不存在（脏数据）则跳过 + 日志告警（绝不写悬空 version_id）。
+
+---
+
+## 4. 数据模型变更
+
+### 4.1 `entity.UserCanvasVersion`
+新增字段：
+```go
+Alias *string `gorm:"column:alias" json:"alias,omitempty"`
+```
+
+### 4.2 `entity.Dataset` 与 `entity.Document`
+各新增可空字段：
+```go
+PipelineVersionID *string `gorm:"column:pipeline_version_id;size:32;index" json:"pipeline_version_id,omitempty"`
+```
+（built-in parser 绑定时该字段为 `NULL`，不启用。）
+
+### 4.3 迁移函数（新增 `internal/dao/migration.go`）
+- `migrateDSLVersionColumns`：给 `knowledgebase` 与 `document` 表加 `pipeline_version_id` 列（用 `HasColumn` + ALTER，参考 `migrateIngestionTaskPipelineLogID` 的 `Error1060` 容错）。
+- `backfillDSLVersionBindings`：幂等（用 `system_settings` 版本标记防重跑）。`FindInBatches` 遍历 `knowledgebase`/`document` 中 `pipeline_id IS NOT NULL AND pipeline_id <> ''` 的行；仅当 `user_canvas` 存在且 `canvas_category = dataflow_canvas` 时，写 `pipeline_version_id = GetLatest(canvasID).ID`；built-in / 类别不符 / 无版本 → 跳过。
+
+---
+
+## 5. 写入路径：粘性快照（首次默认最新、之后保留）
+
+**语义**：绑定 pipeline 的那一刻，把“当时最新具体版本”的 `ID` 锁进 `pipeline_version_id`，后续画布再改不再影响已绑定方（B4）。
+
+- **dataset**：`crud.go` `CreateDataset` 与 `update.go` `UpdateDataset` 中，当 `sel.IsPipeline()` 且 `pipelineID` 有效时：
+  - 若本次是**新绑定 / pipeline_id 变更**（`pipelineChanged`）：`pipeline_version_id = GetLatest(canvasID).ID`（锁定当时最新）。
+  - 若 pipeline_id 未变（仅其它字段变更）：**保留**原 `pipeline_version_id`（不随画布漂移）。
+  - 归属校验：确认 `canvas_category = dataflow_canvas`，否则报错（决策 §3-3）。
+- **document**（文件级）：`file2document.go` 同理，绑定/变更 pipeline 时写 `pipeline_version_id = GetLatest(canvasID).ID`；未变更则保留。
+- **手动选版本（C2）**：新增请求字段 `pipeline_version_id`（可选）。传入时校验其属于该 `pipeline_id` 的 canvas，写该值（取代“默认最新”）。
+- **C3 切版本重置参数**：当 `pipeline_version_id` 被显式改为另一版本时，调用 `ResolveComponentParamsDefaults(ctx, parserID, &canvasID, versionID)` 取得该版本 default，将 dataset/document 的 `parser_config`（component params）重置为该 default（范围见 §12 A3）。
+
+---
+
+## 6. 读取路径：版本透传 + Missing 校验
+
+### 6.1 API 侧（`pipeline_params.go`）
+- `loadCanvasDSLJSON(ctx, canvasID, versionID *string)`：
+  - `versionID` 非空 → 经 `UserCanvasVersionDAO.GetByID` 取版本；**归属校验**：`version.UserCanvasID == canvasID`（否则视作 Missing）。
+  - `versionID` 空（脏数据/未迁移）→ 回退 `GetLatest(canvasID)`；若仍无 → 返回 Missing 错误。
+  - 读 `version.DSL` 替代 `canvas.DSL`。
+  - 仅 `canvas_category = dataflow_canvas` 进入上述版本化路径；agent 类画布（`agent`/`agent_canvas`）按 §1 不在范围，直接读 `canvas.DSL`（live draft），不走版本化、不触发 Missing。
+- `LoadPipelineDSL` 与 `ResolveComponentParamsDefaults` 透传 `versionID`（从 dataset/document 的 `pipeline_version_id` 取）。
+
+### 6.2 运行时（`pipeline_executor.go`）
+- `TaskContext` 增加 `PipelineVersionID string`；`resolvePipelineID` 增加 `resolvePipelineVersionID`（从 `doc.PipelineID`/`doc.PipelineVersionID` 解析）。
+- `loadDSLFunc` 签名加 `versionID`；`loadDSLFromCanvas(ctx, canvasID, versionID)` 改为读 `user_canvas_version.dsl`（归属校验同上）。
+- ad-hoc `input.PipelineID` 路径同样带 `versionID`（来源见 §12 A7）。
+- **Missing 处理**：版本缺失/不归属 → 解析任务直接 fail（C4），错误信息含“pipeline 版本不存在，请重新选择版本”，file 进入不可解析状态；**不做**“是否最新”判断（决策 §3-2）。
+
+### 6.3 `!` 非最新指示（D1/D2/D3）
+- 列表/详情接口返回 dataset/document 时，附带 `pipeline_version_outdated: bool` =（`pipeline_version_id` 非空 且 ≠ `GetLatest(canvasID).ID`）。
+- 前端显示 `!`；点击仅弹提示（D3：**不**引导升级、不自动改绑定）。
+
+---
+
+## 7. 服务/API 变更
+
+- `agent.go` `UpdateAgent`（agent 与 dataflow 共用，经 `canvas_category` 区分）：`patch` 含 `dsl` 时调 `SaveOrReplaceLatestTx`（携 `release`，dataflow 恒 false）——**不改**。
+- `DeleteVersion`：增加引用扫描 —— 查 `knowledgebase`/`document` 中 `pipeline_version_id = 待删版本ID` 的引用数；**允许删除**（B2.1 弹窗已二次确认），引用方因版本缺失自动进入 Missing（§6.2）。仅 dataflow 生效（引用扫描范围见 §12 A4）。
+- 版本列表接口（`ListByCanvasID`，已按 create_time DESC 满足 E1）：返回含 `alias` 字段（A2/F1）。
+- 版本详情/下载接口已存在（`version-dialog` 仅查看/下载，无删除/载入编辑入口 —— 前端需补 B2 删除按钮与 C2 选版本入口）。
+
+---
+
+## 8. 前端变更
+
+- `web/src/pages/agent/index.tsx`：`PublishConfirmDialog` 对 pipeline 返回 null（确认无发布动作，保持现状）。
+- `web/src/components/document-pipeline-dialog/`：表单增加版本选择（读 `ListByCanvasID` 的版本列表，含 alias 过滤 F1），提交体增加可选 `pipeline_version_id`。
+- `web/src/pages/agent/version-dialog/index.tsx`：增加删除按钮（B2/B2.1 二次确认）、`!` 提示（D1/D2/D3）、版本 alias 显示与过滤（A2/F1）、可选“载入某版本作为绑定”（C2）。
+- dataset 设置页：增加 pipeline 版本选择（C1/C2）与 `!` 指示（D1/D2/D3）。
+
+---
+
+## 9. TDD 测试清单（严格红→绿）
+
+**后端（unit tier，默认 `bash build.sh --test`）**
+- T1 `migrateDSLVersionColumns`：列不存在时加列、已存在时幂等（Error1060 容错）。
+- T2 `backfillDSLVersionBindings`：dataflow-canvas 绑定 → 写 `GetLatest().ID`；built-in 跳过；agent-canvas 跳过；`GetLatest` 缺失跳过+日志；重跑幂等（system_settings 标记）。
+- T3 `loadCanvasDSLJSON` 带 versionID：取版本 DSL；归属不符 → Missing；空 versionID 回退 GetLatest。
+- T4 `LoadPipelineDSL` 透传 versionID。
+- T5 `ResolveComponentParamsDefaults` 按 version 取 default。
+- T6 dataset `CreateDataset`：Pipeline 模式写 `pipeline_version_id=GetLatest`；BuiltIn 模式字段为 NULL。
+- T7 dataset `UpdateDataset`：pipeline 未变更 → 保留原 versionID（B4）；pipeline 变更 → 重写为新 GetLatest；手动 versionID 生效且做归属校验。
+- T8 document 绑定同样写 versionID（粘性）。
+- T9 `DeleteVersion` 引用扫描：引用存在时允许删除、引用方 Missing；无引用正常删。
+- T10 运行时 `loadDSLFromCanvas` 按 versionID 取 `user_canvas_version.dsl`；版本缺失 → 解析 fail（C4）。
+- T11 `TaskContext.resolvePipelineVersionID` 从 doc 解析。
+- T12 ad-hoc 路径带 version 校验。
+- T13 归属校验：悬空/跨 canvas 的 `pipeline_version_id` → 拒绝/ Missing。
+- T14 `!` 指示计算：绑定≠GetLatest → outdated=true；相等 → false。
+- T15 alias 存储/返回（A2）。
+- T16 built-in pipeline 不受任何版本逻辑影响（验收断言）。
+- T17 迁移前存量数据可被 backfill 正确锁定。
+- T18 `normalizeDatasetPipelineID` + 类别校验组合。
+
+**前端**
+- T19 版本列表新→老（E1）。
+- T20 `!` 显示与“仅提示不引导升级”（D3）。
+- T21 删除版本二次确认弹窗文案含“可能导致 File 解析不可用”（B2.1）。
+- T22 选版本表单可选具体版本 + alias 过滤（C2/F1）。
+- T23 dataset/file 版本选择入口与提交体含 `pipeline_version_id`。
+- T28 `!` 点击仅提示。
+- T29 Missing 状态呈现（禁用解析 + 提示重选）。
+
+**集成/边界（按需 integration tier）**
+- T24 删除被引用版本后，相关 file 解析失败且错误可定位。
+- T25 画布改 DSL 生成新版本、已绑定方不受影响（B4 端到端）。
+- T26 切版本后 component params 重置为该版本 default（C3）。
+- T27 迁移在含 built-in + dataflow 混合库上的幂等重跑。
+- T30 并发保存同 canvas 不产生孤儿版本。
+- T31 alias 纯前端过滤不影响后端版本返回集。
+
+---
+
+## 10. 漏洞审计（v4 状态）
+
+| 编号 | 描述 | 状态 |
+|---|---|---|
+| V1 | 版本未线程化到运行时（loadDSL 永远读最新） | **已修复设计**：§6 改读 `user_canvas_version.dsl` |
+| V2 | 拦截点不全（ad-hoc 路径漏校验） | 设计覆盖，待 T12 落实 |
+| V3 | 别名误建版本 | 设计：alias 仅字段，不改 SaveOrReplaceLatestTx 行为 |
+| V4 | `!` 与 Missing 不可区分 | 设计区分：`!`=outdated（可解析，提示）；Missing=版本不存在（不可解析） |
+| V5 | C3 仅在 pipeline 变更触发 | 设计：C3 显式切版本即触发重置（§5 / T26） |
+| V6 | Missing 恢复 | 设计：重新选版本即恢复，无需特殊逻辑 |
+| V7 | 文件级 pipeline 绑定可编辑 | 已确认可编辑，document 级同套逻辑 |
+| H12 | `!` “最新”口径 | **v4 修正**：dataflow 无发布 → 用 `GetLatest`（create_time），非 `GetLatestReleased` |
+
+---
+
+## 11. 验收清单（核心断言）
+
+1. built-in parser 绑定：不受任何版本逻辑影响，`pipeline_version_id` 恒 NULL。
+2. dataflow 绑定默认锁“当时最新具体版本”，画布后续改动不传播到已绑定方（B4）。
+3. 删除被引用版本：引用方进入 Missing、file 不可解析；删除前有二次确认弹窗（B2/B2.1）。
+4. 非最新绑定显示 `!`，点击仅提示，不自动升级（D3）。
+5. 迁移幂等：存量 dataflow 绑定被锁定到 `GetLatest`；重跑安全；built-in/agent 跳过。
+6. 悬空/跨 canvas 的 `pipeline_version_id` 被拒绝或判 Missing（归属校验）。
+7. 别名仅存、仅前端过滤，后端版本返回集不受其影响。
+
+---
+
+## 12. 决策裁定（v5 已锁定，无未决项）
+
+- **A1 类别边界（已裁定：强制校验）**：绑定/运行时要求 `user_canvas.canvas_category == "dataflow_canvas"`。依据：`canvas_category` 是 `user_canvas` 真实字段（值 `dataflow_canvas`/`agent_canvas`）；作为归属校验的强化。
+- **A2 文件级范围（已裁定：覆盖 document）**：`document` 表同样加 `pipeline_version_id` 并复用全套逻辑。依据：C1 原文“dataset/file”。
+- **A3 C3 重置范围（已裁定：整体重置）**：切版本时把 dataset/document 的 `parser_config`（component params）整体重置为该版本 default。依据：用户裁定 + C3 字面“参数重置为该版本 default”。（§5 已按此写）
+- **A4 删除语义（已裁定：允许删除→Missing）**：弹窗二次确认后允许删除，引用方进入 Missing。依据：用户裁定 + B2.1 文案“告知风险”。（§7 已按此写）
+- **A5 alias 约束（已裁定：不约束）**：自由文本、可空、不要求唯一。依据：A2 原文“仅存储、前端过滤”。
+- **A6 Missing 呈现（已裁定：禁用解析+提示重选）**：前端对 Missing（版本被删）禁用解析按钮并提示重新选版本；与 `!`（仍可解析、仅提示）区分。
+- **A7 ad-hoc/调试路径（已裁定：同正式解析带 version）**：`pipeline_executor.go` ad-hoc 路径已 reload `doc`（L888），同法透传 `doc.PipelineVersionID`。
+- **A8 脏数据回填（已裁定：跳过+日志）**：backfill 遇 canvas 无版本时跳过 + 日志告警，绝不写悬空 version_id。
+
+> 设计已完全锁定，进入 §9 TDD 实现阶段。

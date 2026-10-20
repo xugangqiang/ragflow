@@ -20,25 +20,18 @@ import (
 // Missing state: the file cannot be parsed until a valid version is (re)selected.
 var ErrPipelineVersionMissing = errors.New("pipeline version missing or not owned by canvas")
 
-// loadCanvasDSLJSON returns the DSL JSON for a custom canvas pipeline. When
-// versionID is set it resolves that specific version of the canvas; otherwise it
-// falls back to the latest version and, for legacy canvases that predate
-// versioning, to the canvas row's dsl column. The resolved version's dsl holds
-// the same component-graph structure that built-in templates use, so it can be
-// validated by the same schema extractor. It is a package-level function so both
-// document and knowledge-base updates reuse it.
+// loadCanvasDSLJSON returns the DSL JSON for a custom canvas pipeline.
+//
+// For dataflow canvases (canvas_category = dataflow_canvas) the read is versioned
+// per design §6.1: an explicit versionID resolves that exact version; otherwise
+// the latest version is used, and a canvas with no version rows surfaces
+// ErrPipelineVersionMissing (no fallback to the legacy draft column). Agent
+// canvases are out of the multi-version scope (design §1) and keep reading the
+// live draft column directly. It is a package-level function so both document
+// and knowledge-base updates reuse it.
 func loadCanvasDSLJSON(ctx context.Context, canvasID string, versionID *string) ([]byte, error) {
 	if strings.TrimSpace(canvasID) == "" {
 		return nil, fmt.Errorf("empty canvas id")
-	}
-	if versionID != nil && strings.TrimSpace(*versionID) != "" {
-		return loadVersionedCanvasDSLJSON(ctx, canvasID, strings.TrimSpace(*versionID))
-	}
-	// No explicit version: prefer the latest version, then the legacy canvas dsl.
-	if v, err := dao.NewUserCanvasVersionDAO().GetLatest(ctx, dao.DB, canvasID); err == nil {
-		if len(v.DSL) > 0 {
-			return marshalCanvasDSL(canvasID, v.DSL)
-		}
 	}
 	canvas, err := dao.NewUserCanvasDAO().GetByID(ctx, dao.DB, canvasID)
 	if err != nil {
@@ -47,10 +40,23 @@ func loadCanvasDSLJSON(ctx context.Context, canvasID string, versionID *string) 
 		}
 		return nil, fmt.Errorf("load canvas %s: %w", canvasID, err)
 	}
-	if len(canvas.DSL) == 0 {
-		return nil, fmt.Errorf("canvas %s has no DSL", canvasID)
+	if canvas.CanvasCategory != "dataflow_canvas" {
+		// Agent canvases: out of scope for multi-version; read the live draft.
+		if len(canvas.DSL) == 0 {
+			return nil, fmt.Errorf("canvas %s has no DSL", canvasID)
+		}
+		return marshalCanvasDSL(canvasID, canvas.DSL)
 	}
-	return marshalCanvasDSL(canvasID, canvas.DSL)
+	if versionID != nil && strings.TrimSpace(*versionID) != "" {
+		return loadVersionedCanvasDSLJSON(ctx, canvasID, strings.TrimSpace(*versionID))
+	}
+	// No explicit version: use the latest version row (design §6.1).
+	if v, err := dao.NewUserCanvasVersionDAO().GetLatest(ctx, dao.DB, canvasID); err == nil {
+		if len(v.DSL) > 0 {
+			return marshalCanvasDSL(canvasID, v.DSL)
+		}
+	}
+	return nil, fmt.Errorf("pipeline version for canvas %s not found: %w", canvasID, ErrPipelineVersionMissing)
 }
 
 // loadVersionedCanvasDSLJSON resolves a specific canvas version and validates

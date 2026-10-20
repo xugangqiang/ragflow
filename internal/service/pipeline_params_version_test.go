@@ -123,7 +123,7 @@ func TestLoadCanvasDSLJSON_NilVersionFallsBackToLatestVersion(t *testing.T) {
 	assertContains(t, string(raw), "from-version")
 }
 
-func TestLoadCanvasDSLJSON_NilVersionLegacyCanvasReadsCanvasDSL(t *testing.T) {
+func TestLoadCanvasDSLJSON_AgentCanvasReadsCanvasDSL(t *testing.T) {
 	db := setupServiceTestDB(t)
 	if err := db.AutoMigrate(&entity.UserCanvasVersion{}); err != nil {
 		t.Fatalf("migrate: %v", err)
@@ -133,9 +133,10 @@ func TestLoadCanvasDSLJSON_NilVersionLegacyCanvasReadsCanvasDSL(t *testing.T) {
 	t.Cleanup(func() { dao.DB = orig })
 
 	ctx := context.Background()
-	// Canvas with a DSL but NO version rows: legacy path must still resolve.
-	canvasID := "cv-legacy"
-	if err := db.Create(&entity.UserCanvas{ID: canvasID, CanvasCategory: "dataflow_canvas", DSL: entity.JSONMap{"graph": "legacy-only"}}).Error; err != nil {
+	// Agent canvases are out of the multi-version scope (design §1): they keep
+	// reading the live draft column, even with no version rows.
+	canvasID := "cv-agent"
+	if err := db.Create(&entity.UserCanvas{ID: canvasID, CanvasCategory: "agent_canvas", DSL: entity.JSONMap{"graph": "agent-only"}}).Error; err != nil {
 		t.Fatal(err)
 	}
 
@@ -143,7 +144,28 @@ func TestLoadCanvasDSLJSON_NilVersionLegacyCanvasReadsCanvasDSL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadCanvasDSLJSON: %v", err)
 	}
-	assertContains(t, string(raw), "legacy-only")
+	assertContains(t, string(raw), "agent-only")
+}
+
+func TestLoadCanvasDSLJSON_DataflowWithoutVersionIsMissing(t *testing.T) {
+	db := setupServiceTestDB(t)
+	if err := db.AutoMigrate(&entity.UserCanvasVersion{}); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	orig := dao.DB
+	dao.DB = db
+	t.Cleanup(func() { dao.DB = orig })
+
+	ctx := context.Background()
+	// A dataflow canvas with a DSL but NO version rows must surface Missing
+	// (design §6.1): the legacy draft column is not a fallback for dataflow.
+	canvasID := "cv-dataflow-orphan"
+	if err := db.Create(&entity.UserCanvas{ID: canvasID, CanvasCategory: "dataflow_canvas", DSL: entity.JSONMap{"graph": "legacy-only"}}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := loadCanvasDSLJSON(ctx, canvasID, nil)
+	assertMissing(t, err)
 }
 
 func TestLoadPipelineDSL_PassthroughVersion(t *testing.T) {
