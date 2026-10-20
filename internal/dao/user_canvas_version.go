@@ -19,6 +19,7 @@ package dao
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 
 	"gorm.io/gorm"
@@ -142,6 +143,31 @@ func (dao *UserCanvasVersionDAO) GetLatestReleaseTimes(ctx context.Context, db *
 // (future) parent-canvas stat update land in one atomic write.
 func (dao *UserCanvasVersionDAO) DeleteTx(ctx context.Context, tx *gorm.DB, id string) error {
 	return tx.WithContext(ctx).Where("id = ?", id).Delete(&entity.UserCanvasVersion{}).Error
+}
+
+// pipelineVersionReferenceTables are the tables that can pin a canvas
+// version through their pipeline_version_id column (design B4 sticky
+// snapshot). The reference scan on delete is scoped to exactly these
+// (design section 12 A4).
+var pipelineVersionReferenceTables = []string{"knowledgebase", "document"}
+
+// CountPipelineVersionReferences returns how many rows across the version
+// reference tables pin the given version. Used by DeleteVersion so callers
+// can warn that deleting the version will leave those bindings in a Missing
+// state (design section 6.2 / A4).
+func (dao *UserCanvasVersionDAO) CountPipelineVersionReferences(ctx context.Context, db *gorm.DB, versionID string) (int64, error) {
+	var total int64
+	for _, table := range pipelineVersionReferenceTables {
+		var n int64
+		if err := db.WithContext(ctx).
+			Table(table).
+			Where("pipeline_version_id = ?", versionID).
+			Count(&n).Error; err != nil {
+			return 0, fmt.Errorf("count %s references for version %s: %w", table, versionID, err)
+		}
+		total += n
+	}
+	return total, nil
 }
 
 // DeleteByCanvasIDTx is the transactional variant of DeleteByCanvasID.

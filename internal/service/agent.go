@@ -1407,7 +1407,8 @@ func (s *AgentService) DeleteVersion(ctx context.Context, userID, canvasID, vers
 	if versionID == "" {
 		return dao.ErrUserCanvasVersionNotFound
 	}
-	if _, err := s.loadCanvasForUser(ctx, userID, canvasID, permission.OperationUpdate); err != nil {
+	canvas, err := s.loadCanvasForUser(ctx, userID, canvasID, permission.OperationUpdate)
+	if err != nil {
 		return err
 	}
 	row, err := s.versionDAO.GetByID(ctx, dao.DB, versionID)
@@ -1416,6 +1417,19 @@ func (s *AgentService) DeleteVersion(ctx context.Context, userID, canvasID, vers
 	}
 	if row.UserCanvasID != canvasID {
 		return dao.ErrUserCanvasVersionNotFound
+	}
+	// Design B4 / A4: deleting a version is allowed even when bindings
+	// reference it (the B2.1 dialog already confirmed). Referencing bindings
+	// simply fall into the Missing state (design section 6.2). For dataflow
+	// canvases we scan references so the operator gets a warning about the
+	// affected bindings (design section 12 A4, scan scoped to dataflow only).
+	if canvas.CanvasCategory == "dataflow_canvas" {
+		if refs, rerr := s.versionDAO.CountPipelineVersionReferences(ctx, dao.DB, versionID); rerr == nil && refs > 0 {
+			common.Warn("delete canvas version still referenced by active bindings; referers will enter Missing state",
+				zap.String("canvas_id", canvasID),
+				zap.String("version_id", versionID),
+				zap.Int64("reference_count", refs))
+		}
 	}
 	return dao.DB.Transaction(func(tx *gorm.DB) error {
 		return s.versionDAO.DeleteTx(ctx, tx, versionID)
