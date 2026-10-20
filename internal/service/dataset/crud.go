@@ -20,6 +20,35 @@ import (
 	"gorm.io/gorm"
 )
 
+// resolvePipelineVersionID determines which canvas version to bind for a
+// dataset/document in Pipeline mode (design section 5 sticky snapshot). When a
+// specific version is requested it must belong to the bound pipeline (ownership
+// check, design T13); otherwise the latest version of the bound canvas is used.
+// BuiltIn mode (no pipelineID) yields nil.
+func resolvePipelineVersionID(ctx context.Context, db *gorm.DB, pipelineID *string, requestedVersionID *string) (*string, error) {
+	if pipelineID == nil || strings.TrimSpace(*pipelineID) == "" {
+		return nil, nil
+	}
+	canvasID := strings.TrimSpace(*pipelineID)
+	if requestedVersionID != nil && strings.TrimSpace(*requestedVersionID) != "" {
+		v, err := dao.NewUserCanvasVersionDAO().GetByID(ctx, db, strings.TrimSpace(*requestedVersionID))
+		if err != nil {
+			if errors.Is(err, dao.ErrUserCanvasVersionNotFound) {
+				return nil, fmt.Errorf("pipeline version %s not found: %w", *requestedVersionID, service.ErrPipelineVersionMissing)
+			}
+			return nil, fmt.Errorf("load pipeline version %s: %w", *requestedVersionID, err)
+		}
+		if v.UserCanvasID != canvasID {
+			return nil, fmt.Errorf("pipeline version %s does not belong to canvas %s: %w", *requestedVersionID, canvasID, service.ErrPipelineVersionMissing)
+		}
+		return requestedVersionID, nil
+	}
+	if v, err := dao.NewUserCanvasVersionDAO().GetLatest(ctx, db, canvasID); err == nil && v != nil {
+		return &v.ID, nil
+	}
+	return nil, nil
+}
+
 func (d *DatasetService) CreateDataset(ctx context.Context, req *service.CreateDatasetRequest, subject permission.Subject) (map[string]interface{}, common.ErrorCode, error) {
 	tenantID := strings.TrimSpace(subject.TenantID)
 	userID := strings.TrimSpace(subject.UserID)
@@ -213,14 +242,12 @@ func (d *DatasetService) CreateDataset(ctx context.Context, req *service.CreateD
 		tenant.LLMID,
 	)
 
-	// Slice 3: bind the latest pipeline version when creating in Pipeline mode
-	// (design §5 sticky snapshot). The version is resolved from the bound canvas;
-	// built-in mode leaves it nil.
-	var pipelineVersionID *string
-	if sel.IsPipeline() && pipelineID != nil && strings.TrimSpace(*pipelineID) != "" {
-		if v, gerr := dao.NewUserCanvasVersionDAO().GetLatest(ctx, dao.DB, strings.TrimSpace(*pipelineID)); gerr == nil && v != nil {
-			pipelineVersionID = &v.ID
-		}
+	// Bind the pipeline version when creating in Pipeline mode (design §5
+	// sticky snapshot). A caller-supplied version is validated for ownership;
+	// otherwise the latest version of the bound canvas is used.
+	pipelineVersionID, verr := resolvePipelineVersionID(ctx, dao.DB, pipelineID, req.PipelineVersionID)
+	if verr != nil {
+		return nil, common.CodeBadRequest, verr
 	}
 
 	kb := &entity.Knowledgebase{

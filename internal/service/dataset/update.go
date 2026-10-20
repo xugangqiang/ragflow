@@ -334,9 +334,18 @@ func (d *DatasetService) UpdateDataset(ctx context.Context, datasetID, userID st
 		}
 
 		pipelineChanged := pipelineID != nil && (lockedKB.PipelineID == nil || *pipelineID != *lockedKB.PipelineID)
-		// Slice 3: on pipeline change, lock the new canvas's latest version
-		// (design §5 sticky snapshot). Unchanged pipeline keeps the prior binding.
-		if pipelineChanged && pipelineID != nil && strings.TrimSpace(*pipelineID) != "" {
+		// Design §5 sticky snapshot + T7: an explicit caller-supplied version is
+		// re-pinned (with ownership validation) whenever provided; otherwise a
+		// changed pipeline locks the new canvas's latest version, and an
+		// unchanged pipeline preserves the prior binding.
+		if req.PipelineVersionID != nil && strings.TrimSpace(*req.PipelineVersionID) != "" {
+			bound, perr := resolvePipelineVersionID(ctx, tx, pipelineID, req.PipelineVersionID)
+			if perr != nil {
+				txCode = common.CodeBadRequest
+				return perr
+			}
+			updates["pipeline_version_id"] = bound
+		} else if pipelineChanged && pipelineID != nil && strings.TrimSpace(*pipelineID) != "" {
 			if v, gerr := dao.NewUserCanvasVersionDAO().GetLatest(ctx, tx, strings.TrimSpace(*pipelineID)); gerr == nil && v != nil {
 				updates["pipeline_version_id"] = v.ID
 			} else {

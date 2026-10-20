@@ -191,3 +191,134 @@ func TestUpdateDataset_PreservesVersionWhenPipelineUnchanged(t *testing.T) {
 		t.Fatalf("PipelineVersionID = %v, want preserved %s", kb.PipelineVersionID, ver1)
 	}
 }
+
+// seedDataflowCanvas inserts a dataflow canvas owned by tenant-1 (no versions).
+func seedDataflowCanvas(t *testing.T, db *gorm.DB, canvasID string) {
+	t.Helper()
+	if err := db.AutoMigrate(&entity.UserCanvasVersion{}); err != nil {
+		t.Fatalf("migrate version table: %v", err)
+	}
+	canvas := &entity.UserCanvas{
+		ID:             canvasID,
+		UserID:         "tenant-1",
+		CanvasCategory: "dataflow_canvas",
+		Permission:     "me",
+		DSL:            entity.JSONMap{"graph": "legacy"},
+	}
+	if err := db.Create(canvas).Error; err != nil {
+		t.Fatalf("seed canvas: %v", err)
+	}
+}
+
+// seedCanvasVersion inserts a version row with an explicit create-time offset
+// (milliseconds) so GetLatest ordering is deterministic in tests.
+func seedCanvasVersion(t *testing.T, db *gorm.DB, canvasID, versionID string, createOffsetMs int64) {
+	t.Helper()
+	ver := &entity.UserCanvasVersion{
+		ID:           versionID,
+		UserCanvasID: canvasID,
+		DSL:          entity.JSONMap{"graph": "versioned"},
+		CreateTime:   i64ptr(time.Now().UnixMilli() + createOffsetMs),
+	}
+	if err := db.Create(ver).Error; err != nil {
+		t.Fatalf("seed version %s: %v", versionID, err)
+	}
+}
+
+// T7c: an explicit PipelineVersionID (not the latest) is bound as-is when it
+// belongs to the bound pipeline (design section 5 + T7 manual pin).
+func TestCreateDataset_BindsExplicitPipelineVersion(t *testing.T) {
+	db := setupServiceTestDB(t)
+	pushServiceDB(t, db)
+	insertCreateDatasetTenant(t, "tenant-1")
+	ctx := t.Context()
+
+	canvasID := "0123456789abcdef0123456789abcdef"
+	verOld := "version0000000000000000000000aa"
+	verNew := "version0000000000000000000000bb"
+	seedDataflowCanvas(t, db, canvasID)
+	seedCanvasVersion(t, db, canvasID, verOld, 0)
+	seedCanvasVersion(t, db, canvasID, verNew, 1000) // verNew is the latest
+
+	parseType := 2
+	result, code, err := testDatasetCreateService(t).CreateDataset(ctx, &service.CreateDatasetRequest{
+		Name:              "ds-explicit-version",
+		PipelineID:        &canvasID,
+		PipelineVersionID: &verOld, // explicitly pin the older version
+		ParseType:         &parseType,
+	}, testDatasetSubject("tenant-1"))
+	if err != nil || code != common.CodeSuccess {
+		t.Fatalf("CreateDataset err=%v code=%d", err, code)
+	}
+	var kb entity.Knowledgebase
+	if err := db.Where("id = ?", result["id"]).Take(&kb).Error; err != nil {
+		t.Fatalf("load kb: %v", err)
+	}
+	if kb.PipelineVersionID == nil || *kb.PipelineVersionID != verOld {
+		t.Fatalf("PipelineVersionID = %v, want explicit %s (not latest %s)", kb.PipelineVersionID, verOld, verNew)
+	}
+}
+
+// T7d: an explicit PipelineVersionID that belongs to a different canvas is
+// rejected (design T13 ownership check).
+func TestCreateDataset_RejectsForeignPipelineVersion(t *testing.T) {
+	db := setupServiceTestDB(t)
+	pushServiceDB(t, db)
+	insertCreateDatasetTenant(t, "tenant-1")
+	ctx := t.Context()
+
+	canvas1 := "0123456789abcdef0123456789abcdef"
+	canvas2 := "fedcba9876543210fedcba9876543210"
+	ver1 := "version0000000000000000000000aa"
+	verForeign := "version0000000000000000000000cc"
+	seedDataflowCanvas(t, db, canvas1)
+	seedDataflowCanvas(t, db, canvas2)
+	seedCanvasVersion(t, db, canvas1, ver1, 0)
+	seedCanvasVersion(t, db, canvas2, verForeign, 0)
+
+	parseType := 2
+	_, code, err := testDatasetCreateService(t).CreateDataset(ctx, &service.CreateDatasetRequest{
+		Name:              "ds-foreign-version",
+		PipelineID:        &canvas1,
+		PipelineVersionID: &verForeign, // belongs to canvas2
+		ParseType:         &parseType,
+	}, testDatasetSubject("tenant-1"))
+	if err == nil && code == common.CodeSuccess {
+		t.Fatalf("expected rejection of foreign pipeline version, got success")
+	}
+	if code != common.CodeBadRequest {
+		t.Fatalf("expected CodeBadRequest, got code=%d err=%v", code, err)
+	}
+}
+
+// T7e: updating with an explicit PipelineVersionID re-pins to that version even
+// when the pipeline itself is unchanged (design T7 manual pin).
+func TestUpdateDataset_RebindsExplicitVersion(t *testing.T) {
+	db := setupDatasetUpdateTestDB(t)
+	pushServiceDB(t, db)
+
+	canvas1 := "0123456789abcdef0123456789abcdef"
+	verOld := "version0000000000000000000000aa"
+	verNew := "version0000000000000000000000bb"
+	seedDataflowCanvas(t, db, canvas1)
+	seedCanvasVersion(t, db, canvas1, verOld, 0)
+	seedCanvasVersion(t, db, canvas1, verNew, 1000)
+	seedBoundKB(t, db, "kb-repin", canvas1, verOld)
+
+	parseType := 2
+	_, code, err := testDatasetUpdateService(t).UpdateDataset(t.Context(), "kb-repin", "tenant-1", service.UpdateDatasetRequest{
+		PipelineID:        &canvas1,
+		PipelineVersionID: &verNew,
+		ParseType:         &parseType,
+	})
+	if err != nil || code != common.CodeSuccess {
+		t.Fatalf("UpdateDataset err=%v code=%d", err, code)
+	}
+	var kb entity.Knowledgebase
+	if err := db.Where("id = ?", "kb-repin").Take(&kb).Error; err != nil {
+		t.Fatalf("load kb: %v", err)
+	}
+	if kb.PipelineVersionID == nil || *kb.PipelineVersionID != verNew {
+		t.Fatalf("PipelineVersionID = %v, want re-pinned %s", kb.PipelineVersionID, verNew)
+	}
+}
