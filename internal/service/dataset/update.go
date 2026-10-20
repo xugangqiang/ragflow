@@ -295,7 +295,7 @@ func (d *DatasetService) UpdateDataset(ctx context.Context, datasetID, userID st
 				return resolveErr
 			}
 			isPipeline, effParserID, effPipelineID := eff.Effective()
-			dslJSON, dslErr := service.LoadPipelineDSL(ctx, isPipeline, effParserID, effPipelineID)
+			dslJSON, dslErr := service.LoadPipelineDSL(ctx, isPipeline, effParserID, effPipelineID, nil)
 			if dslErr != nil {
 				common.Warn("failed to load pipeline DSL for building parser_config",
 					zap.String("parserID", effParserID), zap.Error(dslErr))
@@ -319,7 +319,7 @@ func (d *DatasetService) UpdateDataset(ctx context.Context, datasetID, userID st
 		}
 		if parserIDProvided && parserID != lockedKB.ParserID {
 			if _, ok := updates["parser_config"]; !ok {
-				if resolved, cpErr := service.ResolveComponentParamsDefaults(ctx, parserID, nil); cpErr != nil {
+				if resolved, cpErr := service.ResolveComponentParamsDefaults(ctx, parserID, nil, nil); cpErr != nil {
 					common.Warn("failed to resolve component params defaults on parser_id switch",
 						zap.String("parserID", parserID), zap.Error(cpErr))
 				} else if resolved != nil {
@@ -339,7 +339,7 @@ func (d *DatasetService) UpdateDataset(ctx context.Context, datasetID, userID st
 			if parserIDProvided {
 				cfgParserID = parserID
 			}
-			if cpDefaults, cpErr := service.ResolveComponentParamsDefaults(ctx, cfgParserID, pipelineID); cpErr != nil {
+			if cpDefaults, cpErr := service.ResolveComponentParamsDefaults(ctx, cfgParserID, pipelineID, nil); cpErr != nil {
 				common.Warn("failed to resolve component params defaults on pipeline change",
 					zap.String("parserID", cfgParserID), zap.Error(cpErr))
 			} else if cpDefaults != nil {

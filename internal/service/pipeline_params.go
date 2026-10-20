@@ -15,13 +15,30 @@ import (
 	"gorm.io/gorm"
 )
 
-// loadCanvasDSLJSON returns the DSL JSON for a custom canvas pipeline. The
-// canvas's dsl column holds the same component-graph structure that built-in
-// templates use, so it can be validated by the same schema extractor. It is a
-// package-level function so both document and knowledge-base updates reuse it.
-func loadCanvasDSLJSON(ctx context.Context, canvasID string) ([]byte, error) {
+// ErrPipelineVersionMissing indicates the requested pipeline_version_id does
+// not exist or does not belong to the bound canvas. Callers treat this as a
+// Missing state: the file cannot be parsed until a valid version is (re)selected.
+var ErrPipelineVersionMissing = errors.New("pipeline version missing or not owned by canvas")
+
+// loadCanvasDSLJSON returns the DSL JSON for a custom canvas pipeline. When
+// versionID is set it resolves that specific version of the canvas; otherwise it
+// falls back to the latest version and, for legacy canvases that predate
+// versioning, to the canvas row's dsl column. The resolved version's dsl holds
+// the same component-graph structure that built-in templates use, so it can be
+// validated by the same schema extractor. It is a package-level function so both
+// document and knowledge-base updates reuse it.
+func loadCanvasDSLJSON(ctx context.Context, canvasID string, versionID *string) ([]byte, error) {
 	if strings.TrimSpace(canvasID) == "" {
 		return nil, fmt.Errorf("empty canvas id")
+	}
+	if versionID != nil && strings.TrimSpace(*versionID) != "" {
+		return loadVersionedCanvasDSLJSON(ctx, canvasID, strings.TrimSpace(*versionID))
+	}
+	// No explicit version: prefer the latest version, then the legacy canvas dsl.
+	if v, err := dao.NewUserCanvasVersionDAO().GetLatest(ctx, dao.DB, canvasID); err == nil {
+		if len(v.DSL) > 0 {
+			return marshalCanvasDSL(canvasID, v.DSL)
+		}
 	}
 	canvas, err := dao.NewUserCanvasDAO().GetByID(ctx, dao.DB, canvasID)
 	if err != nil {
@@ -33,7 +50,31 @@ func loadCanvasDSLJSON(ctx context.Context, canvasID string) ([]byte, error) {
 	if len(canvas.DSL) == 0 {
 		return nil, fmt.Errorf("canvas %s has no DSL", canvasID)
 	}
-	raw, err := json.Marshal(canvas.DSL)
+	return marshalCanvasDSL(canvasID, canvas.DSL)
+}
+
+// loadVersionedCanvasDSLJSON resolves a specific canvas version and validates
+// that it belongs to the bound canvas. A missing or mis-owned version maps to
+// ErrPipelineVersionMissing so callers can surface a Missing (unparseable) state.
+func loadVersionedCanvasDSLJSON(ctx context.Context, canvasID, versionID string) ([]byte, error) {
+	v, err := dao.NewUserCanvasVersionDAO().GetByID(ctx, dao.DB, versionID)
+	if err != nil {
+		if errors.Is(err, dao.ErrUserCanvasVersionNotFound) {
+			return nil, fmt.Errorf("pipeline version %s not found: %w", versionID, ErrPipelineVersionMissing)
+		}
+		return nil, fmt.Errorf("load pipeline version %s: %w", versionID, err)
+	}
+	if v.UserCanvasID != canvasID {
+		return nil, fmt.Errorf("pipeline version %s does not belong to canvas %s: %w", versionID, canvasID, ErrPipelineVersionMissing)
+	}
+	if len(v.DSL) == 0 {
+		return nil, fmt.Errorf("pipeline version %s has no DSL: %w", versionID, ErrPipelineVersionMissing)
+	}
+	return marshalCanvasDSL(canvasID, v.DSL)
+}
+
+func marshalCanvasDSL(canvasID string, dsl entity.JSONMap) ([]byte, error) {
+	raw, err := json.Marshal(dsl)
 	if err != nil {
 		return nil, fmt.Errorf("marshal canvas %s DSL: %w", canvasID, err)
 	}
@@ -42,10 +83,11 @@ func loadCanvasDSLJSON(ctx context.Context, canvasID string) ([]byte, error) {
 
 // LoadPipelineDSL loads the DSL JSON for a pipeline identified by parserID
 // (built-in) or pipelineID (custom canvas). When both are provided, isPipeline
-// selects which one to use.
-func LoadPipelineDSL(ctx context.Context, isPipeline bool, parserID string, pipelineID *string) ([]byte, error) {
+// selects which one to use. versionID selects a specific canvas version; when nil
+// the latest version (or legacy canvas dsl) is used.
+func LoadPipelineDSL(ctx context.Context, isPipeline bool, parserID string, pipelineID *string, versionID *string) ([]byte, error) {
 	if isPipeline {
-		return loadCanvasDSLJSON(ctx, strings.TrimSpace(*pipelineID))
+		return loadCanvasDSLJSON(ctx, strings.TrimSpace(*pipelineID), versionID)
 	}
 	registry, err := pipelinepkg.DefaultRegistry()
 	if err != nil {
@@ -64,13 +106,13 @@ func LoadPipelineDSL(ctx context.Context, isPipeline bool, parserID string, pipe
 // ResolveComponentParamsDefaults loads the DSL for the target pipeline and
 // returns the component params defaults as an entity.JSONMap {cpnID: {param: value}}.
 // For builtin templates the DSL is loaded from the embedded registry; for custom
-// canvas pipelines it is loaded from the canvas row in the database.
-func ResolveComponentParamsDefaults(ctx context.Context, parserID string, pipelineID *string) (entity.JSONMap, error) {
+// canvas pipelines it is loaded from the canvas version (or legacy canvas row).
+func ResolveComponentParamsDefaults(ctx context.Context, parserID string, pipelineID *string, versionID *string) (entity.JSONMap, error) {
 	isPipeline := pipelineID != nil && strings.TrimSpace(*pipelineID) != ""
 	var cp map[string]map[string]any
 	var err error
 	if isPipeline {
-		dslJSON, lerr := loadCanvasDSLJSON(ctx, strings.TrimSpace(*pipelineID))
+		dslJSON, lerr := loadCanvasDSLJSON(ctx, strings.TrimSpace(*pipelineID), versionID)
 		if lerr != nil {
 			return nil, fmt.Errorf("load canvas DSL: %w", lerr)
 		}

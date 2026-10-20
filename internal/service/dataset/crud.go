@@ -134,7 +134,7 @@ func (d *DatasetService) CreateDataset(ctx context.Context, req *service.CreateD
 		}
 	}
 	isPipeline := pipelineID != nil && strings.TrimSpace(*pipelineID) != ""
-	dslJSON, dslErr := service.LoadPipelineDSL(ctx, isPipeline, parserID, pipelineID)
+	dslJSON, dslErr := service.LoadPipelineDSL(ctx, isPipeline, parserID, pipelineID, nil)
 	parserConfig := entity.JSONMap{}
 	if dslErr != nil {
 		common.Warn("failed to load pipeline DSL for building parser_config",

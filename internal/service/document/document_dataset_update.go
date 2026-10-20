@@ -180,7 +180,7 @@ func (s *DocumentService) UpdateDatasetDocument(ctx context.Context, userID, dat
 
 	if present["parser_config"] && req.ParserConfig != nil {
 		var dslJSON []byte
-		dslJSON, err = service.LoadPipelineDSL(ctx, isPipeline, effParserID, effPipelineID)
+		dslJSON, err = service.LoadPipelineDSL(ctx, isPipeline, effParserID, effPipelineID, nil)
 		if err != nil {
 			common.Warn("cleanAndUpdateDocumentParserConfig: failed to load DSL, falling back to merge",
 				zap.Error(err))
