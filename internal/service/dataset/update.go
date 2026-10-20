@@ -295,7 +295,12 @@ func (d *DatasetService) UpdateDataset(ctx context.Context, datasetID, userID st
 				return resolveErr
 			}
 			isPipeline, effParserID, effPipelineID := eff.Effective()
-			dslJSON, dslErr := service.LoadPipelineDSL(ctx, isPipeline, effParserID, effPipelineID, nil)
+			// Thread the effective pipeline version (design section 6.1): explicit
+			// pin when supplied, else latest of the bound canvas. The binding block
+			// below re-resolves the same value (and surfaces any ownership error); a
+			// load failure here is best-effort for parser_config rebuild only.
+			effVersionID, _ := resolvePipelineVersionID(ctx, tx, effPipelineID, req.PipelineVersionID)
+			dslJSON, dslErr := service.LoadPipelineDSL(ctx, isPipeline, effParserID, effPipelineID, effVersionID)
 			if dslErr != nil {
 				common.Warn("failed to load pipeline DSL for building parser_config",
 					zap.String("parserID", effParserID), zap.Error(dslErr))
@@ -357,7 +362,8 @@ func (d *DatasetService) UpdateDataset(ctx context.Context, datasetID, userID st
 			if parserIDProvided {
 				cfgParserID = parserID
 			}
-			if cpDefaults, cpErr := service.ResolveComponentParamsDefaults(ctx, cfgParserID, pipelineID, nil); cpErr != nil {
+			effVersionID, _ := resolvePipelineVersionID(ctx, tx, pipelineID, req.PipelineVersionID)
+			if cpDefaults, cpErr := service.ResolveComponentParamsDefaults(ctx, cfgParserID, pipelineID, effVersionID); cpErr != nil {
 				common.Warn("failed to resolve component params defaults on pipeline change",
 					zap.String("parserID", cfgParserID), zap.Error(cpErr))
 			} else if cpDefaults != nil {

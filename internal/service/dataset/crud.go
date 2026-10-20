@@ -163,7 +163,11 @@ func (d *DatasetService) CreateDataset(ctx context.Context, req *service.CreateD
 		}
 	}
 	isPipeline := pipelineID != nil && strings.TrimSpace(*pipelineID) != ""
-	dslJSON, dslErr := service.LoadPipelineDSL(ctx, isPipeline, parserID, pipelineID, nil)
+	pipelineVersionID, verr := resolvePipelineVersionID(ctx, dao.DB, pipelineID, req.PipelineVersionID)
+	if verr != nil {
+		return nil, common.CodeBadRequest, verr
+	}
+	dslJSON, dslErr := service.LoadPipelineDSL(ctx, isPipeline, parserID, pipelineID, pipelineVersionID)
 	parserConfig := entity.JSONMap{}
 	if dslErr != nil {
 		common.Warn("failed to load pipeline DSL for building parser_config",
@@ -241,14 +245,6 @@ func (d *DatasetService) CreateDataset(ctx context.Context, req *service.CreateD
 		parserConfig,
 		tenant.LLMID,
 	)
-
-	// Bind the pipeline version when creating in Pipeline mode (design §5
-	// sticky snapshot). A caller-supplied version is validated for ownership;
-	// otherwise the latest version of the bound canvas is used.
-	pipelineVersionID, verr := resolvePipelineVersionID(ctx, dao.DB, pipelineID, req.PipelineVersionID)
-	if verr != nil {
-		return nil, common.CodeBadRequest, verr
-	}
 
 	kb := &entity.Knowledgebase{
 		ID:                kbID,
