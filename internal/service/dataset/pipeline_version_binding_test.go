@@ -350,3 +350,35 @@ func TestPipelineVersionOutdated_ComputesFromLatest(t *testing.T) {
 		t.Fatalf("no pinned version should never be outdated")
 	}
 }
+
+// T7d: an explicit EMPTY PipelineVersionID clears the pin (track latest),
+// matching the document-layer semantics (design C2: the user can pick
+// Latest). Before this contract, an empty version with an unchanged
+// pipeline left the old pin in place, so choosing Latest never took effect.
+func TestUpdateDataset_EmptyVersionClearsPin(t *testing.T) {
+	db := setupDatasetUpdateTestDB(t)
+	pushServiceDB(t, db)
+
+	canvas1 := "0123456789abcdef0123456789abcdef"
+	ver1 := "version0000000000000000000000aa"
+	seedDataflowCanvasWithVersion(t, db, canvas1, ver1)
+	seedBoundKB(t, db, "kb-clear", canvas1, ver1)
+
+	parseType := 2
+	empty := ""
+	_, code, err := testDatasetUpdateService(t).UpdateDataset(t.Context(), "kb-clear", "tenant-1", service.UpdateDatasetRequest{
+		PipelineID:        &canvas1,
+		ParseType:         &parseType,
+		PipelineVersionID: &empty,
+	})
+	if err != nil || code != common.CodeSuccess {
+		t.Fatalf("UpdateDataset err=%v code=%d", err, code)
+	}
+	var kb entity.Knowledgebase
+	if err := db.Where("id = ?", "kb-clear").Take(&kb).Error; err != nil {
+		t.Fatalf("load kb: %v", err)
+	}
+	if kb.PipelineVersionID != nil {
+		t.Fatalf("PipelineVersionID = %v, want nil (cleared) after explicit empty version", *kb.PipelineVersionID)
+	}
+}

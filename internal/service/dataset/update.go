@@ -340,16 +340,26 @@ func (d *DatasetService) UpdateDataset(ctx context.Context, datasetID, userID st
 
 		pipelineChanged := pipelineID != nil && (lockedKB.PipelineID == nil || *pipelineID != *lockedKB.PipelineID)
 		// Design §5 sticky snapshot + T7: an explicit caller-supplied version is
-		// re-pinned (with ownership validation) whenever provided; otherwise a
-		// changed pipeline locks the new canvas's latest version, and an
-		// unchanged pipeline preserves the prior binding.
-		if req.PipelineVersionID != nil && strings.TrimSpace(*req.PipelineVersionID) != "" {
-			bound, perr := resolvePipelineVersionID(ctx, tx, pipelineID, req.PipelineVersionID)
-			if perr != nil {
-				txCode = common.CodeBadRequest
-				return perr
+		// re-pinned (with ownership validation) whenever provided; an explicit
+		// EMPTY version clears the pin (track the latest version, design C2),
+		// matching the document layer. When no version is supplied, a changed
+		// pipeline locks the new canvas's latest version, and an unchanged
+		// pipeline preserves the prior binding.
+		if req.PipelineVersionID != nil {
+			if strings.TrimSpace(*req.PipelineVersionID) != "" {
+				bound, perr := resolvePipelineVersionID(ctx, tx, pipelineID, req.PipelineVersionID)
+				if perr != nil {
+					txCode = common.CodeBadRequest
+					return perr
+				}
+				updates["pipeline_version_id"] = bound
+			} else {
+				// Explicit empty version = track the latest version (design C2):
+				// clear the pin so reads resolve the canvas latest. This mirrors
+				// the document layer, where an empty pipeline_version_id clears
+				// the pin instead of preserving it.
+				updates["pipeline_version_id"] = nil
 			}
-			updates["pipeline_version_id"] = bound
 		} else if pipelineChanged && pipelineID != nil && strings.TrimSpace(*pipelineID) != "" {
 			if v, gerr := dao.NewUserCanvasVersionDAO().GetLatest(ctx, tx, strings.TrimSpace(*pipelineID)); gerr == nil && v != nil {
 				updates["pipeline_version_id"] = v.ID

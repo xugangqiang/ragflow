@@ -677,8 +677,11 @@ export const useSetDocumentPipelineParser = () => {
       }
 
       // Pin a specific dataflow canvas version (design section 5 sticky
-      // snapshot). Empty/undefined means the latest version is used at runtime.
-      if (pipelineVersionId) {
+      // snapshot). An explicit empty string means the user picked
+      // Latest (track the canvas latest), so it must be sent for the
+      // backend to clear the pin; only an omitted value (undefined) keeps
+      // the current pin.
+      if (pipelineVersionId !== undefined) {
         updateData.pipeline_version_id = pipelineVersionId;
       }
 

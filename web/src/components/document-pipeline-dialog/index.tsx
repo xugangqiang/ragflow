@@ -16,6 +16,7 @@
 
 import { ParserSelect } from '@/components/parser-select';
 import PipelineOperatorTabs from '@/components/pipeline-operator-tabs';
+import { PipelineVersionSelect } from '@/components/pipeline-version-select';
 import { ButtonLoading } from '@/components/ui/button';
 import {
   Dialog,
@@ -25,20 +26,12 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { Form, FormField, FormItem, FormMessage } from '@/components/ui/form';
-import { Input } from '@/components/ui/input';
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select';
 import { RAGFlowTooltip } from '@/components/ui/tooltip';
 import { ParseType } from '@/constants/knowledge';
 import { IModalProps } from '@/interfaces/common';
 import { IChangeParserRequestBody } from '@/interfaces/request/document';
 import { useFetchCanvasVersionList } from '@/hooks/use-agent-request';
-import { useCallback, useState } from 'react';
+import { useCallback } from 'react';
 import { FieldErrors, useFormState, useWatch } from 'react-hook-form';
 import { useTranslation } from 'react-i18next';
 import { buildParserSelectValue } from '@/hooks/use-parser-options';
@@ -50,70 +43,9 @@ import {
 
 const FormId = 'DocumentPipelineDialogForm';
 
-type CanvasVersion = { id: string; title: string; alias?: string };
-
 interface IProps
   extends IModalProps<IChangeParserRequestBody>, IDocumentPipelineDialogProps {
   loading: boolean;
-}
-
-// Radix Select forbids an empty-string item value: the empty string is
-// reserved for clearing the selection and showing the placeholder. The
-// track-latest option therefore uses a non-empty sentinel that is translated
-// to and from the empty form value (empty pipeline_version_id means latest).
-const LATEST_VERSION_VALUE = '__latest__';
-
-// PipelineVersionSelect lets the user pin a specific dataflow canvas
-// version (design section 5/C2) or leave it empty to track the latest version.
-// Versions can be filtered by their free-text alias (design A2/F1).
-function PipelineVersionSelect({
-  versions,
-  value,
-  onChange,
-}: {
-  versions: CanvasVersion[];
-  value: string;
-  onChange: (v: string) => void;
-}) {
-  const { t } = useTranslation();
-  const [aliasFilter, setAliasFilter] = useState('');
-
-  const filtered = versions.filter((v) =>
-    !aliasFilter.trim()
-      ? true
-      : (v.alias ?? '')
-          .toLowerCase()
-          .includes(aliasFilter.trim().toLowerCase()),
-  );
-
-  return (
-    <div className="space-y-2">
-      <Input
-        className="h-8"
-        placeholder={t('flow.version.filterByAlias')}
-        value={aliasFilter}
-        onChange={(e) => setAliasFilter(e.target.value)}
-      />
-      <Select
-        value={value === '' ? LATEST_VERSION_VALUE : value}
-        onValueChange={(v) => onChange(v === LATEST_VERSION_VALUE ? '' : v)}
-      >
-        <SelectTrigger>
-          <SelectValue placeholder={t('flow.version.latest')} />
-        </SelectTrigger>
-        <SelectContent>
-          <SelectItem value={LATEST_VERSION_VALUE}>
-            {t('flow.version.latest')}
-          </SelectItem>
-          {filtered.map((v) => (
-            <SelectItem key={v.id} value={v.id}>
-              {v.alias ? v.alias + ' (' + v.title + ')' : v.title}
-            </SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
-    </div>
-  );
 }
 
 export function DocumentPipelineDialog({
