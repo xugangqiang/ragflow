@@ -57,6 +57,12 @@ interface IProps
   loading: boolean;
 }
 
+// Radix Select forbids an empty-string item value: the empty string is
+// reserved for clearing the selection and showing the placeholder. The
+// track-latest option therefore uses a non-empty sentinel that is translated
+// to and from the empty form value (empty pipeline_version_id means latest).
+const LATEST_VERSION_VALUE = '__latest__';
+
 // PipelineVersionSelect lets the user pin a specific dataflow canvas
 // version (design section 5/C2) or leave it empty to track the latest version.
 // Versions can be filtered by their free-text alias (design A2/F1).
@@ -88,12 +94,17 @@ function PipelineVersionSelect({
         value={aliasFilter}
         onChange={(e) => setAliasFilter(e.target.value)}
       />
-      <Select value={value} onValueChange={onChange}>
+      <Select
+        value={value === '' ? LATEST_VERSION_VALUE : value}
+        onValueChange={(v) => onChange(v === LATEST_VERSION_VALUE ? '' : v)}
+      >
         <SelectTrigger>
           <SelectValue placeholder={t('flow.version.latest')} />
         </SelectTrigger>
         <SelectContent>
-          <SelectItem value="">{t('flow.version.latest')}</SelectItem>
+          <SelectItem value={LATEST_VERSION_VALUE}>
+            {t('flow.version.latest')}
+          </SelectItem>
           {filtered.map((v) => (
             <SelectItem key={v.id} value={v.id}>
               {v.alias ? v.alias + ' (' + v.title + ')' : v.title}
