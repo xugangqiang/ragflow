@@ -16,7 +16,8 @@ import (
 const dslVersionTargetVersion = "v1.0.0-rc4"
 
 // migrateDSLVersionColumns adds the pipeline_version_id column to the tables that
-// bind a dataset (knowledgebase) or document to a dataflow canvas version. It is
+// bind a dataset (knowledgebase) or document to a dataflow canvas version, and
+// ensures user_canvas_version.alias exists (design A2/F1). It is
 // idempotent: an already-present column is left untouched, and a concurrent add
 // that loses the race to a duplicate-column error is tolerated.
 func MigrateDSLVersionColumns(ctx context.Context, db *gorm.DB) error {
@@ -39,6 +40,28 @@ func MigrateDSLVersionColumns(ctx context.Context, db *gorm.DB) error {
 			return fmt.Errorf("add %s.pipeline_version_id: %w", table, err)
 		}
 		common.Info("Added " + table + ".pipeline_version_id")
+	}
+
+	// The dataflow version table carries a free-text alias (design A2/F1). The
+	// column is defined on the entity and is normally created by AutoMigrate, but
+	// a database whose user_canvas_version table predates the column is missing
+	// it, which makes every version save fail with Error 1054. Add it explicitly
+	// and idempotently, mirroring the pipeline_version_id handling above.
+	if db.WithContext(ctx).Migrator().HasTable("user_canvas_version") {
+		exists, err := columnExists(ctx, db, "user_canvas_version", "alias")
+		if err != nil {
+			return fmt.Errorf("check user_canvas_version.alias: %w", err)
+		}
+		if !exists {
+			if err := db.WithContext(ctx).Exec(
+				"ALTER TABLE user_canvas_version ADD COLUMN alias varchar(255) NULL").Error; err != nil {
+				if !isDuplicateColumnError(err) {
+					return fmt.Errorf("add user_canvas_version.alias: %w", err)
+				}
+			} else {
+				common.Info("Added user_canvas_version.alias")
+			}
+		}
 	}
 	return nil
 }

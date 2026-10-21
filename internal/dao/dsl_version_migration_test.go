@@ -259,3 +259,33 @@ func TestOpenMigrationTestDB_SkipsWhenDSNUnset(t *testing.T) {
 		t.Fatalf("probe subtest failed instead of skipping when RAGFLOW_TEST_MYSQL_DSN is unset")
 	}
 }
+
+// T1b: MigrateDSLVersionColumns also adds the user_canvas_version.alias column
+// (design A2/F1) so a version save never fails with Error 1054 on a database
+// whose table predates the column. Idempotent on a second run.
+func TestMigrateDSLVersionColumns_AddsAliasColumnIdempotent(t *testing.T) {
+	db := openMigrationTestDB(t)
+	ctx := context.Background()
+
+	if err := db.WithContext(ctx).AutoMigrate(&entity.UserCanvasVersion{}); err != nil {
+		t.Fatalf("automigrate: %v", err)
+	}
+	// Drop the alias column so we exercise the add path (AutoMigrate would
+	// otherwise have already created it because the entity carries the field).
+	_ = db.WithContext(ctx).Exec("ALTER TABLE user_canvas_version DROP COLUMN alias").Error
+	if db.WithContext(ctx).Migrator().HasColumn(&entity.UserCanvasVersion{}, "alias") {
+		t.Fatal("precondition: alias column should be absent before migration")
+	}
+
+	if err := MigrateDSLVersionColumns(ctx, db); err != nil {
+		t.Fatalf("MigrateDSLVersionColumns: %v", err)
+	}
+	if !db.WithContext(ctx).Migrator().HasColumn(&entity.UserCanvasVersion{}, "alias") {
+		t.Fatal("user_canvas_version.alias was not added")
+	}
+
+	// Idempotent: column already present must not error.
+	if err := MigrateDSLVersionColumns(ctx, db); err != nil {
+		t.Fatalf("MigrateDSLVersionColumns second run: %v", err)
+	}
+}
