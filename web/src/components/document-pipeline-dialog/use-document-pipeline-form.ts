@@ -142,6 +142,17 @@ export function useDocumentPipelineForm({
     operatorNodes,
   );
 
+  // A pinned version belongs to the canvas it was pinned on (design section 5/B4
+  // sticky snapshot). Switching the dataflow canvas invalidates any previously
+  // pinned version, so clear it; otherwise a version id from the old canvas
+  // would be submitted against the new pipeline. The initial load keeps the
+  // saved version (selected equals saved).
+  useEffect(() => {
+    if (selectedPipelineId !== savedPipelineId) {
+      form.setValue('pipeline_version_id', '');
+    }
+  }, [selectedPipelineId, savedPipelineId, form]);
+
   const { activeTab, setActiveTab } = useActiveTab(operatorNodes);
 
   useEffect(() => {

@@ -152,10 +152,17 @@ export function DocumentPipelineDialog({
   // The canvas version list drives the selector, the D1/D2/D3 non-latest `!`
   // indicator and the T29 Missing (unparseable) detection. The backend returns
   // versions newest-first, so versions[0] is the latest.
-  const { data: versions = [] } = useFetchCanvasVersionList(selectedPipelineId);
+  const { data: versions = [], loading: versionListLoading } =
+    useFetchCanvasVersionList(selectedPipelineId);
   const latestId = versions[0]?.id;
+  // A selected version is only Missing when the list has finished loading and
+  // the id is genuinely absent. While loading (initial mount of a pinned doc,
+  // or after switching pipelines) the list is empty, so treating absence as
+  // Missing would flash the banner and disable save before the fetch resolves.
   const versionMissing =
-    !!selectedVersionId && !versions.some((v) => v.id === selectedVersionId);
+    !!selectedVersionId &&
+    !versionListLoading &&
+    !versions.some((v) => v.id === selectedVersionId);
   const versionOutdated =
     !!selectedVersionId && !versionMissing && selectedVersionId !== latestId;
 

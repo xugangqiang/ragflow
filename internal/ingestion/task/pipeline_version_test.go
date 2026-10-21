@@ -113,6 +113,17 @@ func TestLoadDSLFromCanvas_VersionedReadsVersionDSL(t *testing.T) {
 	}
 }
 
+// TestErrPipelineVersionMissingSingleSentinel proves the task-layer sentinel is
+// the single dao definition, not a second errors.New with the same message. This
+// locks in the review fix that merged the service/task duplicate sentinels into
+// one (design §6.2): a runtime Missing error must match a dao.ErrPipelineVersionMissing
+// check, and must equal the service-layer sentinel identity.
+func TestErrPipelineVersionMissingSingleSentinel(t *testing.T) {
+	if !errors.Is(ErrPipelineVersionMissing, dao.ErrPipelineVersionMissing) {
+		t.Fatalf("task.ErrPipelineVersionMissing must be dao.ErrPipelineVersionMissing, got distinct identity")
+	}
+}
+
 // T12: a pinned-but-missing version (and a mis-owned one) fails with
 // ErrPipelineVersionMissing (C4, design 6.2) carrying the user-facing hint.
 func TestLoadDSLFromCanvas_PinnedMissingVersionFails(t *testing.T) {

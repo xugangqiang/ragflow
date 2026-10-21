@@ -842,12 +842,12 @@ type PipelineLogInput struct {
 // outcome without the run row that owns it.
 var ErrMissingRunIdentity = errors.New("pipeline log id is required")
 
-// ErrPipelineVersionMissing indicates the pinned dataflow canvas version no
-// longer exists or does not belong to the bound canvas (design section 6.2).
-// The runtime parse task fails with this error and the file enters an
-// unparseable Missing state; the wrapped message carries the user-facing hint
-// "pipeline 版本不存在，请重新选择版本".
-var ErrPipelineVersionMissing = errors.New("pipeline version missing or not owned by canvas")
+// ErrPipelineVersionMissing is the single multi-version Missing sentinel. It is
+// defined once in the dao package (dao.ErrPipelineVersionMissing) and re-exported
+// here so the service and task layers share one identity (review: merge the
+// duplicate service/task sentinels into one implementation). The wrapped message
+// still carries the user-facing hint "pipeline 版本不存在，请重新选择版本".
+var ErrPipelineVersionMissing = dao.ErrPipelineVersionMissing
 
 // RecordPipelineLog persists a pipeline operation log without requiring
 // executor setup. Callers should pass the status in Status.
@@ -1047,11 +1047,15 @@ func (s *PipelineExecutor) loadDSLFromCanvas(ctx context.Context, canvasID strin
 	// A missing or mis-owned version maps to ErrPipelineVersionMissing so the
 	// parse task fails and the file enters an unparseable Missing state (C4).
 	if canvas.CanvasCategory == "dataflow_canvas" {
-		dsl, verr := s.loadVersionedCanvasDSL(ctx, canvasID, s.taskCtx.PipelineVersionID)
+		// Dataflow canvases are versioned (design section 6.2). An explicit pin
+		// resolves that exact version; an empty pin resolves the latest published
+		// version. A missing or mis-owned version returns ErrPipelineVersionMissing
+		// so the parse task fails and the file enters an unparseable Missing state.
+		raw, verr := dao.LoadCanvasVersionDSL(ctx, s.deps.DB, canvasID, s.taskCtx.PipelineVersionID)
 		if verr != nil {
 			return "", "", verr
 		}
-		return dsl, canvasID, nil
+		return string(raw), canvasID, nil
 	}
 
 	// Agent / non-versioned canvases: read the live draft column (out of scope
@@ -1061,50 +1065,6 @@ func (s *PipelineExecutor) loadDSLFromCanvas(ctx context.Context, canvasID strin
 		return "", "", fmt.Errorf("marshal canvas dsl %s: %w", canvasID, err)
 	}
 	return string(raw), canvasID, nil
-}
-
-// loadVersionedCanvasDSL resolves the DSL for a dataflow canvas version. An
-// explicit versionID pins that version; an empty versionID falls back to the
-// latest published version. A missing, mis-owned, or empty-DSL version maps to
-// ErrPipelineVersionMissing (design section 6.2, C4) so the upstream parse task
-// fails and the file becomes unparseable.
-func (s *PipelineExecutor) loadVersionedCanvasDSL(ctx context.Context, canvasID, versionID string) (string, error) {
-	versionDAO := dao.NewUserCanvasVersionDAO()
-	if versionID != "" {
-		v, err := versionDAO.GetByID(ctx, s.deps.DB, versionID)
-		if err != nil {
-			if errors.Is(err, dao.ErrUserCanvasVersionNotFound) {
-				return "", fmt.Errorf("pipeline 版本不存在，请重新选择版本 (version %s): %w", versionID, ErrPipelineVersionMissing)
-			}
-			return "", fmt.Errorf("load pipeline version %s: %w", versionID, err)
-		}
-		if v.UserCanvasID != canvasID {
-			return "", fmt.Errorf("pipeline 版本不存在，请重新选择版本 (version %s does not belong to canvas %s): %w", versionID, canvasID, ErrPipelineVersionMissing)
-		}
-		if len(v.DSL) == 0 {
-			return "", fmt.Errorf("pipeline 版本不存在，请重新选择版本 (version %s has no DSL): %w", versionID, ErrPipelineVersionMissing)
-		}
-		return marshalVersionDSL(versionID, v.DSL)
-	}
-	v, err := versionDAO.GetLatest(ctx, s.deps.DB, canvasID)
-	if err != nil {
-		if errors.Is(err, dao.ErrUserCanvasVersionNotFound) {
-			return "", fmt.Errorf("pipeline 版本不存在，请重新选择版本 (canvas %s has no published version): %w", canvasID, ErrPipelineVersionMissing)
-		}
-		return "", fmt.Errorf("load latest version for canvas %s: %w", canvasID, err)
-	}
-	if len(v.DSL) == 0 {
-		return "", fmt.Errorf("pipeline 版本不存在，请重新选择版本 (latest version %s has no DSL): %w", v.ID, ErrPipelineVersionMissing)
-	}
-	return marshalVersionDSL(v.ID, v.DSL)
-}
-
-func marshalVersionDSL(versionID string, dsl entity.JSONMap) (string, error) {
-	raw, err := json.Marshal(dsl)
-	if err != nil {
-		return "", fmt.Errorf("marshal canvas version %s DSL: %w", versionID, err)
-	}
-	return string(raw), nil
 }
 
 // warnUnknownComponentParams logs a warning for any component id in the

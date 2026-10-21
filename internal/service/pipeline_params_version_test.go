@@ -193,6 +193,17 @@ func TestLoadPipelineDSL_PassthroughVersion(t *testing.T) {
 	assertContains(t, string(raw), "piped-version")
 }
 
+// TestErrPipelineVersionMissingSingleSentinel proves the service-layer sentinel
+// is the single dao definition, not a second errors.New with the same message.
+// This locks in the review fix that merged the service/task duplicate sentinels
+// into one (design §6.2). A caller using errors.Is against the dao sentinel must
+// match service-produced Missing errors.
+func TestErrPipelineVersionMissingSingleSentinel(t *testing.T) {
+	if !errors.Is(ErrPipelineVersionMissing, dao.ErrPipelineVersionMissing) {
+		t.Fatalf("service.ErrPipelineVersionMissing must be dao.ErrPipelineVersionMissing, got distinct identity")
+	}
+}
+
 func TestResolveComponentParamsDefaults_PassthroughVersion(t *testing.T) {
 	db := setupServiceTestDB(t)
 	if err := db.AutoMigrate(&entity.UserCanvasVersion{}); err != nil {

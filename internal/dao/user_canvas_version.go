@@ -18,6 +18,7 @@ package dao
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -31,6 +32,64 @@ import (
 // ErrUserCanvasVersionNotFound is returned when a version lookup by id or
 // canvas id yields no rows. Service and handler layers map this to a 404.
 var ErrUserCanvasVersionNotFound = errors.New("user_canvas_version: not found")
+
+// ErrPipelineVersionMissing indicates the requested pipeline_version_id does
+// not exist or does not belong to the bound canvas. Callers treat this as a
+// Missing state: the file cannot be parsed until a valid version is (re)selected.
+// It is defined once here in the dao layer so that the service and task layers
+// (which re-export it) share a single sentinel and error checks match across
+// all layers (no duplicate errors.New with the same message but different
+// identity).
+var ErrPipelineVersionMissing = errors.New("pipeline version missing or not owned by canvas")
+
+// userFacingVersionHint is appended to every Missing-state error so the runtime
+// parse path can surface a human-readable instruction (design section 6.2, C4).
+const userFacingVersionHint = "pipeline 版本不存在，请重新选择版本"
+
+// LoadCanvasVersionDSL resolves the DSL for a dataflow canvas version. When
+// versionID is non-empty it pins that exact version; when empty it resolves the
+// latest published version. A missing, mis-owned, or empty-DSL version returns
+// ErrPipelineVersionMissing so callers can surface a Missing (unparseable) state.
+// Both the service (component-param resolution) and task (runtime parse) layers
+// delegate here, so the resolution logic and its error contract live in one place.
+func LoadCanvasVersionDSL(ctx context.Context, db *gorm.DB, canvasID, versionID string) ([]byte, error) {
+	versionDAO := NewUserCanvasVersionDAO()
+	if versionID != "" {
+		v, err := versionDAO.GetByID(ctx, db, versionID)
+		if err != nil {
+			if errors.Is(err, ErrUserCanvasVersionNotFound) {
+				return nil, fmt.Errorf("%s (version %s): %w", userFacingVersionHint, versionID, ErrPipelineVersionMissing)
+			}
+			return nil, fmt.Errorf("load pipeline version %s: %w", versionID, err)
+		}
+		if v.UserCanvasID != canvasID {
+			return nil, fmt.Errorf("%s (version %s does not belong to canvas %s): %w", userFacingVersionHint, versionID, canvasID, ErrPipelineVersionMissing)
+		}
+		if len(v.DSL) == 0 {
+			return nil, fmt.Errorf("%s (version %s has no DSL): %w", userFacingVersionHint, versionID, ErrPipelineVersionMissing)
+		}
+		return marshalCanvasVersionDSL(versionID, v.DSL)
+	}
+	v, err := versionDAO.GetLatest(ctx, db, canvasID)
+	if err != nil {
+		if errors.Is(err, ErrUserCanvasVersionNotFound) {
+			return nil, fmt.Errorf("%s (canvas %s has no published version): %w", userFacingVersionHint, canvasID, ErrPipelineVersionMissing)
+		}
+		return nil, fmt.Errorf("load latest version for canvas %s: %w", canvasID, err)
+	}
+	if len(v.DSL) == 0 {
+		return nil, fmt.Errorf("%s (latest version %s has no DSL): %w", userFacingVersionHint, v.ID, ErrPipelineVersionMissing)
+	}
+	return marshalCanvasVersionDSL(v.ID, v.DSL)
+}
+
+func marshalCanvasVersionDSL(versionID string, dsl entity.JSONMap) ([]byte, error) {
+	raw, err := json.Marshal(dsl)
+	if err != nil {
+		return nil, fmt.Errorf("marshal canvas version %s DSL: %w", versionID, err)
+	}
+	return raw, nil
+}
 
 // UserCanvasVersionDAO persists and queries UserCanvasVersion rows.
 type UserCanvasVersionDAO struct{}
@@ -92,6 +151,38 @@ func (dao *UserCanvasVersionDAO) GetLatest(ctx context.Context, db *gorm.DB, can
 		return nil, err
 	}
 	return &v, nil
+}
+
+// LatestIDsByCanvasIDs returns the latest version id (by create_time DESC,
+// matching GetLatest) for each of the given canvas ids in a single query.
+// Canvases with no version rows are absent from the map. List endpoints use it
+// to resolve every row's "is the pinned version still the latest" flag without
+// an N+1 of per-row GetLatest calls.
+func (dao *UserCanvasVersionDAO) LatestIDsByCanvasIDs(ctx context.Context, db *gorm.DB, canvasIDs []string) (map[string]string, error) {
+	out := make(map[string]string, len(canvasIDs))
+	if len(canvasIDs) == 0 {
+		return out, nil
+	}
+	type row struct {
+		UserCanvasID string
+		ID           string
+	}
+	var rows []row
+	if err := db.WithContext(ctx).Model(&entity.UserCanvasVersion{}).
+		Select("user_canvas_id, id").
+		Where("user_canvas_id IN ?", canvasIDs).
+		Order("create_time DESC").
+		Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	// Rows arrive newest-first globally, so the first row seen per canvas is its
+	// latest version.
+	for _, r := range rows {
+		if _, ok := out[r.UserCanvasID]; !ok {
+			out[r.UserCanvasID] = r.ID
+		}
+	}
+	return out, nil
 }
 
 // GetLatestReleased returns the most recently updated released version of

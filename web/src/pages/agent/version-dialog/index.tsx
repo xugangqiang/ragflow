@@ -100,8 +100,14 @@ export function VersionDialog({
   const runPending = useCallback(async () => {
     if (!pending || !canvasId) return;
     if (pending.kind === 'delete') {
-      await deleteVersion({ canvasId, versionId: pending.versionId });
-      if (selectedId === pending.versionId) setSelectedId('');
+      // deleteVersion resolves to a success boolean (code === 0). Only drop the
+      // selection on success, so a failed delete keeps the current version
+      // selected for retry instead of silently clearing the preview.
+      const ok = await deleteVersion({
+        canvasId,
+        versionId: pending.versionId,
+      });
+      if (ok && selectedId === pending.versionId) setSelectedId('');
     } else if (pending.kind === 'restore') {
       await setAgent({
         id: canvasId,

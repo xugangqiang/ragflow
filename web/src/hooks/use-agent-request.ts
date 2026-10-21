@@ -845,9 +845,10 @@ export const useFetchCanvasVersionList = (canvasId?: string) => {
 // file; the binding then enters a Missing (unparseable) state, so the UI shows a
 // confirmation that warns about breaking bound files (B2.1).
 export const useDeleteVersion = () => {
+  const queryClient = useQueryClient();
   const {
-    data,
     isPending: loading,
+    isError,
     mutateAsync,
   } = useMutation({
     mutationFn: async ({
@@ -863,9 +864,21 @@ export const useDeleteVersion = () => {
       });
       return data?.code === 0;
     },
+    onSuccess: (_result, variables) => {
+      // Invalidate both version-list caches so the deleted version disappears
+      // without a manual refresh: the version dialog reads
+      // AgentKeys.versionList (canvas id from route params) and the document
+      // pipeline dialog reads the canvasVersionList key.
+      queryClient.invalidateQueries({
+        queryKey: AgentKeys.versionList(variables.canvasId),
+      });
+      queryClient.invalidateQueries({
+        queryKey: ['canvasVersionList', variables.canvasId],
+      });
+    },
   });
 
-  return { data, loading, deleteVersion: mutateAsync };
+  return { loading, isError, deleteVersion: mutateAsync };
 };
 
 export const useFetchVersion = (

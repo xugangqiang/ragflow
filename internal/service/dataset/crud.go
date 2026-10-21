@@ -665,11 +665,14 @@ func (d *DatasetService) ListDatasets(ctx context.Context, id, name string, page
 
 	data := make([]map[string]interface{}, 0, len(kbs))
 	modelNameCache := make(map[string]string)
+	// Resolve the latest version id per canvas once for the whole page so the
+	// per-row outdated flag does not issue a GetLatest per dataset (N+1).
+	latestVersionByCanvas := latestVersionIDsByCanvas(ctx, kbs)
 	for _, kb := range kbs {
 		if kb == nil {
 			continue
 		}
-		item := datasetListItemToMap(ctx, kb)
+		item := datasetListItemToMap(latestVersionByCanvas, kb)
 		// Mirror the memory list: surface the concrete model display name
 		// (modelName@instance@provider) instead of a raw tenant_model ID.
 		tenantEmbdID := ptrStringValue(kb.TenantEmbdID)

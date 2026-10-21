@@ -31,7 +31,56 @@ func pipelineVersionOutdated(ctx context.Context, pipelineID, versionID *string)
 	return latest.ID != *versionID
 }
 
-func datasetListItemToMap(ctx context.Context, kb *entity.KnowledgebaseListItem) map[string]interface{} {
+// pipelineVersionOutdatedBatch is the list-endpoint variant of
+// pipelineVersionOutdated. It resolves the latest version id from a precomputed
+// {canvasID: latestVersionID} map (one query for the whole page) instead of a
+// GetLatest per row. A canvas absent from the map has no versions, so a pinned
+// version there is treated as not-outdated (matches the single-row fallback,
+// which returns false when GetLatest finds nothing).
+func pipelineVersionOutdatedBatch(latestByCanvas map[string]string, pipelineID, versionID *string) bool {
+	if pipelineID == nil || strings.TrimSpace(*pipelineID) == "" || versionID == nil {
+		return false
+	}
+	latestID, ok := latestByCanvas[strings.TrimSpace(*pipelineID)]
+	if !ok {
+		return false
+	}
+	return latestID != *versionID
+}
+
+// latestVersionIDsByCanvas resolves the latest version id per canvas for the
+// given knowledgebases in one query, so a dataset list page computes every
+// row's outdated flag without an N+1 of GetLatest calls. Returns nil on error
+// or when no dataset pins a pipeline, letting the mapper treat everything as
+// not-outdated.
+func latestVersionIDsByCanvas(ctx context.Context, kbs []*entity.KnowledgebaseListItem) map[string]string {
+	ids := make([]string, 0, len(kbs))
+	seen := make(map[string]struct{}, len(kbs))
+	for _, kb := range kbs {
+		if kb == nil || kb.PipelineID == nil {
+			continue
+		}
+		id := strings.TrimSpace(*kb.PipelineID)
+		if id == "" {
+			continue
+		}
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	m, err := dao.NewUserCanvasVersionDAO().LatestIDsByCanvasIDs(ctx, dao.DB, ids)
+	if err != nil {
+		return nil
+	}
+	return m
+}
+
+func datasetListItemToMap(latestByCanvas map[string]string, kb *entity.KnowledgebaseListItem) map[string]interface{} {
 	// avatar/language/description keys are always present (null when unset),
 	// matching Python's full-row dict response.
 	item := map[string]interface{}{
@@ -67,7 +116,7 @@ func datasetListItemToMap(ctx context.Context, kb *entity.KnowledgebaseListItem)
 	}
 	// Design section 6.3 (! indicator): true when a pinned version is no longer
 	// the latest of its canvas. Purely informational; never blocks parsing.
-	item["pipeline_version_outdated"] = pipelineVersionOutdated(ctx, kb.PipelineID, kb.PipelineVersionID)
+	item["pipeline_version_outdated"] = pipelineVersionOutdatedBatch(latestByCanvas, kb.PipelineID, kb.PipelineVersionID)
 	return item
 }
 

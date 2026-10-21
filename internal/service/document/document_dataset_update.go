@@ -180,7 +180,11 @@ func (s *DocumentService) UpdateDatasetDocument(ctx context.Context, userID, dat
 
 	if present["parser_config"] && req.ParserConfig != nil {
 		var dslJSON []byte
-		dslJSON, err = service.LoadPipelineDSL(ctx, isPipeline, effParserID, effPipelineID, nil)
+		// Honor the document's sticky pinned pipeline_version_id (design section 5/B4):
+		// a document bound to a specific version must be cleaned against that version's
+		// DSL, not the canvas's latest. A nil pinned version falls back to the latest,
+		// preserving the previous behavior for unpinned docs.
+		dslJSON, err = service.LoadPipelineDSL(ctx, isPipeline, effParserID, effPipelineID, doc.PipelineVersionID)
 		if err != nil {
 			common.Warn("cleanAndUpdateDocumentParserConfig: failed to load DSL, falling back to merge",
 				zap.Error(err))

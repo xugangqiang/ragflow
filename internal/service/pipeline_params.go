@@ -15,10 +15,12 @@ import (
 	"gorm.io/gorm"
 )
 
-// ErrPipelineVersionMissing indicates the requested pipeline_version_id does
-// not exist or does not belong to the bound canvas. Callers treat this as a
-// Missing state: the file cannot be parsed until a valid version is (re)selected.
-var ErrPipelineVersionMissing = errors.New("pipeline version missing or not owned by canvas")
+// ErrPipelineVersionMissing is the single multi-version Missing sentinel. It is
+// defined once in the dao package (dao.ErrPipelineVersionMissing) and re-exported
+// here so existing callers (e.g. dataset CRUD) keep a stable symbol while the
+// error identity matches across the service and task layers (review: merge the
+// duplicate service/task sentinels into one implementation).
+var ErrPipelineVersionMissing = dao.ErrPipelineVersionMissing
 
 // loadCanvasDSLJSON returns the DSL JSON for a custom canvas pipeline.
 //
@@ -47,36 +49,17 @@ func loadCanvasDSLJSON(ctx context.Context, canvasID string, versionID *string) 
 		}
 		return marshalCanvasDSL(canvasID, canvas.DSL)
 	}
-	if versionID != nil && strings.TrimSpace(*versionID) != "" {
-		return loadVersionedCanvasDSLJSON(ctx, canvasID, strings.TrimSpace(*versionID))
+	// Dataflow canvases are versioned (design section 6.1). An explicit versionID
+	// pins that exact version; an empty versionID resolves the latest published
+	// version. A missing, mis-owned, or empty-DSL version surfaces
+	// ErrPipelineVersionMissing -- there is no legacy-draft fallback for dataflow.
+	// The resolution is delegated to dao.LoadCanvasVersionDSL so the service and
+	// task layers share one implementation (review: merge duplicate resolvers).
+	pin := ""
+	if versionID != nil {
+		pin = strings.TrimSpace(*versionID)
 	}
-	// No explicit version: use the latest version row (design §6.1).
-	if v, err := dao.NewUserCanvasVersionDAO().GetLatest(ctx, dao.DB, canvasID); err == nil {
-		if len(v.DSL) > 0 {
-			return marshalCanvasDSL(canvasID, v.DSL)
-		}
-	}
-	return nil, fmt.Errorf("pipeline version for canvas %s not found: %w", canvasID, ErrPipelineVersionMissing)
-}
-
-// loadVersionedCanvasDSLJSON resolves a specific canvas version and validates
-// that it belongs to the bound canvas. A missing or mis-owned version maps to
-// ErrPipelineVersionMissing so callers can surface a Missing (unparseable) state.
-func loadVersionedCanvasDSLJSON(ctx context.Context, canvasID, versionID string) ([]byte, error) {
-	v, err := dao.NewUserCanvasVersionDAO().GetByID(ctx, dao.DB, versionID)
-	if err != nil {
-		if errors.Is(err, dao.ErrUserCanvasVersionNotFound) {
-			return nil, fmt.Errorf("pipeline version %s not found: %w", versionID, ErrPipelineVersionMissing)
-		}
-		return nil, fmt.Errorf("load pipeline version %s: %w", versionID, err)
-	}
-	if v.UserCanvasID != canvasID {
-		return nil, fmt.Errorf("pipeline version %s does not belong to canvas %s: %w", versionID, canvasID, ErrPipelineVersionMissing)
-	}
-	if len(v.DSL) == 0 {
-		return nil, fmt.Errorf("pipeline version %s has no DSL: %w", versionID, ErrPipelineVersionMissing)
-	}
-	return marshalCanvasDSL(canvasID, v.DSL)
+	return dao.LoadCanvasVersionDSL(ctx, dao.DB, canvasID, pin)
 }
 
 func marshalCanvasDSL(canvasID string, dsl entity.JSONMap) ([]byte, error) {
