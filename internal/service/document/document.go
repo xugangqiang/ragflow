@@ -133,6 +133,9 @@ type UpdateDatasetDocumentRequest struct {
 	Progress     *float64       `json:"progress"`
 	ParserConfig map[string]any `json:"parser_config"`
 	MetaFields   map[string]any `json:"meta_fields"`
+	// PipelineVersionID pins the document to a specific dataflow canvas version
+	// (design section 5/C2). Empty/omitted means the latest version is used.
+	PipelineVersionID *string `json:"pipeline_version_id,omitempty"`
 	// ParseType indicates pipeline selection mode: 1 = BuiltIn (parser_id),
 	// 2 = Pipeline (pipeline_id). nil means unspecified.
 	ParseType *int `json:"parse_type,omitempty"`

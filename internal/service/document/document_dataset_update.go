@@ -178,13 +178,43 @@ func (s *DocumentService) UpdateDatasetDocument(ctx context.Context, userID, dat
 		}
 	}
 
+	// Resolve the pipeline version this save pins the document to (design
+	// section 5/C2). An explicit pipeline_version_id re-pins the document; the
+	// version must belong to the effective canvas or the save is rejected with
+	// ErrPipelineVersionMissing. Omitting pipeline_version_id keeps the current
+	// pin. The resolved value drives both parser_config cleaning (below) and the
+	// persisted column, so a save that changes the version also cleans against
+	// the new version DSL.
+	effectiveVersionID := doc.PipelineVersionID
+	repointVersion := false
+	if isPipeline && effPipelineID != nil && strings.TrimSpace(*effPipelineID) != "" && present["pipeline_version_id"] {
+		canvasID := strings.TrimSpace(*effPipelineID)
+		if req.PipelineVersionID != nil && strings.TrimSpace(*req.PipelineVersionID) != "" {
+			requested := strings.TrimSpace(*req.PipelineVersionID)
+			v, verr := dao.NewUserCanvasVersionDAO().GetByID(ctx, dao.DB, requested)
+			if verr != nil {
+				if errors.Is(verr, dao.ErrUserCanvasVersionNotFound) {
+					return nil, common.CodeDataError, fmt.Errorf("pipeline version %s not found: %w", requested, service.ErrPipelineVersionMissing)
+				}
+				return nil, common.CodeServerError, fmt.Errorf("load pipeline version %s: %w", requested, verr)
+			}
+			if v.UserCanvasID != canvasID {
+				return nil, common.CodeDataError, fmt.Errorf("pipeline version %s does not belong to canvas %s: %w", requested, canvasID, service.ErrPipelineVersionMissing)
+			}
+			effectiveVersionID = &requested
+		} else {
+			effectiveVersionID = nil // explicit empty => track the latest version
+		}
+		repointVersion = true
+	}
+
 	if present["parser_config"] && req.ParserConfig != nil {
 		var dslJSON []byte
 		// Honor the document's sticky pinned pipeline_version_id (design section 5/B4):
 		// a document bound to a specific version must be cleaned against that version's
 		// DSL, not the canvas's latest. A nil pinned version falls back to the latest,
 		// preserving the previous behavior for unpinned docs.
-		dslJSON, err = service.LoadPipelineDSL(ctx, isPipeline, effParserID, effPipelineID, doc.PipelineVersionID)
+		dslJSON, err = service.LoadPipelineDSL(ctx, isPipeline, effParserID, effPipelineID, effectiveVersionID)
 		if err != nil {
 			common.Warn("cleanAndUpdateDocumentParserConfig: failed to load DSL, falling back to merge",
 				zap.Error(err))
@@ -206,6 +236,22 @@ func (s *DocumentService) UpdateDatasetDocument(ctx context.Context, userID, dat
 			}); err != nil {
 				return nil, common.CodeDataError, err
 			}
+		}
+	}
+
+	// Persist the resolved version pin so a per-document selection survives a
+	// save (design section 5/C2). Written only when the request carried
+	// pipeline_version_id; an empty value clears the pin (track latest) and a nil
+	// pointer maps to SQL NULL.
+	if repointVersion {
+		var colValue interface{}
+		if effectiveVersionID != nil {
+			colValue = *effectiveVersionID
+		}
+		if err = s.documentDAO.UpdateByID(ctx, dao.DB, doc.ID, map[string]interface{}{
+			"pipeline_version_id": colValue,
+		}); err != nil {
+			return nil, common.CodeServerError, fmt.Errorf("update document pipeline_version_id: %w", err)
 		}
 	}
 
