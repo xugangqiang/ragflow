@@ -13,6 +13,7 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from '@/components/ui/tooltip';
+import { RAGFlowTooltip } from '@/components/ui/tooltip';
 import { IDocumentInfo } from '@/interfaces/database/document';
 import { cn } from '@/lib/utils';
 import { CircleQuestionMark, CircleX, Clock3, Loader2 } from 'lucide-react';
@@ -80,7 +81,7 @@ export function ParseDropdownButton({
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <div>
+        <div className="flex items-center gap-1">
           <Tooltip>
             <TooltipTrigger asChild>
               <Button variant="static" size="auto" className="capitalize">
@@ -101,6 +102,11 @@ export function ParseDropdownButton({
               </p>
             </TooltipContent>
           </Tooltip>
+          {record.pipeline_version_outdated ? (
+            <RAGFlowTooltip tooltip={t('flow.version.outdated')}>
+              <span className="text-destructive cursor-help font-bold">!</span>
+            </RAGFlowTooltip>
+          ) : null}
         </div>
       </DropdownMenuTrigger>
       <DropdownMenuContent>

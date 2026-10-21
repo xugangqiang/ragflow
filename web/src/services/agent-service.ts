@@ -37,6 +37,7 @@ const {
   trace,
   fetchVersionList,
   fetchVersion,
+  deleteVersion,
   getAgent,
   fetchAgentSessions,
   fetchExternalAgentInputs,
@@ -64,6 +65,10 @@ const methods = {
     url: (config: { agentId: string; versionId: string }) =>
       fetchVersion(config.agentId, config.versionId),
     method: 'get',
+  },
+  deleteVersion: {
+    url: deleteVersion,
+    method: 'delete',
   },
   listAgents: {
     url: listAgents,

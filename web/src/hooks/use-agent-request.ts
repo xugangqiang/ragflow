@@ -790,7 +790,13 @@ export const useFetchInputForm = (componentId?: string) => {
 export const useFetchVersionList = () => {
   const { id } = useParams();
   const { data, isFetching: loading } = useQuery<
-    Array<{ created_at: string; title: string; id: string; release?: boolean }>
+    Array<{
+      created_at: string;
+      title: string;
+      id: string;
+      release?: boolean;
+      alias?: string;
+    }>
   >({
     queryKey: AgentKeys.versionList(id),
     initialData: [],
@@ -803,6 +809,63 @@ export const useFetchVersionList = () => {
   });
 
   return { data, loading };
+};
+
+// useFetchCanvasVersionList lists the published versions of an arbitrary canvas
+// (dataflow or agent) by id. Unlike useFetchVersionList it takes the canvas id
+// explicitly (not from route params) so the document pipeline dialog can load
+// versions for the currently selected dataflow canvas. The backend returns them
+// newest-first (design section 7/E1) and includes the free-text alias (A2/F1).
+export const useFetchCanvasVersionList = (canvasId?: string) => {
+  const { data, isFetching: loading } = useQuery<
+    Array<{
+      id: string;
+      title: string;
+      created_at: string;
+      release?: boolean;
+      alias?: string;
+    }>
+  >({
+    queryKey: ['canvasVersionList', canvasId],
+    initialData: [],
+    gcTime: 0,
+    enabled: !!canvasId,
+    queryFn: async () => {
+      if (!canvasId) return [];
+      const { data } = await agentService.fetchVersionList(canvasId);
+      return data?.data ?? [];
+    },
+  });
+
+  return { data, loading };
+};
+
+// useDeleteVersion removes a single canvas version (design section 7/B2). The
+// backend still allows deletion when the version is referenced by a dataset or
+// file; the binding then enters a Missing (unparseable) state, so the UI shows a
+// confirmation that warns about breaking bound files (B2.1).
+export const useDeleteVersion = () => {
+  const {
+    data,
+    isPending: loading,
+    mutateAsync,
+  } = useMutation({
+    mutationFn: async ({
+      canvasId,
+      versionId,
+    }: {
+      canvasId: string;
+      versionId: string;
+    }) => {
+      const { data } = await agentService.deleteVersion({
+        agentId: canvasId,
+        versionId,
+      });
+      return data?.code === 0;
+    },
+  });
+
+  return { data, loading, deleteVersion: mutateAsync };
 };
 
 export const useFetchVersion = (

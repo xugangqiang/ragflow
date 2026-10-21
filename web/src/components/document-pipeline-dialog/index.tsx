@@ -25,10 +25,20 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { Form, FormField, FormItem, FormMessage } from '@/components/ui/form';
+import { Input } from '@/components/ui/input';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
+import { RAGFlowTooltip } from '@/components/ui/tooltip';
 import { ParseType } from '@/constants/knowledge';
 import { IModalProps } from '@/interfaces/common';
 import { IChangeParserRequestBody } from '@/interfaces/request/document';
-import { useCallback } from 'react';
+import { useFetchCanvasVersionList } from '@/hooks/use-agent-request';
+import { useCallback, useState } from 'react';
 import { FieldErrors, useFormState, useWatch } from 'react-hook-form';
 import { useTranslation } from 'react-i18next';
 import { buildParserSelectValue } from '@/hooks/use-parser-options';
@@ -40,9 +50,59 @@ import {
 
 const FormId = 'DocumentPipelineDialogForm';
 
+type CanvasVersion = { id: string; title: string; alias?: string };
+
 interface IProps
   extends IModalProps<IChangeParserRequestBody>, IDocumentPipelineDialogProps {
   loading: boolean;
+}
+
+// PipelineVersionSelect lets the user pin a specific dataflow canvas
+// version (design section 5/C2) or leave it empty to track the latest version.
+// Versions can be filtered by their free-text alias (design A2/F1).
+function PipelineVersionSelect({
+  versions,
+  value,
+  onChange,
+}: {
+  versions: CanvasVersion[];
+  value: string;
+  onChange: (v: string) => void;
+}) {
+  const { t } = useTranslation();
+  const [aliasFilter, setAliasFilter] = useState('');
+
+  const filtered = versions.filter((v) =>
+    !aliasFilter.trim()
+      ? true
+      : (v.alias ?? '')
+          .toLowerCase()
+          .includes(aliasFilter.trim().toLowerCase()),
+  );
+
+  return (
+    <div className="space-y-2">
+      <Input
+        className="h-8"
+        placeholder={t('flow.version.filterByAlias')}
+        value={aliasFilter}
+        onChange={(e) => setAliasFilter(e.target.value)}
+      />
+      <Select value={value} onValueChange={onChange}>
+        <SelectTrigger>
+          <SelectValue placeholder={t('flow.version.latest')} />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value="">{t('flow.version.latest')}</SelectItem>
+          {filtered.map((v) => (
+            <SelectItem key={v.id} value={v.id}>
+              {v.alias ? v.alias + ' (' + v.title + ')' : v.title}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+    </div>
+  );
 }
 
 export function DocumentPipelineDialog({
@@ -50,6 +110,7 @@ export function DocumentPipelineDialog({
   onOk,
   parserId,
   pipelineId,
+  pipelineVersionId,
   parserConfig,
   loading,
 }: IProps) {
@@ -66,7 +127,12 @@ export function DocumentPipelineDialog({
     operatorValues,
     showOperatorTabs,
     buildSubmitData,
-  } = useDocumentPipelineForm({ parserId, pipelineId, parserConfig });
+  } = useDocumentPipelineForm({
+    parserId,
+    pipelineId,
+    pipelineVersionId,
+    parserConfig,
+  });
 
   const handleParserSelect = useParserSelectHandler(form);
 
@@ -78,6 +144,20 @@ export function DocumentPipelineDialog({
     control: form.control,
     name: 'pipeline_id',
   });
+  const selectedVersionId = useWatch({
+    control: form.control,
+    name: 'pipeline_version_id',
+  });
+
+  // The canvas version list drives the selector, the D1/D2/D3 non-latest `!`
+  // indicator and the T29 Missing (unparseable) detection. The backend returns
+  // versions newest-first, so versions[0] is the latest.
+  const { data: versions = [] } = useFetchCanvasVersionList(selectedPipelineId);
+  const latestId = versions[0]?.id;
+  const versionMissing =
+    !!selectedVersionId && !versions.some((v) => v.id === selectedVersionId);
+  const versionOutdated =
+    !!selectedVersionId && !versionMissing && selectedVersionId !== latestId;
 
   const onSubmit = useCallback(
     async (data: Parameters<typeof buildSubmitData>[0]) => {
@@ -91,7 +171,6 @@ export function DocumentPipelineDialog({
 
   const onInvalid = useCallback(
     (errors: FieldErrors) => {
-      // Surface the first failing operator tab so its field errors are visible.
       const firstOperatorId = Object.keys(errors?.parser_config ?? {})[0];
       if (firstOperatorId) {
         setActiveTab(firstOperatorId);
@@ -111,6 +190,12 @@ export function DocumentPipelineDialog({
         <DialogHeader>
           <DialogTitle>{t('knowledgeDetails.chunkMethod')}</DialogTitle>
         </DialogHeader>
+
+        {versionMissing && (
+          <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+            {t('flow.version.missingContent')}
+          </div>
+        )}
 
         <Form {...form}>
           <form
@@ -137,6 +222,34 @@ export function DocumentPipelineDialog({
                 </FormItem>
               )}
             />
+            {parseType === ParseType.Pipeline && !!selectedPipelineId && (
+              <FormField
+                control={form.control}
+                name="pipeline_version_id"
+                render={({ field }) => (
+                  <FormItem>
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-sm text-text-secondary">
+                        {t('flow.version.label')}
+                      </span>
+                      {versionOutdated && (
+                        <RAGFlowTooltip tooltip={t('flow.version.outdated')}>
+                          <span className="text-destructive cursor-help font-bold">
+                            !
+                          </span>
+                        </RAGFlowTooltip>
+                      )}
+                    </div>
+                    <PipelineVersionSelect
+                      versions={versions}
+                      value={field.value ?? ''}
+                      onChange={field.onChange}
+                    />
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+            )}
             {showOperatorTabs && (
               <PipelineOperatorTabs
                 nodes={operatorNodes}
@@ -158,6 +271,7 @@ export function DocumentPipelineDialog({
           <ButtonLoading
             type="submit"
             form={FormId}
+            disabled={versionMissing}
             loading={
               loading || (operatorNodesLoading && operatorNodes.length === 0)
             }
