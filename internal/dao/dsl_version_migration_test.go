@@ -16,10 +16,13 @@ import (
 // openMigrationTestDB opens the throwaway MySQL database used by the DSL
 // version migration tests. It reuses the same dialect helper as the other
 // migration integration tests so DDL behaviour matches production MySQL.
+// Like them it skips when RAGFLOW_TEST_MYSQL_DSN is unset (the CI
+// integration job does not provision a throwaway MySQL), so the suite
+// stays green there instead of failing on a hardcoded localhost connect.
 func openMigrationTestDB(t *testing.T) *gorm.DB {
 	dsn := os.Getenv("RAGFLOW_TEST_MYSQL_DSN")
 	if dsn == "" {
-		dsn = "root:infini_rag_flow@tcp(127.0.0.1:3306)/ragflow_test"
+		t.Skip("RAGFLOW_TEST_MYSQL_DSN unset: this test needs a throwaway MySQL database")
 	}
 	db, err := gorm.Open(newMigrationAwareDialector(dsn), &gorm.Config{TranslateError: true})
 	if err != nil {
@@ -232,5 +235,27 @@ func TestBackfillDSLVersionBindings_BuiltinUnaffected(t *testing.T) {
 	}
 	if gotNone.PipelineVersionID != nil {
 		t.Fatalf("kb with no pipeline must stay nil, got %v", *gotNone.PipelineVersionID)
+	}
+}
+
+// TestOpenMigrationTestDB_SkipsWhenDSNUnset locks the CI contract: when
+// RAGFLOW_TEST_MYSQL_DSN is unset the migration helper must SKIP (never attempt
+// a hardcoded localhost connection and fail). The ragflow_go_integration job does
+// not provision a throwaway MySQL, so a non-skipping helper turns every DSL
+// version migration test red there (matches migration_integration_test.go).
+func TestOpenMigrationTestDB_SkipsWhenDSNUnset(t *testing.T) {
+	if os.Getenv("RAGFLOW_TEST_MYSQL_DSN") != "" {
+		t.Skip("this probe requires RAGFLOW_TEST_MYSQL_DSN to be unset")
+	}
+	returned := false
+	ok := t.Run("probe", func(st *testing.T) {
+		openMigrationTestDB(st)
+		returned = true // reached only when the helper did NOT skip or fail
+	})
+	if returned {
+		t.Fatalf("openMigrationTestDB returned a DB instead of skipping when RAGFLOW_TEST_MYSQL_DSN is unset")
+	}
+	if !ok {
+		t.Fatalf("probe subtest failed instead of skipping when RAGFLOW_TEST_MYSQL_DSN is unset")
 	}
 }
