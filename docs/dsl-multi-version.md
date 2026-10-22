@@ -1,6 +1,6 @@
 # DSL 多版本设计（Ingestion Pipeline / Dataflow Canvas）
 
-> 状态：v5（设计完全锁定，进入 TDD 实现）
+> 状态：v5.2（在 v5.1 基础上追加：§5.1 画布保存语义[手动 Save 建版本/自动保存仅更新 live draft]、§4.4 alias 写入路径、§8 前端去除 latest 伪选项；仍为锁定设计，TDD 实现中）
 > 约束：单 PR、严格 TDD、迁移为幂等 Go 函数、Missing 运行时校验不加字段、版本归属校验禁止悬空。
 
 ---
@@ -11,9 +11,11 @@
 
 - **A1** DSL 变更在数据库增量写入，版本号即时间（`user_canvas_version` 已存在的基础设施）。
 - **A2** 新增版本别名 `alias`（后端仅存储，前端过滤，不涉及后端逻辑）。
-- **B1** 画布可查看多版本；**B2/B2.1** 删除版本需弹窗二次确认（告知可能导致 File 解析不可用）；**B3** 改 DSL → 生成新版本；**B4** 画布修改**不向下传播**到已绑定的 dataset/file（粘性快照）。
+- **B1** 画布可查看多版本；**B2/B2.1** 删除版本需弹窗二次确认（告知可能导致 File 解析不可用）；**B3** 手动 Save（用户明确点击保存）→ 生成新版本；自动保存（非手动）→ 仅更新 `user_canvas.dsl` live draft，不生成新版本（v5.2 细化，修正原「改 DSL 即生成版本」）；**B4** 画布修改**不向下传播**到已绑定的 dataset/file（粘性快照）。
 - **C1** dataset/file 配置可选版本；**C2** 默认绑定“选择时刻最新具体版本”（锁定非浮动），可手动选；**C3** 切版本 → 参数重置为该版本 default。
 - **C4** 版本删除 → 引用方 Missing，file 不可解析；**D1/D2/D3** 非最新显示 `!`，点击仅提示不引导升级；**E1** 列表新→老；**F1** 别名前端过滤。
+- **G1** dataset/file 版本选择 UI：不渲染 `latest` 伪选项，仅列真实版本，选项文案须含 `alias`（如 `alias (title)`）；已绑定即存具体版本 ID，无 latest 概念（呼应 C2）。
+- **G2** alias 写入/更新：后端经版本级 `PATCH` 端点（及可选随 manual Save 携带）写入 `user_canvas_version.alias`；前端提供编辑入口（见 §4.4、§8）。
 
 **不在范围**：agent（画布类别 `agent`）的发布语义、built-in parser（`parse_type=1`）的版本化、Python 端（按 AGENTS.md 正在移除）。
 
@@ -35,6 +37,7 @@
 - `use-save-graph.ts` 带 `release=true` 的 `saveGraph(...,true)` 仅来自 `onPublish`，而该回调在 pipeline 下永不触发；dataflow 所有保存（含 20s 自动保存）`release` 均为 `undefined`。
 - 后端 `SaveOrReplaceLatestTx` 对 dataflow 写入的版本 `Release` 恒为 `false`。
 - 因此 **`GetLatestReleased` 对 dataflow 永远返回未找到** → dataflow 无 draft/published 双态，**所有版本都是草稿**。
+- **（v5.2 勘误/延伸）** 尽管 dataflow 全部保存 `release` 均为 undefined，但 `SaveOrReplaceLatestTx` 在 DSL 发生变更时会 INSERT 新版本行——即**当前自动保存（20s 去抖）也会生成新版本**。§5.1 将把版本创建收敛到「仅手动 Save」。agent 与 dataflow 共用同一保存入口（`web/src/pages/agent/index.tsx` → `UpdateAgent`），故该修正作用于共享路径。
 
 ### 2.3 DSL 加载的两个真相源（版本化要改的核心）
 - API 侧：`internal/service/pipeline_params.go` 的 `loadCanvasDSLJSON(ctx, canvasID)` 读 `user_canvas.dsl`（永远最新），被 `LoadPipelineDSL` 与 `ResolveComponentParamsDefaults` 复用。
@@ -85,6 +88,18 @@ PipelineVersionID *string `gorm:"column:pipeline_version_id;size:32;index" json:
 
 ---
 
+### 4.4 `alias` 写入/更新路径（v5.2 新增）
+
+- **现状（已核实）**：
+  - `entity.UserCanvasVersion.Alias` 已存在（`internal/entity/canvas.go:67`，gorm 列 `alias`）。
+  - DAO `SaveOrReplaceLatestTx` 在新建/就地更新两分支均写 `alias`（`internal/dao/user_canvas_version.go:313-315` 更新分支、`:328` 新建分支）；有单测 `TestUserCanvasVersionDAO_SaveOrReplaceLatestTxStoresAlias` 覆盖。
+  - handler `publishAgentRequest.Alias *string`（`internal/handler/agent.go:701`）仅经 `POST /publish` 透传；但 `UpdateAgent` 路径调用 `saveOrReplaceVersionOptions(..., nil, nil, release)` 显式传 `nil` alias，故普通保存**不写** alias。
+  - 前端**无任何 alias 输入控件**：`publish-confirm-dialog.tsx` 对 dataflow 返回 null（无发布入口），agent 发布也不发 alias；所有前端 alias 命中均为只读过滤/显示。结论：**alias 写入路径后端完备但 UI 不可达，实际恒为 NULL**。
+- **写入设计**：
+  - 新增 `PATCH /api/v1/agents/{canvas_id}/versions/{version_id}`：body 含 `alias`/`title`/`description`，经 `versionDAO.UpdateTx` 更新该行元数据；**不**触发新版本、**不**改 DSL；需归属校验（`version.UserCanvasID == canvas_id`）。
+  - `UpdateAgent` 保存请求**可选**携带 `alias`，随 manual Save 创建/刷新版本时一并写入（兜底路径，复用 `SaveOrReplaceLatestTx` 既有 alias 分支）。
+- **前端**：版本历史对话框（`web/src/pages/agent/version-dialog/index.tsx`）增加 alias 编辑输入，提交至上述 PATCH；dataset/file 选择器保持只读过滤（G1/F1）。
+
 ## 5. 写入路径：粘性快照（首次默认最新、之后保留）
 
 **语义**：绑定 pipeline 的那一刻，把“当时最新具体版本”的 `ID` 锁进 `pipeline_version_id`，后续画布再改不再影响已绑定方（B4）。
@@ -103,6 +118,22 @@ PipelineVersionID *string `gorm:"column:pipeline_version_id;size:32;index" json:
   - **单字段 PATCH 必须沿用已绑值**：update 允许只发 `pipeline_version_id` 省略 `pipeline_id`（或反之）。被省略的字段一律沿用 `lockedKB` 已绑值，不得清空或误判。
 
 ---
+
+## 5.1 画布保存语义：手动 Save vs 自动保存（v5.2 新增）
+
+**背景**：agent 与 dataflow 画布共用同一保存入口——`web/src/pages/agent/index.tsx` 的 Save 按钮（`handleSave` → `saveGraph()`）与 `useWatchAgentChange` 的 20s 去抖自动保存，二者皆落到 `service.UpdateAgent` → `SaveOrReplaceLatestTx`。当前只要 DSL 变更即 INSERT 新版本行，故**自动保存也会刷版本**，违背「版本=手动保存里程碑」语义。
+
+**信号**：前端自动保存请求增加 `autosave: true`（手动 Save 不带，或显式 `autosave: false`）。`updateAgent` 请求体（`web/src/services/agent-service.ts`）与 `PUT /api/v1/agents/:canvas_id` 透传该字段；`service.UpdateAgent` 据此分支。
+
+**分支规则（统一作用于 agent 与 dataflow，因共用 `UpdateAgent` 路径）**：
+- `autosave == true`：**仅** `canvasDAO.UpdateFieldsTx` 更新 `user_canvas.dsl`（live draft），**不**调用 `SaveOrReplaceLatestTx`，**不**产生新版本。
+- `autosave == false/缺省`（手动 Save）：维持现有逻辑——`UpdateFieldsTx` + `SaveOrReplaceLatestTx`（DSL 变更则新建版本，同 DSL 则就地刷新，保留 v5 去重）。
+
+**agent 发布语义不受影响**：`PublishAgent`（`release=true`）路径独立，仍创建 released 版本，本次不改（与 §1「agent 发布语义不在范围」一致）。
+
+**范围裁定（A9）**：因 agent/dataflow 共用 `UpdateAgent`，修正必须落在共享路径、对所有画布类别统一生效；agent 的手动 Save 仍照常创建版本（行为不变），仅自动保存不再刷版本——属良性改进，不触及 §1 划定的 agent 发布语义范围。
+
+**粘性快照不受影响**：新建版本只改 `user_canvas_version`，已绑定 dataset/file 的 `pipeline_version_id` 仍为粘性（B4）；live draft 领先于最新版本属预期（手动 Save 后方才落成版本）。
 
 ## 6. 读取路径：版本透传 + Missing 校验
 
@@ -135,11 +166,16 @@ PipelineVersionID *string `gorm:"column:pipeline_version_id;size:32;index" json:
 
 ---
 
+- **保存分支（v5.2）**：`UpdateAgent` 按 `autosave` 字段分支（见 §5.1）；自动保存仅 `UpdateFieldsTx` 更新 live draft，手动 Save 走既有版本逻辑。
+- **版本 PATCH 端点（v5.2）**：`PATCH /api/v1/agents/{canvas_id}/versions/{version_id}`，body `{alias?, title?, description?}`，经 `versionDAO.UpdateTx` 更新元数据，不新建版本、不改 DSL；需归属校验（`version.UserCanvasID == canvas_id`）；仅对画布本体版本生效。
+
 ## 8. 前端变更
 
 - `web/src/pages/agent/index.tsx`：`PublishConfirmDialog` 对 pipeline 返回 null（确认无发布动作，保持现状）。
-- `web/src/components/document-pipeline-dialog/`：表单增加版本选择（读 `ListByCanvasID` 的版本列表，含 alias 过滤 F1），提交体增加可选 `pipeline_version_id`。
-- `web/src/pages/agent/version-dialog/index.tsx`：增加删除按钮（B2/B2.1 二次确认）、`!` 提示（D1/D2/D3）、版本 alias 显示与过滤（A2/F1）、可选“载入某版本作为绑定”（C2）。
+- `web/src/components/pipeline-version-select/index.tsx`：**移除 `LATEST_VERSION_VALUE='__latest__'` 伪选项（G1，v5.2）**——删除 `:97-99` 的 `<SelectItem value={LATEST_VERSION_VALUE}>` 与 `:32/:43-49` 的 sentinel 映射（`formValueToSelectValue`/`selectValueToFormValue` 不再用 `__latest__`）；选项文案保留并强化 alias 显示（`v.alias ? v.alias + ' (' + v.title + ')' : v.title`）。无预绑定时默认选中最新具体版本（GetLatest），提交发送具体 `pipeline_version_id`，**空值不再表示 latest**。
+- dataset 设置页（`web/src/pages/dataset/setting/index.tsx:294`）与文件对话框（`web/src/components/document-pipeline-dialog/index.tsx:193`）复用上述组件，自动生效；提交体 `pipeline_version_id` 恒为具体版本 ID。
+- `web/src/pages/agent/index.tsx` + `use-save-graph.ts`：自动保存（20s 去抖）请求增加 `autosave: true`；手动 Save（`handleSave`）不带（v5.2，见 §5.1）。
+- `web/src/pages/agent/version-dialog/index.tsx`：增加 alias/title 编辑输入，提交至新 `PATCH` 端点（G2，见 §4.4）；保留删除按钮（B2/B2.1）、`!` 提示（D1/D2/D3）、alias 显示与过滤（F1）。
 - dataset 设置页：增加 pipeline 版本选择（C1/C2）与 `!` 指示（D1/D2/D3）。
 
 ---
@@ -188,6 +224,14 @@ PipelineVersionID *string `gorm:"column:pipeline_version_id;size:32;index" json:
 
 ---
 
+- T32（v5.2 保存语义）`UpdateAgent` 带 `autosave:true` + DSL 变更 → 断言 `user_canvas_version` 行数**不变**、`user_canvas.dsl` 已更新为最新 DSL（不产生新版本）。
+- T33（v5.2 保存语义）`UpdateAgent` 手动 Save（无 `autosave`）+ DSL 变更 → 断言**新增**一行版本（`SaveOrReplaceLatestTx` 命中新建分支）。
+- T34（v5.2 统一路径）agent 画布自动保存同样不刷版本（与 dataflow 共用 `UpdateAgent`，断言行数不变）。
+- T35（v5.2 alias 写入）`PATCH /versions/{id}` 带 `alias` → 断言该行 `alias` 更新、未新建版本、DSL 不变；跨 canvas 改 alias → 归属校验拒绝。
+- T36（v5.2 alias 兜底）manual Save 请求携带 `alias` → 断言新建/刷新版本写入该 alias。
+- T37（v5.2 前端 latest 去除）dataset/file 版本选择器选项列表**不含** `__latest__` 伪值，且含 alias 文案；提交 `pipeline_version_id` 为具体 ID（前端/组件断言）。
+- T38（v5.2 对抗）自动保存连续多次 + 仅一次手动 Save → 版本数恰为 1（非 N），且 live draft 反映最后一次自动保存内容。
+
 ## 10. 漏洞审计（v4 状态）
 
 | 编号 | 描述 | 状态 |
@@ -226,6 +270,8 @@ PipelineVersionID *string `gorm:"column:pipeline_version_id;size:32;index" json:
 - **A7 ad-hoc/调试路径（已裁定：同正式解析带 version）**：`pipeline_executor.go` ad-hoc 路径已 reload `doc`（L888），同法透传 `doc.PipelineVersionID`。
 - **A8 脏数据回填（已裁定：跳过+日志）**：backfill 遇 canvas 无版本时跳过 + 日志告警，绝不写悬空 version_id。
 
+- **A9 保存语义修正范围（已裁定：作用于共享路径、全类别统一）**：手动/自动保存经 `autosave` 信号区分；版本创建仅限手动 Save；agent 发布语义（Publish）不受影响。依据：agent/dataflow 共用 `UpdateAgent`，修正必须落在共享路径；agent 手动 Save 行为不变，仅自动保存收敛，属良性改进且不触及 §1 范围。
+
 > 设计已完全锁定，进入 §9 TDD 实现阶段。
 ## 13. 对抗性测试强制规则（v5.1 新增）
 
@@ -239,3 +285,5 @@ TDD 保证「代码满足测试」，不保证「测试满足需求」。本特�
 5. **回落链必须逐元素断言**：§5 的版本回落链与 canvas 上下文回落链，必须分别有测试证明「跳过已钉版本直接取 latest」会被拒、「省略 pipeline_id 让上下文变 nil」会被拒。
 
 §9 各 T 条目（T6/T7/T14/T26 等）须按上述规则补对抗性 fixture；新实现的 RED 测试若仅用 happy-path fixture，视为未达 TDD 门禁。
+
+6. **保存语义必须测 `autosave` 正反两例**：必须分别证明「`autosave:true` 不刷版本、仅更新 live draft」与「手动 Save 刷版本」；仅测手动 Save 而漏掉自动保存不刷版本的用例，视为未覆盖（对应 T32/T33/T38）。
