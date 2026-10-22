@@ -144,3 +144,47 @@ func TestCountPipelineVersionReferences_SumsKBAndDocument(t *testing.T) {
 		t.Fatalf("CountPipelineVersionReferences(v2) = %d, want 1", n2)
 	}
 }
+
+// TestUserCanvasVersionDAO_SaveOrReplaceLatestTxStoresAlias verifies the alias
+// field (design A2) is persisted on version save (T15: alias 存储/返回). The
+// alias column was previously write-dead: the DAO never copied it into the row.
+func TestUserCanvasVersionDAO_SaveOrReplaceLatestTxStoresAlias(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	if err := db.AutoMigrate(&entity.UserCanvas{}, &entity.UserCanvasVersion{}); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	// Parent canvas row must exist: SaveOrReplaceLatestTx locks it first.
+	if err := db.Create(&entity.UserCanvas{ID: "canvas-1", UserID: "user-1"}).Error; err != nil {
+		t.Fatalf("seed canvas: %v", err)
+	}
+
+	alias := "release-1.0"
+	d := NewUserCanvasVersionDAO()
+	row, err := d.SaveOrReplaceLatestTx(context.Background(), db, SaveOrReplaceLatestVersionOptions{
+		NewID:        "v-1",
+		UserCanvasID: "canvas-1",
+		Title:        ptrStr("v1"),
+		Alias:        &alias,
+		DSL:          entity.JSONMap{"graph": "g"},
+		Release:      true,
+	})
+	if err != nil {
+		t.Fatalf("SaveOrReplaceLatestTx: %v", err)
+	}
+	if row.Alias == nil || *row.Alias != alias {
+		t.Fatalf("returned row alias = %v, want %q", row.Alias, alias)
+	}
+	// Reload from the DB to prove the value was persisted, not just in-memory.
+	var got entity.UserCanvasVersion
+	if err := db.Where("id = ?", "v-1").First(&got).Error; err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if got.Alias == nil || *got.Alias != alias {
+		t.Fatalf("persisted alias = %v, want %q", got.Alias, alias)
+	}
+}
+
+func ptrStr(v string) *string { return &v }

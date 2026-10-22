@@ -249,3 +249,79 @@ func TestUpdateDatasetDocument_CleansParserConfigWithNewVersion(t *testing.T) {
 		t.Fatalf("parser_config cleaned from version %v, want v-new (new pin)", comp["source"])
 	}
 }
+
+// T26/C3 (document): switching the pinned version of a pipeline document WITHOUT
+// supplying parser_config resets the document's component params to the new
+// version default (design section 5 + T26/A3 整体重置). The previous config must
+// not be merged in.
+func TestUpdateDatasetDocument_VersionSwitchResetsParserConfigToNewDefault(t *testing.T) {
+	db := setupServiceTestDB(t)
+	pushServiceDB(t, db)
+	insertTestKB(t, "kb-1", "tenant-1", 1, 10, 5)
+	insertNamedTestDoc(t, "doc-1", "kb-1", "doc.txt", 10, 5)
+
+	canvasID := "1234567890abcdef1234567890abcdef"
+	seedDataflowCanvasCat(t, db, canvasID)
+	seedDocVersion(t, db, canvasID, "v-old", 100)
+	seedDocVersion(t, db, canvasID, "v-new", 200)
+	bindDocCanvas(t, db, "kb-1", "doc-1", canvasID, "v-old")
+
+	// A distinctive parser_config that must NOT survive the version switch.
+	if err := db.Model(&entity.Document{}).Where("id = ?", "doc-1").
+		Update("parser_config", entity.JSONMap{"__c3_marker__": "OLD"}).Error; err != nil {
+		t.Fatalf("seed parser_config: %v", err)
+	}
+
+	_, code, err := testDocumentService(t).UpdateDatasetDocument(t.Context(), "user-1", "kb-1", "doc-1",
+		&UpdateDatasetDocumentRequest{PipelineVersionID: sptr("v-new")},
+		map[string]bool{"pipeline_version_id": true})
+	if err != nil || code != common.CodeSuccess {
+		t.Fatalf("UpdateDatasetDocument err=%v code=%d", err, code)
+	}
+	got := loadDoc(t, db, "doc-1")
+	if got.PipelineVersionID == nil || *got.PipelineVersionID != "v-new" {
+		t.Fatalf("PipelineVersionID = %v, want v-new", got.PipelineVersionID)
+	}
+	// C3 full reset: the pre-switch marker must be gone (not merged).
+	if v, ok := got.ParserConfig["__c3_marker__"]; ok && v == "OLD" {
+		t.Fatalf("parser_config still holds pre-switch marker; C3 reset did not run: %v", got.ParserConfig)
+	}
+	// The reset must load the NEW version's default (source=v-new), not v-old.
+	comp, ok := got.ParserConfig["Parser:Shared"].(map[string]any)
+	if !ok {
+		t.Fatalf("reset parser_config missing Parser:Shared: %#v", got.ParserConfig)
+	}
+	if comp["source"] != "v-new" {
+		t.Fatalf("parser_config reset to version %v, want v-new default", comp["source"])
+	}
+}
+
+// T26 corner (document): re-submitting the SAME pinned version must NOT reset the
+// document's parser_config (C3 fires only on an actual version change).
+func TestUpdateDatasetDocument_SameVersionKeepsParserConfig(t *testing.T) {
+	db := setupServiceTestDB(t)
+	pushServiceDB(t, db)
+	insertTestKB(t, "kb-1", "tenant-1", 1, 10, 5)
+	insertNamedTestDoc(t, "doc-1", "kb-1", "doc.txt", 10, 5)
+
+	canvasID := "1234567890abcdef1234567890abcdef"
+	seedDataflowCanvasCat(t, db, canvasID)
+	seedDocVersion(t, db, canvasID, "v-old", 100)
+	bindDocCanvas(t, db, "kb-1", "doc-1", canvasID, "v-old")
+
+	if err := db.Model(&entity.Document{}).Where("id = ?", "doc-1").
+		Update("parser_config", entity.JSONMap{"__c3_marker__": "OLD"}).Error; err != nil {
+		t.Fatalf("seed parser_config: %v", err)
+	}
+
+	_, code, err := testDocumentService(t).UpdateDatasetDocument(t.Context(), "user-1", "kb-1", "doc-1",
+		&UpdateDatasetDocumentRequest{PipelineVersionID: sptr("v-old")},
+		map[string]bool{"pipeline_version_id": true})
+	if err != nil || code != common.CodeSuccess {
+		t.Fatalf("UpdateDatasetDocument err=%v code=%d", err, code)
+	}
+	got := loadDoc(t, db, "doc-1")
+	if v, ok := got.ParserConfig["__c3_marker__"]; !ok || v != "OLD" {
+		t.Fatalf("parser_config should be preserved when version unchanged: %v", got.ParserConfig)
+	}
+}

@@ -100,6 +100,7 @@ type SaveOrReplaceLatestVersionOptions struct {
 	UserCanvasID    string
 	Title           *string
 	Description     *string
+	Alias           *string
 	DSL             entity.JSONMap
 	Release         bool
 	KeepUnpublished int
@@ -311,6 +312,9 @@ func (dao *UserCanvasVersionDAO) SaveOrReplaceLatestTx(ctx context.Context, tx *
 			if opts.Description != nil {
 				updates["description"] = opts.Description
 			}
+			if opts.Alias != nil {
+				updates["alias"] = opts.Alias
+			}
 			if err = tx.WithContext(ctx).Model(&entity.UserCanvasVersion{}).
 				Where("id = ?", latest.ID).
 				Updates(updates).Error; err != nil {
@@ -332,6 +336,7 @@ func (dao *UserCanvasVersionDAO) SaveOrReplaceLatestTx(ctx context.Context, tx *
 		UserCanvasID: opts.UserCanvasID,
 		Title:        opts.Title,
 		Description:  opts.Description,
+		Alias:        opts.Alias,
 		Release:      opts.Release,
 		DSL:          opts.DSL,
 	}

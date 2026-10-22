@@ -208,6 +208,23 @@ func (s *DocumentService) UpdateDatasetDocument(ctx context.Context, userID, dat
 		repointVersion = true
 	}
 
+	// C3 (T26/V5/A3): an explicit version switch (repointVersion carrying a
+	// different pinned version) resets the document's component params to the
+	// new version default below. Re-pinning the SAME version is NOT a change
+	// (matches the dataset "same version keeps config" semantics).
+	versionChanged := false
+	if repointVersion {
+		oldV := ""
+		if doc.PipelineVersionID != nil {
+			oldV = strings.TrimSpace(*doc.PipelineVersionID)
+		}
+		newV := ""
+		if effectiveVersionID != nil {
+			newV = strings.TrimSpace(*effectiveVersionID)
+		}
+		versionChanged = newV != oldV
+	}
+
 	if present["parser_config"] && req.ParserConfig != nil {
 		var dslJSON []byte
 		// Honor the document's sticky pinned pipeline_version_id (design section 5/B4):
@@ -231,6 +248,28 @@ func (s *DocumentService) UpdateDatasetDocument(ctx context.Context, userID, dat
 					tenant.LLMID,
 				)
 			}
+			if err = s.documentDAO.UpdateByID(ctx, dao.DB, doc.ID, map[string]interface{}{
+				"parser_config": cleaned,
+			}); err != nil {
+				return nil, common.CodeDataError, err
+			}
+		}
+	} else if versionChanged {
+		// C3 (T26/V5/A3): a version switch resets the document's component params
+		// to the new version default (full reset, not a merge). The caller did
+		// not supply an explicit parser_config, so the new version defaults win
+		// outright, scoped the same way an explicit config would be.
+		cpDefaults, cpErr := service.ResolveComponentParamsDefaults(ctx, effParserID, effPipelineID, effectiveVersionID)
+		if cpErr != nil {
+			common.Warn("document version switch: failed to resolve component params defaults, keeping prior parser_config",
+				zap.String("parserID", effParserID), zap.Error(cpErr))
+		} else {
+			tenant, tenantErr := dao.NewTenantDAO().GetByID(ctx, dao.DB, kb.TenantID)
+			llmID := ""
+			if tenantErr == nil && tenant != nil {
+				llmID = tenant.LLMID
+			}
+			cleaned := service.ApplyComponentScopedParserConfig(cpDefaults, llmID)
 			if err = s.documentDAO.UpdateByID(ctx, dao.DB, doc.ID, map[string]interface{}{
 				"parser_config": cleaned,
 			}); err != nil {

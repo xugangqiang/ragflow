@@ -339,6 +339,16 @@ func (d *DatasetService) UpdateDataset(ctx context.Context, datasetID, userID st
 		}
 
 		pipelineChanged := pipelineID != nil && (lockedKB.PipelineID == nil || *pipelineID != *lockedKB.PipelineID)
+		// C3 (T26/V5): an explicit, non-empty version that differs from the
+		// currently pinned version is a version switch even when the pipeline
+		// canvas is unchanged. Such a switch must reset the component params to
+		// the new version defaults (below), not only a pipeline_id change.
+		versionChanged := false
+		if req.PipelineVersionID != nil && strings.TrimSpace(*req.PipelineVersionID) != "" {
+			if lockedKB.PipelineVersionID == nil || strings.TrimSpace(*req.PipelineVersionID) != strings.TrimSpace(*lockedKB.PipelineVersionID) {
+				versionChanged = true
+			}
+		}
 		// Design §5 sticky snapshot + T7: an explicit caller-supplied version is
 		// re-pinned (with ownership validation) whenever provided; an explicit
 		// EMPTY version clears the pin (track the latest version, design C2),
@@ -367,15 +377,23 @@ func (d *DatasetService) UpdateDataset(ctx context.Context, datasetID, userID st
 				updates["pipeline_version_id"] = nil
 			}
 		}
-		if _, ok := updates["parser_config"]; pipelineChanged && !ok {
+		if _, ok := updates["parser_config"]; (pipelineChanged || versionChanged) && !ok {
 			cfgParserID := lockedKB.ParserID
 			if parserIDProvided {
 				cfgParserID = parserID
 			}
 			effVersionID, _ := resolvePipelineVersionID(ctx, tx, pipelineID, req.PipelineVersionID)
-			if cpDefaults, cpErr := service.ResolveComponentParamsDefaults(ctx, cfgParserID, pipelineID, effVersionID); cpErr != nil {
+			cpDefaults, cpErr := service.ResolveComponentParamsDefaults(ctx, cfgParserID, pipelineID, effVersionID)
+			if cpErr != nil {
 				common.Warn("failed to resolve component params defaults on pipeline change",
 					zap.String("parserID", cfgParserID), zap.Error(cpErr))
+			}
+			if versionChanged {
+				// C3 (T26/V5): an explicit version switch resets the component
+				// params to the new version defaults (design section 5 + A3
+				// 整体重置). This is a full reset, not a merge, so the previous
+				// version's params are dropped even when the new default is empty.
+				updates["parser_config"] = cpDefaults
 			} else if cpDefaults != nil {
 				updates["parser_config"] = preserveDatasetParserConfigState(cpDefaults, lockedKB.ParserConfig, req.ParserConfig)
 			}

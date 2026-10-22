@@ -15,6 +15,7 @@
 package dataset
 
 import (
+	"reflect"
 	"testing"
 	"time"
 
@@ -225,6 +226,41 @@ func seedCanvasVersion(t *testing.T, db *gorm.DB, canvasID, versionID string, cr
 	}
 }
 
+// seedCanvasVersionDSL inserts a version row with an explicit DSL that carries
+// real components, so ResolveComponentParamsDefaults can resolve component
+// params defaults for version-reset tests.
+func seedCanvasVersionDSL(t *testing.T, db *gorm.DB, canvasID, versionID string, dsl entity.JSONMap, createOffsetMs int64) {
+	t.Helper()
+	ver := &entity.UserCanvasVersion{
+		ID:           versionID,
+		UserCanvasID: canvasID,
+		DSL:          dsl,
+		CreateTime:   i64ptr(time.Now().UnixMilli() + createOffsetMs),
+	}
+	if err := db.Create(ver).Error; err != nil {
+		t.Fatalf("seed version %s: %v", versionID, err)
+	}
+}
+
+// dslWithResetMarker returns a dataflow DSL whose single Parser component carries
+// a distinctive default param. Two versions seeded with different markers let a
+// test prove that a version switch reset the params to the NEW version defaults
+// (not a merge, not the old version, not empty).
+func dslWithResetMarker(marker string) entity.JSONMap {
+	return entity.JSONMap{
+		"components": map[string]any{
+			"Parser:ResetCpn": map[string]any{
+				"obj": map[string]any{
+					"component_name": "Parser",
+					"params": map[string]any{
+						"c3_reset_marker": marker,
+					},
+				},
+			},
+		},
+	}
+}
+
 // T7c: an explicit PipelineVersionID (not the latest) is bound as-is when it
 // belongs to the bound pipeline (design section 5 + T7 manual pin).
 func TestCreateDataset_BindsExplicitPipelineVersion(t *testing.T) {
@@ -380,5 +416,113 @@ func TestUpdateDataset_EmptyVersionClearsPin(t *testing.T) {
 	}
 	if kb.PipelineVersionID != nil {
 		t.Fatalf("PipelineVersionID = %v, want nil (cleared) after explicit empty version", *kb.PipelineVersionID)
+	}
+}
+
+// T26/C3: switching the pinned version of the SAME pipeline resets parser_config
+// to the new version default (design section 5 + T26). This is the V5 case: C3
+// must trigger on an explicit version change, not only on a pipeline_id change.
+func TestUpdateDataset_VersionChangeResetsParserConfigToNewVersionDefault(t *testing.T) {
+	db := setupDatasetUpdateTestDB(t)
+	pushServiceDB(t, db)
+
+	canvas1 := "0123456789abcdef0123456789abcdef"
+	verOld := "version0000000000000000000000aa"
+	verNew := "version0000000000000000000000bb"
+	seedDataflowCanvas(t, db, canvas1)
+	// Two versions carry DIFFERENT component defaults so the test can prove the
+	// reset loaded the NEW version (not a merge, not the old version, not empty).
+	seedCanvasVersionDSL(t, db, canvas1, verOld, dslWithResetMarker("OLD_VER_DEFAULT"), 0)
+	seedCanvasVersionDSL(t, db, canvas1, verNew, dslWithResetMarker("NEW_VER_DEFAULT"), 1000)
+	seedBoundKB(t, db, "kb-c3", canvas1, verOld)
+
+	// Distinctive parser_config that must NOT survive a version switch.
+	if err := db.Model(&entity.Knowledgebase{}).Where("id = ?", "kb-c3").
+		Update("parser_config", entity.JSONMap{"__c3_marker__": "OLD"}).Error; err != nil {
+		t.Fatalf("seed parser_config: %v", err)
+	}
+
+	ctx := t.Context()
+	parseType := 2
+	_, code, err := testDatasetUpdateService(t).UpdateDataset(ctx, "kb-c3", "tenant-1", service.UpdateDatasetRequest{
+		PipelineID:        &canvas1,
+		PipelineVersionID: &verNew,
+		ParseType:         &parseType,
+		// No ParserConfig: exercise the reset-to-default path.
+	})
+	if err != nil || code != common.CodeSuccess {
+		t.Fatalf("UpdateDataset err=%v code=%d", err, code)
+	}
+
+	var kb entity.Knowledgebase
+	if err := db.Where("id = ?", "kb-c3").Take(&kb).Error; err != nil {
+		t.Fatalf("load kb: %v", err)
+	}
+	if kb.PipelineVersionID == nil || *kb.PipelineVersionID != verNew {
+		t.Fatalf("PipelineVersionID = %v, want re-pinned %s", kb.PipelineVersionID, verNew)
+	}
+	// C3 (full reset, design A3 整体重置): the pre-switch marker must be gone
+	// (not merged), and the resolved config must come from the NEW version.
+	if v, ok := kb.ParserConfig["__c3_marker__"]; ok && v == "OLD" {
+		t.Fatalf("parser_config still holds pre-switch marker; C3 reset did not run: %v", kb.ParserConfig)
+	}
+	// Compute the expected value the SAME way the implementation does: resolve
+	// the new version defaults, then apply component-scoped scoping (a Parser
+	// node is left untouched, so llmID is irrelevant here).
+	resolved, derr := service.ResolveComponentParamsDefaults(ctx, string(entity.ParserTypeNaive), &canvas1, &verNew)
+	if derr != nil {
+		t.Fatalf("resolve new-version defaults: %v", derr)
+	}
+	expected := service.ApplyComponentScopedParserConfig(resolved, "")
+	if !reflect.DeepEqual(kb.ParserConfig, expected) {
+		t.Fatalf("parser_config = %v, want new-version default %v", kb.ParserConfig, expected)
+	}
+	// The new version's distinctive default must be present, and the old
+	// version's default must NOT be (proves the switch took effect).
+	cpn, ok := expected["Parser:ResetCpn"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected Parser:ResetCpn component missing: %v", expected)
+	}
+	if cpn["c3_reset_marker"] != "NEW_VER_DEFAULT" {
+		t.Fatalf("reset did not load the NEW version default: %v", kb.ParserConfig)
+	}
+}
+
+// T26 corner: re-submitting the SAME pinned version must NOT reset parser_config
+// (C3 reset fires only on an actual version change, design section 5 + T26).
+func TestUpdateDataset_SameVersionKeepsParserConfig(t *testing.T) {
+	db := setupDatasetUpdateTestDB(t)
+	pushServiceDB(t, db)
+
+	canvas1 := "0123456789abcdef0123456789abcdef"
+	verOld := "version0000000000000000000000aa"
+	verNew := "version0000000000000000000000bb"
+	seedDataflowCanvas(t, db, canvas1)
+	seedCanvasVersion(t, db, canvas1, verOld, 0)
+	seedCanvasVersion(t, db, canvas1, verNew, 1000)
+	seedBoundKB(t, db, "kb-c3-same", canvas1, verOld)
+
+	if err := db.Model(&entity.Knowledgebase{}).Where("id = ?", "kb-c3-same").
+		Update("parser_config", entity.JSONMap{"__c3_marker__": "OLD"}).Error; err != nil {
+		t.Fatalf("seed parser_config: %v", err)
+	}
+
+	ctx := t.Context()
+	parseType := 2
+	_, code, err := testDatasetUpdateService(t).UpdateDataset(ctx, "kb-c3-same", "tenant-1", service.UpdateDatasetRequest{
+		PipelineID:        &canvas1,
+		PipelineVersionID: &verOld, // same version, no change
+		ParseType:         &parseType,
+	})
+	if err != nil || code != common.CodeSuccess {
+		t.Fatalf("UpdateDataset err=%v code=%d", err, code)
+	}
+
+	var kb entity.Knowledgebase
+	if err := db.Where("id = ?", "kb-c3-same").Take(&kb).Error; err != nil {
+		t.Fatalf("load kb: %v", err)
+	}
+	if v, ok := kb.ParserConfig["__c3_marker__"]; !ok || v != "OLD" {
+		t.Fatalf("parser_config should be preserved when version unchanged: %v", kb.ParserConfig)
 	}
 }
