@@ -16,7 +16,7 @@ A version-by-version record of the schema and data changes the Go backend applie
 
 - The marker is a row in `system_settings` with the key `mysql_migration.database.version`.
 - The marker prevents a migration step from running again after that step has completed successfully.
-- Go defines the versions as constants: `modelMigrationBaseVersion` and `modelMigrationTargetVersion` in [migration_version.go](https://github.com/infiniflow/ragflow/blob/main/internal/dao/migration_version.go), `conversationHistoryTargetVersion` in [conversation_history_migration.go](https://github.com/infiniflow/ragflow/blob/main/internal/dao/conversation_history_migration.go), `knowledgebaseParserConfigTargetVersion` in [migration.go](https://github.com/infiniflow/ragflow/blob/main/internal/dao/migration.go), and `ingestionParserConfigTargetVersion` in [ingestion_parser_config_migration.go](https://github.com/infiniflow/ragflow/blob/main/internal/dao/ingestion_parser_config_migration.go). The two parser-config constants share `v1.0.0-rc2`.
+- Go defines the versions as constants: `modelMigrationBaseVersion` and `modelMigrationTargetVersion` in [migration_version.go](https://github.com/infiniflow/ragflow/blob/main/internal/dao/migration_version.go), `conversationHistoryTargetVersion` in [conversation_history_migration.go](https://github.com/infiniflow/ragflow/blob/main/internal/dao/conversation_history_migration.go), `knowledgebaseParserConfigTargetVersion` in [migration.go](https://github.com/infiniflow/ragflow/blob/main/internal/dao/migration.go), and `ingestionParserConfigTargetVersion` in [ingestion_parser_config_migration.go](https://github.com/infiniflow/ragflow/blob/main/internal/dao/ingestion_parser_config_migration.go). The two parser-config constants share `v1.0.0-rc2`. The DSL multi-version backfill is gated by `dslVersionTargetVersion` (`v1.0.0-rc4`) in [dsl_version_migration.go](https://github.com/infiniflow/ragflow/blob/main/internal/dao/dsl_version_migration.go).
 - A step runs when the stored version is lower than the step's version. Versions are compared with Python PEP 440 semantics, where a `dev` prerelease sorts *before* the release it precedes (`v1.0.0-rc1.dev1` < `v1.0.0-rc1`). A missing or unparsable marker never skips a step.
 - `checkDatabaseVersion` in [cmd/ragflow_server.go](https://github.com/infiniflow/ragflow/blob/main/cmd/ragflow_server.go) refuses to start when the code version is older than the stored database version, so a database migrated by a newer release cannot be opened by an older one.
 
@@ -36,6 +36,7 @@ Startup order in `InitDB` ([database.go](https://github.com/infiniflow/ragflow/b
 | `v1.0.0-rc1`      | Seed factory-declared models, merge `model_type` into an integer bitmask, populate the `tenant_*_id` columns | `modelMigrationTargetVersion`      |
 | `v1.0.0-rc1`      | Split conversation message and reference payloads into child tables                                          | `conversationHistoryTargetVersion` |
 | `v1.0.0-rc2`      | Convert Python ingestion settings in dataset/document `parser_config` onto pipeline components, then remove retired dataset `raptor` / `graphrag` sections | `ingestionParserConfigTargetVersion` / `knowledgebaseParserConfigTargetVersion` |
+| `v1.0.0-rc4`      | Lock existing dataflow-canvas dataset/document bindings to the canvas latest version (the `pipeline_version_id` columns are added by the version-less step below) | `dslVersionTargetVersion` |
 
 The two tenant model steps are cumulative: a database at `v0.26.0` still runs the `v1.0.0-rc1` step, and a database at or above `v1.0.0-rc1` runs neither.
 
@@ -149,6 +150,25 @@ On success the migration records `v1.0.0-rc2`. Databases already marked `v1.0.0-
 
 ---
 
+## v1.0.0-rc4
+
+Locks every pre-existing dataflow-canvas binding to the latest version of that canvas, so already-configured datasets and documents keep parsing against the version that was current when the upgrade ran (design section 5/B4 sticky snapshot). The `pipeline_version_id` columns it writes are added by the version-less step below; this step only backfills their values and is gated by the `dslVersionTargetVersion` marker.
+
+### Data migration
+
+| Table | Change |
+|-------|--------|
+| `knowledgebase`, `document` | Rows whose `pipeline_id` points at a `dataflow_canvas` are bound to that canvas latest version (`user_canvas_version` ordered by `create_time DESC`). Bindings to a built-in parser id (no backing `user_canvas`), to a non-dataflow canvas, or to a canvas with no versions are left unbound; a dangling version id is never written. |
+
+Execution details:
+
+- Rows are read in id-ordered batches of 256, each batch in its own transaction, so an interrupted run resumes cleanly.
+- The marker advances to `v1.0.0-rc4` only after both tables are processed. Databases already marked `v1.0.0-rc4` or later skip the backfill.
+
+On success the step writes `v1.0.0-rc4` into the version marker.
+
+---
+
 ## Version-less steps
 
 These steps are not gated by the version marker. They are idempotent and run on every startup, either through `RunMigrations` or through the ingestion helpers in `InitDB`.
@@ -168,6 +188,9 @@ These steps are not gated by the version marker. They are idempotent and run on 
 | `ingestion_task_log`                                                                       | Adds `pipeline_log_id varchar(32) NULL`, `event_type tinyint NOT NULL DEFAULT 4`, and the index `idx_ingestion_task_log_pipeline_id`.                                                                                                                                                                                                         |
 | `dialog`, `tenant_llm`, `api_token`, `canvas_template`, `system_settings`, `knowledgebase` | Column types converged to the Peewee models, for example `dialog.top_k int NOT NULL DEFAULT 1024`, `tenant_llm.api_key text`, `api_token.dialog_id varchar(32)`, `canvas_template.title` / `description` nullable longtext, `system_settings.value text NOT NULL`, `knowledgebase.raptor_task_finish_at` / `mindmap_task_finish_at` datetime. |
 | `conversation`, `api_4_conversation`                                                       | Index `idx_<table>_dialog_updated (dialog_id, update_time, id)` for conversation list queries.                                                                                                                                                                                                                                                |
+| `knowledgebase` | Adds `pipeline_version_id varchar(32) NULL` (dataflow canvas version binding; design section 5/B4). |
+| `document` | Adds `pipeline_version_id varchar(32) NULL` (inherits the dataset pinned version at upload; design section 5). |
+| `user_canvas_version` | Adds `alias varchar(255) NULL` (free-text version alias for the version list filter; design A2/F1). |
 
 ### Data changes
 
