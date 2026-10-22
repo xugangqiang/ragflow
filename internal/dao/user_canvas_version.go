@@ -105,6 +105,11 @@ type SaveOrReplaceLatestVersionOptions struct {
 	Release         bool
 	KeepUnpublished int
 	SameDSL         func(entity.JSONMap) bool
+	// ForceNew bypasses the same-DSL in-place refresh so a manual Save always
+	// INSERTs a fresh version row (design §5.1: every manual Save yields a new
+	// version, even when the DSL is byte-identical to the previous one). When
+	// false, an unchanged DSL refreshes the latest row in place as before.
+	ForceNew bool
 }
 
 // NewUserCanvasVersionDAO returns a zero-value DAO. The struct is stateless
@@ -275,6 +280,45 @@ func (dao *UserCanvasVersionDAO) CreateTx(ctx context.Context, tx *gorm.DB, v *e
 	return tx.WithContext(ctx).Create(v).Error
 }
 
+// UserCanvasVersionPatch carries the mutable metadata fields a version PATCH
+// may change. All fields are optional; only non-nil fields are written, so a
+// caller may update just the alias while leaving title/description untouched.
+type UserCanvasVersionPatch struct {
+	Alias       *string
+	Title       *string
+	Description *string
+}
+
+// UpdateTx updates mutable metadata fields of an existing version (alias,
+// title, description) without touching its DSL or creating a new version. It
+// is the backing store for the version PATCH endpoint (design G2/§4.4): alias
+// editing must never produce a new version row or alter the pinned DSL. When
+// the patch is empty it is a no-op. Returns ErrUserCanvasVersionNotFound when
+// the target row does not exist.
+func (dao *UserCanvasVersionDAO) UpdateTx(ctx context.Context, tx *gorm.DB, id string, patch UserCanvasVersionPatch) error {
+	updates := map[string]interface{}{}
+	if patch.Alias != nil {
+		updates["alias"] = patch.Alias
+	}
+	if patch.Title != nil {
+		updates["title"] = patch.Title
+	}
+	if patch.Description != nil {
+		updates["description"] = patch.Description
+	}
+	if len(updates) == 0 {
+		return nil
+	}
+	res := tx.WithContext(ctx).Model(&entity.UserCanvasVersion{}).Where("id = ?", id).Updates(updates)
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return ErrUserCanvasVersionNotFound
+	}
+	return nil
+}
+
 // SaveOrReplaceLatestTx inserts or refreshes a version using the caller's
 // transaction.
 func (dao *UserCanvasVersionDAO) SaveOrReplaceLatestTx(ctx context.Context, tx *gorm.DB, opts SaveOrReplaceLatestVersionOptions) (*entity.UserCanvasVersion, error) {
@@ -300,7 +344,7 @@ func (dao *UserCanvasVersionDAO) SaveOrReplaceLatestTx(ctx context.Context, tx *
 		if !errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, err
 		}
-	} else if opts.sameDSL(latest.DSL) {
+	} else if !opts.ForceNew && opts.sameDSL(latest.DSL) {
 		if !latest.Release || opts.Release {
 			updates := map[string]interface{}{
 				"dsl":     opts.DSL,

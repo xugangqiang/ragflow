@@ -1134,6 +1134,32 @@ func (s *AgentService) UpdateAgent(ctx context.Context, userID, canvasID string,
 		}
 	}
 	updates["release"] = release
+
+	// Autosave signal (design §5.1): the front-end sends autosave:true on its
+	// debounced auto-save. An auto-save refreshes ONLY the live draft
+	// (user_canvas.dsl) and must NOT create a new version. A manual Save (no
+	// autosave flag, or autosave:false) must both update the draft and INSERT a
+	// new version row. v5.2 removes the same-DSL in-place refresh dedup, so
+	// every manual Save produces a version even when the DSL is unchanged.
+	autosave := false
+	if value, ok := patch["autosave"]; ok && value != nil {
+		switch v := value.(type) {
+		case bool:
+			autosave = v
+		case string:
+			autosave = v != "" && v != "false"
+		case float64:
+			autosave = v != 0
+		}
+	}
+
+	// Optional alias carried on a manual Save (design §4.4 carry-on path).
+	var aliasPtr *string
+	if value, ok := patch["alias"]; ok && value != nil {
+		if s, ok := value.(string); ok && strings.TrimSpace(s) != "" {
+			aliasPtr = &s
+		}
+	}
 	if title, ok := updatedAgentTitle(canvasInstance, updates); ok {
 		canvasCategory := updatedAgentCanvasCategory(canvasInstance, updates)
 		// Exclude the canvas being updated so keeping or only re-casing its
@@ -1183,8 +1209,15 @@ func (s *AgentService) UpdateAgent(ctx context.Context, userID, canvasID string,
 		} else if canvasInstance.Title != nil {
 			title = *canvasInstance.Title
 		}
-		opts := s.saveOrReplaceVersionOptions(ctx, userID, canvasID, dsl, title, nil, nil, release)
-		versionOpts = &opts
+		opts := s.saveOrReplaceVersionOptions(ctx, userID, canvasID, dsl, title, nil, aliasPtr, release)
+		// Manual Save (autosave != true) always mints a new version row, even
+		// when the DSL is identical to the previous one (design §5.1). Auto-save
+		// never mints a version at all, so versionOpts stays nil and only the
+		// live draft is refreshed below.
+		opts.ForceNew = !autosave
+		if !autosave {
+			versionOpts = &opts
+		}
 	}
 
 	// The canvas release/DSL update and the version save must commit
@@ -1439,6 +1472,31 @@ func (s *AgentService) DeleteVersion(ctx context.Context, userID, canvasID, vers
 	}
 	return dao.DB.Transaction(func(tx *gorm.DB) error {
 		return s.versionDAO.DeleteTx(ctx, tx, versionID)
+	})
+}
+
+// UpdateVersion patches mutable metadata (alias/title/description) of a single
+// version of a canvas the user can update. It never changes the DSL and never
+// creates a new version (design G2/§4.4). Returns
+// dao.ErrUserCanvasVersionNotFound when the row does not exist or belongs to a
+// different canvas, and dao.ErrUserCanvasNotFound when the parent canvas is not
+// updatable by the requesting user.
+func (s *AgentService) UpdateVersion(ctx context.Context, userID, canvasID, versionID string, patch dao.UserCanvasVersionPatch) error {
+	if versionID == "" {
+		return dao.ErrUserCanvasVersionNotFound
+	}
+	if _, err := s.loadCanvasForUser(ctx, userID, canvasID, permission.OperationUpdate); err != nil {
+		return err
+	}
+	row, err := s.versionDAO.GetByID(ctx, dao.DB, versionID)
+	if err != nil {
+		return err
+	}
+	if row.UserCanvasID != canvasID {
+		return dao.ErrUserCanvasVersionNotFound
+	}
+	return dao.DB.Transaction(func(tx *gorm.DB) error {
+		return s.versionDAO.UpdateTx(ctx, tx, versionID, patch)
 	})
 }
 

@@ -824,6 +824,44 @@ func (h *AgentHandler) DeleteVersion(c *gin.Context) {
 	common.SuccessWithData(c, true, "success")
 }
 
+// PatchVersion patches mutable metadata (alias/title/description) of a single
+// version. It does not change the DSL and does not create a new version
+// (design G2/§4.4).
+// @Summary Patch Agent Version
+// @Tags agents
+// @Accept json
+// @Produce json
+// @Param canvas_id path string true "canvas id"
+// @Param version_id path string true "version id"
+// @Param body body object false "patch fields: alias/title/description"
+// @Success 200 {object} map[string]interface{}
+// @Router /api/v1/agents/{canvas_id}/versions/{version_id} [patch]
+func (h *AgentHandler) PatchVersion(c *gin.Context) {
+	user, code, msg := GetUser(c)
+	if code != common.CodeSuccess {
+		common.ResponseWithCodeData(c, code, nil, msg)
+		return
+	}
+	canvasID := c.Param("canvas_id")
+	versionID := c.Param("version_id")
+	var req struct {
+		Alias       *string `json:"alias"`
+		Title       *string `json:"title"`
+		Description *string `json:"description"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		common.ResponseWithCodeData(c, common.CodeArgumentError, nil, err.Error())
+		return
+	}
+	patch := dao.UserCanvasVersionPatch{Alias: req.Alias, Title: req.Title, Description: req.Description}
+	if err := h.agentService.UpdateVersion(c.Request.Context(), user.ID, canvasID, versionID, patch); err != nil {
+		ec, em := mapAgentError(err)
+		common.ResponseWithCodeData(c, ec, nil, em)
+		return
+	}
+	common.SuccessWithData(c, true, "success")
+}
+
 // --- PR2: missing routes wired up to the existing service layer ---
 
 // ListAgentTemplates GET /api/v1/agents/templates
