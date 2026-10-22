@@ -127,11 +127,11 @@ PipelineVersionID *string `gorm:"column:pipeline_version_id;size:32;index" json:
 
 **分支规则（统一作用于 agent 与 dataflow，因共用 `UpdateAgent` 路径）**：
 - `autosave == true`：**仅** `canvasDAO.UpdateFieldsTx` 更新 `user_canvas.dsl`（live draft），**不**调用 `SaveOrReplaceLatestTx`，**不**产生新版本。
-- `autosave == false/缺省`（手动 Save）：维持现有逻辑——`UpdateFieldsTx` + `SaveOrReplaceLatestTx`（DSL 变更则新建版本，同 DSL 则就地刷新，保留 v5 去重）。
+- `autosave == false/缺省`（手动 Save）：**必须同时发生两件事**——① `canvasDAO.UpdateFieldsTx` 更新 `user_canvas.dsl`（live draft）；② 版本写入 **INSERT 一条新的 `user_canvas_version` 记录**。**v5.2 修正：不再做『同 DSL 就地刷新』去重**——手动 Save 即落一版，即便 DSL 与上一版本完全相同也 INSERT 新行（保证每次手动保存都产生新版本）。实现上 manual Save 应走强制 INSERT 路径（如新增 `SaveNewVersionTx(canvasID, dsl, alias, title, description)` 或给 `SaveOrReplaceLatestVersionOptions` 加 `ForceNew bool`），绕过 `sameDSL` 就地刷新分支；自动保存则不进入该路径。
 
 **agent 发布语义不受影响**：`PublishAgent`（`release=true`）路径独立，仍创建 released 版本，本次不改（与 §1「agent 发布语义不在范围」一致）。
 
-**范围裁定（A9）**：因 agent/dataflow 共用 `UpdateAgent`，修正必须落在共享路径、对所有画布类别统一生效；agent 的手动 Save 仍照常创建版本（行为不变），仅自动保存不再刷版本——属良性改进，不触及 §1 划定的 agent 发布语义范围。
+**范围裁定（A9，用户已确认 2026-10-22）**：因 agent/dataflow 共用 `UpdateAgent`，修正必须落在共享路径、对所有画布类别统一生效；**手动 Save 对 agent 与 dataflow 一致：更新 `user_canvas` + INSERT 新 `user_canvas_version`**；agent 的发布语义（Publish）不受影响。agent 手动 Save 仍建版本（行为不变），仅自动保存收敛，属良性改进且不触及 §1 范围。
 
 **粘性快照不受影响**：新建版本只改 `user_canvas_version`，已绑定 dataset/file 的 `pipeline_version_id` 仍为粘性（B4）；live draft 领先于最新版本属预期（手动 Save 后方才落成版本）。
 
@@ -166,7 +166,7 @@ PipelineVersionID *string `gorm:"column:pipeline_version_id;size:32;index" json:
 
 ---
 
-- **保存分支（v5.2）**：`UpdateAgent` 按 `autosave` 字段分支（见 §5.1）；自动保存仅 `UpdateFieldsTx` 更新 live draft，手动 Save 走既有版本逻辑。
+- **保存分支（v5.2）**：`UpdateAgent` 按 `autosave` 字段分支（见 §5.1）；自动保存**仅** `UpdateFieldsTx` 更新 live draft、绝不碰 `user_canvas_version`；手动 Save **同时**更新 `user_canvas.dsl` 并 **INSERT 新 `user_canvas_version` 记录**（保证 user_canvas 更新与版本插入两者都发生，不复用就地刷新）。
 - **版本 PATCH 端点（v5.2）**：`PATCH /api/v1/agents/{canvas_id}/versions/{version_id}`，body `{alias?, title?, description?}`，经 `versionDAO.UpdateTx` 更新元数据，不新建版本、不改 DSL；需归属校验（`version.UserCanvasID == canvas_id`）；仅对画布本体版本生效。
 
 ## 8. 前端变更
@@ -225,12 +225,12 @@ PipelineVersionID *string `gorm:"column:pipeline_version_id;size:32;index" json:
 ---
 
 - T32（v5.2 保存语义）`UpdateAgent` 带 `autosave:true` + DSL 变更 → 断言 `user_canvas_version` 行数**不变**、`user_canvas.dsl` 已更新为最新 DSL（不产生新版本）。
-- T33（v5.2 保存语义）`UpdateAgent` 手动 Save（无 `autosave`）+ DSL 变更 → 断言**新增**一行版本（`SaveOrReplaceLatestTx` 命中新建分支）。
+- T33（v5.2 保存语义）`UpdateAgent` 手动 Save（无 `autosave`）→ 断言**新增一条 `user_canvas_version` 记录且 `user_canvas.dsl` 已更新**（即便 DSL 与上一版本相同也 INSERT 新行，不复用就地刷新；验证 user_canvas 更新与版本插入两者俱发生）。
 - T34（v5.2 统一路径）agent 画布自动保存同样不刷版本（与 dataflow 共用 `UpdateAgent`，断言行数不变）。
 - T35（v5.2 alias 写入）`PATCH /versions/{id}` 带 `alias` → 断言该行 `alias` 更新、未新建版本、DSL 不变；跨 canvas 改 alias → 归属校验拒绝。
 - T36（v5.2 alias 兜底）manual Save 请求携带 `alias` → 断言新建/刷新版本写入该 alias。
 - T37（v5.2 前端 latest 去除）dataset/file 版本选择器选项列表**不含** `__latest__` 伪值，且含 alias 文案；提交 `pipeline_version_id` 为具体 ID（前端/组件断言）。
-- T38（v5.2 对抗）自动保存连续多次 + 仅一次手动 Save → 版本数恰为 1（非 N），且 live draft 反映最后一次自动保存内容。
+- T38（v5.2 对抗）连续 N 次自动保存（不刷版本）+ 仅 1 次手动 Save → 版本数恰为 1（非 N），且 live draft 反映最后一次自动保存内容；手动 Save 前后 `user_canvas_version` 记录数差恰为 1（确认 INSERT 而非 in-place 更新）。
 
 ## 10. 漏洞审计（v4 状态）
 
@@ -270,7 +270,7 @@ PipelineVersionID *string `gorm:"column:pipeline_version_id;size:32;index" json:
 - **A7 ad-hoc/调试路径（已裁定：同正式解析带 version）**：`pipeline_executor.go` ad-hoc 路径已 reload `doc`（L888），同法透传 `doc.PipelineVersionID`。
 - **A8 脏数据回填（已裁定：跳过+日志）**：backfill 遇 canvas 无版本时跳过 + 日志告警，绝不写悬空 version_id。
 
-- **A9 保存语义修正范围（已裁定：作用于共享路径、全类别统一）**：手动/自动保存经 `autosave` 信号区分；版本创建仅限手动 Save；agent 发布语义（Publish）不受影响。依据：agent/dataflow 共用 `UpdateAgent`，修正必须落在共享路径；agent 手动 Save 行为不变，仅自动保存收敛，属良性改进且不触及 §1 范围。
+- **A9 保存语义修正范围（已裁定：作用于共享路径、全类别统一；用户确认 2026-10-22）**：手动/自动保存经 `autosave` 信号区分；版本创建仅限手动 Save，且手动 Save **同时**更新 `user_canvas` 并 **INSERT 新 `user_canvas_version` 记录**（agent 与 dataflow 一致）；agent 发布语义（Publish）不受影响。依据：agent/dataflow 共用 `UpdateAgent`，修正必须落在共享路径；agent 手动 Save 仍建版本，仅自动保存收敛，属良性改进且不触及 §1 范围。
 
 > 设计已完全锁定，进入 §9 TDD 实现阶段。
 ## 13. 对抗性测试强制规则（v5.1 新增）
