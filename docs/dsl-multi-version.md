@@ -96,6 +96,11 @@ PipelineVersionID *string `gorm:"column:pipeline_version_id;size:32;index" json:
 - **document**（文件级）：`file2document.go` 同理，绑定/变更 pipeline 时写 `pipeline_version_id = GetLatest(canvasID).ID`；未变更则保留。
 - **手动选版本（C2）**：新增请求字段 `pipeline_version_id`（可选）。传入时校验其属于该 `pipeline_id` 的 canvas，写该值（取代“默认最新”）。
 - **C3 切版本重置参数**：当 `pipeline_version_id` 被显式改为另一版本时，调用 `ResolveComponentParamsDefaults(ctx, parserID, &canvasID, versionID)` 取得该版本 default，将 dataset/document 的 `parser_config`（component params）重置为该 default（范围见 §12 A3）。
+- **回落契约（v5.1 新增，必读）**：`pipeline_id`（画布容器）与 `pipeline_version_id`（容器内快照）是「容器⊃快照」关系，`pipeline_version_id` 必须在 `pipeline_id` 的上下文里解析。任何解析都必须遵守下面两条回落链，缺一不可，否则会出现「钉被清空 / 误用最新 / 误用 builtin 默认」三类缺陷：
+  - **版本回落链**：`req.PipelineVersionID` → `lockedKB.PipelineVersionID`（已钉版本，不可跳过）→ `GetLatest(canvas)`。请求未带版本时，**必须先回落到已钉版本**，仅当已钉版本也为空才用 latest。绝不允许「请求没带就直接取 latest」——那会让「钉旧版本」的数据集在改配置时被悄悄升级到最新结构。
+  - **canvas 上下文回落链**：解析 `pipeline_version_id` 所需的 canvas = `req.PipelineID` → `lockedKB.PipelineID`（已绑画布）→ nil（builtin）。请求省略 `pipeline_id`（只发 `pipeline_version_id`）时，**必须沿用已绑 `PipelineID`**，不得因省略而让上下文变 nil；否则归属校验失效、`pipeline_version_id` 被误清空、C3 重置误用 builtin 默认。
+  - **parser_config 重建一律基于钉住版本的 DSL**：无论因何触发（请求带 `parser_config`、切版本、pipeline 变更），重建所用 DSL 必须来自 `pipeline_version_id` 指向的版本；仅当 `pipeline_version_id` 为空时才回落 `GetLatest`。「保留版本号」与「用该版本 DSL 重建」是同一语义，不可割裂——只保留列而用 latest DSL 重建属于未完全实现粘性快照（B4）。
+  - **单字段 PATCH 必须沿用已绑值**：update 允许只发 `pipeline_version_id` 省略 `pipeline_id`（或反之）。被省略的字段一律沿用 `lockedKB` 已绑值，不得清空或误判。
 
 ---
 
@@ -140,6 +145,7 @@ PipelineVersionID *string `gorm:"column:pipeline_version_id;size:32;index" json:
 ---
 
 ## 9. TDD 测试清单（严格红→绿）
+> **对抗性 fixture 强制规则（v5.1 新增，见 §13）：** 本特性的灵魂是 `pipeline_version_id`（钉住）可以 ≠ `GetLatest`（最新）。因此 §9 每一条涉及版本的测试**必须**使用 `pinned != latest` 的 fixture；并且必须为「耦合字段只发其一」的 PATCH 场景各写一条测试。happy-path（pinned==latest 且两字段齐发）**不算覆盖**，因为它永远发现不了 B1/B2 类缺陷。
 
 **后端（unit tier，默认 `bash build.sh --test`）**
 - T1 `migrateDSLVersionColumns`：列不存在时加列、已存在时幂等（Error1060 容错）。
@@ -149,6 +155,8 @@ PipelineVersionID *string `gorm:"column:pipeline_version_id;size:32;index" json:
 - T5 `ResolveComponentParamsDefaults` 按 version 取 default。
 - T6 dataset `CreateDataset`：Pipeline 模式写 `pipeline_version_id=GetLatest`；BuiltIn 模式字段为 NULL。
 - T7 dataset `UpdateDataset`：pipeline 未变更 → 保留原 versionID（B4）；pipeline 变更 → 重写为新 GetLatest；手动 versionID 生效且做归属校验。
+- T7f（B2 对应）`UpdateDataset` **单字段 PATCH**：只发 `pipeline_version_id=v-new`、省略 `pipeline_id`，且数据集已钉 `v-old` → 断言 `pipeline_version_id` 变为 `v-new`（**未被清空**），且 `parser_config` 按 `v-new` 默认整体重置（C3/A3），归属校验以已绑 `PipelineID` 为上下文。
+- T7g（B1 对应）`UpdateDataset` **钉旧版本 + 只改 parser_config**：数据集钉 `v-old`（≠latest），PATCH 只带 `parser_config`、不带 `pipeline_version_id` → 断言重建所用 DSL 来自 `v-old`（**非 latest**），`parser_config` 结构与 `v-old` 默认一致（粘性快照 B4 不被破坏）。
 - T8 document 绑定同样写 versionID（粘性）。
 - T9 `DeleteVersion` 引用扫描：引用存在时允许删除、引用方 Missing；无引用正常删。
 - T10 运行时 `loadDSLFromCanvas` 按 versionID 取 `user_canvas_version.dsl`；版本缺失 → 解析 fail（C4）。
@@ -219,3 +227,15 @@ PipelineVersionID *string `gorm:"column:pipeline_version_id;size:32;index" json:
 - **A8 脏数据回填（已裁定：跳过+日志）**：backfill 遇 canvas 无版本时跳过 + 日志告警，绝不写悬空 version_id。
 
 > 设计已完全锁定，进入 §9 TDD 实现阶段。
+## 13. 对抗性测试强制规则（v5.1 新增）
+
+TDD 保证「代码满足测试」，不保证「测试满足需求」。本特性 review 暴露的 B1/B2 缺陷，根因不是 TDD 机制失效，而是**测试从需求派生的那一环失职**：fixture 全用了 `pinned == latest` 且两字段齐发，导致「钉住≠最新」这一 feature 核心场景从未被锻炼。
+
+**强制规则（每条需求一句对抗性测试）：**
+1. **每条需求条款必须对应至少一条对抗性测试**，其 fixture 必须让该条款**可证伪**。若「实现错了测试也绿」，说明 fixture 没打到痛处，该条款未覆盖。
+2. **版本相关测试强制 `pinned != latest`**：凡涉及 `pipeline_version_id` 的测试，fixture 中钉住的版本必须明确不等于 `GetLatest`；并额外构造「钉住版本被后续新建版本挤成过时」的时序。
+3. **耦合字段必须测「只发其一」的 PATCH**：`pipeline_id` / `pipeline_version_id` 是耦合对，必须为「只发 version 省略 pipeline」「只发 pipeline 省略 version」「两者都省略」各写一条，断言省略字段沿用已绑值。
+4. **归属/权限边界必须负向测**：跨 canvas 的 `pipeline_version_id`、悬空 `pipeline_version_id`、agent canvas 误绑 dataflow 版本，必须各自返回 Missing/拒绝，而非静默回落。
+5. **回落链必须逐元素断言**：§5 的版本回落链与 canvas 上下文回落链，必须分别有测试证明「跳过已钉版本直接取 latest」会被拒、「省略 pipeline_id 让上下文变 nil」会被拒。
+
+§9 各 T 条目（T6/T7/T14/T26 等）须按上述规则补对抗性 fixture；新实现的 RED 测试若仅用 happy-path fixture，视为未达 TDD 门禁。
