@@ -5,13 +5,7 @@ jest.mock('react-i18next', () => ({
   useTranslation: () => ({ t: (key: string) => key }),
 }));
 
-import {
-  LATEST_VERSION_VALUE,
-  PipelineVersionSelect,
-  filterVersionsByAlias,
-  formValueToSelectValue,
-  selectValueToFormValue,
-} from './index';
+import { PipelineVersionSelect, filterVersionsByAlias } from './index';
 
 describe('filterVersionsByAlias', () => {
   const versions = [
@@ -37,7 +31,7 @@ describe('filterVersionsByAlias', () => {
   });
 });
 
-describe('PipelineVersionSelect', () => {
+describe('PipelineVersionSelect (G1/v5.2: no latest pseudo-option)', () => {
   it('renders the alias filter input', () => {
     render(
       React.createElement(PipelineVersionSelect, {
@@ -51,7 +45,7 @@ describe('PipelineVersionSelect', () => {
     ).toBeInTheDocument();
   });
 
-  it('shows the latest placeholder when no version is pinned', () => {
+  it('shows the latest placeholder when unbound, with no __latest__ option', () => {
     render(
       React.createElement(PipelineVersionSelect, {
         versions: [{ id: 'v1', title: 'First', alias: null }],
@@ -59,22 +53,21 @@ describe('PipelineVersionSelect', () => {
         onChange: jest.fn(),
       }),
     );
+    // The "latest" label is only a placeholder; there is no selectable
+    // __latest__ sentinel item (design G1 / v5.2).
     expect(screen.getByText('flow.version.latest')).toBeInTheDocument();
-  });
-});
-
-describe('version select value boundary', () => {
-  it('maps an empty form value to the sentinel and back', () => {
-    expect(formValueToSelectValue('')).toBe(LATEST_VERSION_VALUE);
-    expect(selectValueToFormValue(LATEST_VERSION_VALUE)).toBe('');
+    expect(screen.queryByText('__latest__')).toBeNull();
   });
 
-  it('passes a pinned id through unchanged', () => {
-    expect(formValueToSelectValue('v1')).toBe('v1');
-    expect(selectValueToFormValue('v1')).toBe('v1');
-  });
-
-  it('uses a non-empty sentinel so Radix never sees an empty item value', () => {
-    expect(LATEST_VERSION_VALUE.trim()).not.toBe('');
+  it('passes the concrete version id through unchanged', () => {
+    const onChange = jest.fn();
+    render(
+      React.createElement(PipelineVersionSelect, {
+        versions: [{ id: 'v1', title: 'First', alias: 'prod' }],
+        value: 'v1',
+        onChange,
+      }),
+    );
+    expect(screen.queryByText('__latest__')).toBeNull();
   });
 });

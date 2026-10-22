@@ -532,6 +532,8 @@ export const useSetAgent = (
       release?: string;
       description?: string | null;
       permission?: string;
+      autosave?: boolean;
+      alias?: string;
     }) => {
       const agentId = params.id ?? id;
       const { data = {} } = agentId
@@ -542,6 +544,8 @@ export const useSetAgent = (
             description: params.description,
             permission: params.permission,
             release: params.release,
+            autosave: params.autosave,
+            alias: params.alias,
           })
         : await agentService.createAgent(params);
       if (data.code === 0) {
@@ -879,6 +883,45 @@ export const useDeleteVersion = () => {
   });
 
   return { loading, isError, deleteVersion: mutateAsync };
+};
+
+export const useUpdateVersion = () => {
+  const queryClient = useQueryClient();
+  const {
+    isPending: loading,
+    isError,
+    mutateAsync,
+  } = useMutation({
+    mutationFn: async ({
+      canvasId,
+      versionId,
+      alias,
+    }: {
+      canvasId: string;
+      versionId: string;
+      alias: string;
+    }) => {
+      const { data } = await agentService.updateVersion(
+        canvasId,
+        versionId,
+        { alias },
+      );
+      return data?.code === 0;
+    },
+    onSuccess: (_result, variables) => {
+      // The alias edit does not create a version or change the DSL, but the
+      // version-list cache must reflect the new alias without a manual refresh
+      // (design G2/§4.4).
+      queryClient.invalidateQueries({
+        queryKey: AgentKeys.versionList(variables.canvasId),
+      });
+      queryClient.invalidateQueries({
+        queryKey: ['canvasVersionList', variables.canvasId],
+      });
+    },
+  });
+
+  return { loading, isError, updateVersion: mutateAsync };
 };
 
 export const useFetchVersion = (

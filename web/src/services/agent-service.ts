@@ -38,6 +38,7 @@ const {
   fetchVersionList,
   fetchVersion,
   deleteVersion,
+  updateVersion,
   getAgent,
   fetchAgentSessions,
   fetchExternalAgentInputs,
@@ -166,9 +167,22 @@ export const updateAgent = (
     description?: string | null;
     permission?: string;
     release?: string;
+    autosave?: boolean;
+    alias?: string;
   },
 ) => {
   return request(updateAgentApi(agentId), { method: 'put', data: params });
+};
+
+export const updateVersion = (
+  agentId: string,
+  versionId: string,
+  params: { alias?: string; title?: string; description?: string },
+) => {
+  return request(updateVersionApi(agentId, versionId), {
+    method: 'patch',
+    data: params,
+  });
 };
 
 export const updateAgentTags = (agentId: string, tags: string[]) => {

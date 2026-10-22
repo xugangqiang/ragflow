@@ -67,6 +67,11 @@ jest.mock('@/hooks/use-agent-request', () => ({
     isError: false,
   }),
   useSetAgent: () => ({ setAgent: jest.fn(), loading: false }),
+  useUpdateVersion: () => ({
+    updateVersion: jest.fn(),
+    loading: false,
+    isError: false,
+  }),
 }));
 
 import { VersionDialog } from './index';
@@ -80,6 +85,14 @@ describe('VersionDialog outdated marker (D1/D2/D3, T21)', () => {
     // Exactly one ! marker: the non-latest list entry. The latest is selected by
     // default, so the detail panel shows no marker.
     expect(screen.getAllByText('!')).toHaveLength(1);
+  });
+});
+
+describe('VersionDialog editable alias input (G2/section 4.4, T35)', () => {
+  it('renders an editable alias input for every version', () => {
+    render(<VersionDialog hideModal={jest.fn()} />);
+    // Two mock versions => two alias inputs (design G2/section 4.4).
+    expect(screen.getAllByPlaceholderText('flow.version.alias')).toHaveLength(2);
   });
 });
 

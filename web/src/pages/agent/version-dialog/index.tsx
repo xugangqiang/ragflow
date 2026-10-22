@@ -28,6 +28,7 @@ import {
   useFetchVersion,
   useFetchVersionList,
   useSetAgent,
+  useUpdateVersion,
 } from '@/hooks/use-agent-request';
 import { IModalProps } from '@/interfaces/common';
 import { cn } from '@/lib/utils';
@@ -68,6 +69,7 @@ export function VersionDialog({
 
   const { deleteVersion, loading: deleting } = useDeleteVersion();
   const { setAgent, loading: restoring } = useSetAgent(false);
+  const { updateVersion } = useUpdateVersion();
 
   // Backend returns the list newest-first (design section 7/E1); the first
   // entry is therefore the latest version and every other entry is an older
@@ -178,11 +180,28 @@ export function VersionDialog({
                           </AntToolTip>
                         )}
                       </div>
-                      {x.alias && (
-                        <div className="truncate text-xs text-text-secondary">
-                          {t('flow.version.alias')}: {x.alias}
-                        </div>
-                      )}
+                      <div className="mt-1">
+                        {/* Editable alias (design G2, section 4.4): PATCHes the
+                          version metadata without creating a new version or
+                          touching the DSL. Clicking the input must not also
+                          select the row. */}
+                        <Input
+                          key={`alias-${x.id}-${x.alias ?? ''}`}
+                          className="h-7 text-xs"
+                          placeholder={t('flow.version.alias')}
+                          defaultValue={x.alias ?? ''}
+                          onClick={(e) => e.stopPropagation()}
+                          onBlur={(e) => {
+                            const v = e.target.value.trim();
+                            if (v === (x.alias ?? '')) return;
+                            updateVersion({
+                              canvasId: canvasId ?? '',
+                              versionId: x.id,
+                              alias: v,
+                            });
+                          }}
+                        />
+                      </div>
                     </li>
                   );
                 })}

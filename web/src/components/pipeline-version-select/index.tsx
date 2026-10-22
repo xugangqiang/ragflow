@@ -25,28 +25,11 @@ import {
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
-// Radix Select forbids an empty-string item value: the empty string is
-// reserved for clearing the selection and showing the placeholder. The
-// track-latest option therefore uses a non-empty sentinel that is translated
-// to and from the empty form value (empty pipeline_version_id means latest).
-export const LATEST_VERSION_VALUE = '__latest__';
-
 export type PipelineVersion = {
   id: string;
   title: string;
   alias?: string | null;
 };
-
-// formValueToSelectValue maps the stored form value (empty = track the latest
-// version) to the Select item value (never empty, see LATEST_VERSION_VALUE).
-export function formValueToSelectValue(value: string): string {
-  return value === '' ? LATEST_VERSION_VALUE : value;
-}
-
-// selectValueToFormValue is the inverse of formValueToSelectValue.
-export function selectValueToFormValue(value: string): string {
-  return value === LATEST_VERSION_VALUE ? '' : value;
-}
 
 // filterVersionsByAlias applies the free-text alias filter (design A2/F1).
 // An empty or whitespace-only filter keeps every version; matching is
@@ -87,16 +70,13 @@ export function PipelineVersionSelect({
         onChange={(e) => setAliasFilter(e.target.value)}
       />
       <Select
-        value={formValueToSelectValue(value)}
-        onValueChange={(v) => onChange(selectValueToFormValue(v))}
+        value={value}
+        onValueChange={(v) => onChange(v)}
       >
         <SelectTrigger>
           <SelectValue placeholder={t('flow.version.latest')} />
         </SelectTrigger>
         <SelectContent>
-          <SelectItem value={LATEST_VERSION_VALUE}>
-            {t('flow.version.latest')}
-          </SelectItem>
           {filtered.map((v) => (
             <SelectItem key={v.id} value={v.id}>
               {v.alias ? v.alias + ' (' + v.title + ')' : v.title}
